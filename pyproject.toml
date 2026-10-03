@@ -40,7 +40,7 @@ dependencies = [
     # 2.2 wheels were compiled against NumPy 1.x and fail to initialise NumPy 2.
     # First cp313 wheels: 2.5; first cp314 wheels: 2.9.
     "torch>=2.3; python_version < '3.13'",
-    "torch>=2.9; python_version == '3.13'",
+    "torch>=2.5; python_version == '3.13'",
     "torch>=2.9; python_version >= '3.14'",
     # 0.38 breaks with autoray>=0.7 (NumpyMimic removed) and PennyLane declares
     # no upper bound of its own
