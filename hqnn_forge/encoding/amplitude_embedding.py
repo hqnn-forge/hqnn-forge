@@ -43,17 +43,18 @@ Design Rationale
     amplitude is exactly zero, which zero padding makes true of every
     sample.  It is also NaN for an amplitude that is merely small next to
     its partner: below about 1e-4 of it in float32, and in float64
-    somewhere between 1e-6 (finite, off by 5e-5) and 1e-8 of it.
+    somewhere between 1e-6 and 1e-8 of it.  Short of that edge it is
+    **finite but wrong**: in float32 off by 1e-4 at 1e-2 of the partner
+    and by 7e-3 at 1e-3, in float64 by 5e-5 at 1e-6.
   - On the 0.46 pre-releases small amplitudes differentiate correctly, and
     what an exactly-zero amplitude does depends on its partner.  If the
     partner is zero too, as with two or more padded amplitudes, the gradient
     is still **NaN** in every component.  If it is not, the gradient is
     **finite but wrong**: the zero amplitude's own component comes back as
-    0 (the true value on the pinned circuit is 1.03) and the others are
-    right.  A single padded amplitude is therefore harmless there, its
-    component being discarded, but a feature that is exactly zero, such as
-    a ReLU output of a classical encoder, silently gets no gradient, which
-    is worse than a NaN.
+    0, which it is not, and the others are right.  A single padded amplitude
+    is therefore harmless there, its component being discarded, but a
+    feature that is exactly zero, such as a ReLU output of a classical
+    encoder, silently gets no gradient, which is worse than a NaN.
   - On both, ``parameter-shift``, ``finite-diff`` and lightning's
     ``adjoint`` agree with each other, while ``adjoint`` on
     ``default.qubit`` returns **zero** for every input they handle and NaN
@@ -134,8 +135,9 @@ def _check_input_gradient(inputs: torch.Tensor, diff_method: str) -> None:
         f"Amplitude embedding cannot differentiate with respect to its inputs under "
         f"diff_method={diff_method!r}: that method differentiates the state-preparation "
         f"decomposition, whose input gradient is NaN or silently wrong whenever an "
-        f"amplitude is zero (up to PennyLane 0.45 also when it is small).  Use diff_method='backprop' on default.qubit, or "
-        f"detach the inputs (weight gradients are unaffected)."
+        f"amplitude is zero (up to PennyLane 0.45 also when it is small).  Use "
+        f"diff_method='backprop' on default.qubit, or detach the inputs (weight gradients "
+        f"are unaffected)."
     )
 
 
