@@ -37,26 +37,35 @@ Design Rationale
   it is merely small next to its partner.  How PennyLane fails there
   depends on its version, but it never raises.  Measured on 0.45.1 and on
   the 0.46.0.dev114 nightly (0.46 itself is not released yet), on the
-  three-qubit circuit the tests pin:
+  three-qubit circuit the tests pin, where amplitudes ``2k`` and ``2k + 1``
+  form a pair:
 
   - On 0.45 the input gradient is **NaN** in every component as soon as one
     amplitude is exactly zero, which zero padding makes true of every
-    sample.  It is also NaN for an amplitude that is merely small next to
-    its partner: below about 1e-4 of it in float32, and in float64
-    somewhere between 1e-6 and 1e-8 of it.  Short of that edge it is
-    **finite but wrong**: in float32 off by 1e-4 at 1e-2 of the partner
-    and by 7e-3 at 1e-3, in float64 by 5e-5 at 1e-6.
-  - On the 0.46 pre-releases small amplitudes differentiate correctly, and
-    what an exactly-zero amplitude does depends on its partner.  If the
-    partner is zero too, as with two or more padded amplitudes, the gradient
-    is still **NaN** in every component.  If it is not, the gradient is
-    **finite but wrong**: the zero amplitude's own component comes back as
-    0, which it is not, and the others are right.  A single padded amplitude
-    is therefore harmless there, its component being discarded, but a
-    feature that is exactly zero, such as a ReLU output of a classical
-    encoder, silently gets no gradient, which is worse than a NaN.
+    sample.  It is also NaN when the first amplitude of a pair is merely
+    small next to the second: below about 1e-4 of it in float32, and in
+    float64 somewhere between 1e-6 and 1e-8 of it.  Short of that edge it is
+    **finite but wrong**: in float32 off by 1e-4 at 1e-2 of the second and
+    by 0.2 at 3e-4, in float64 by 5e-5 at 1e-6.  A small second amplitude
+    does no harm.
+  - On the 0.46 pre-releases one small amplitude next to a larger partner
+    differentiates correctly, and what an exactly-zero amplitude does
+    depends on its partner.  If the partner is zero too, as with two or more
+    padded amplitudes, the gradient is still **NaN** in every component.  If
+    it is not, the gradient is **finite but wrong**: the zero amplitude's
+    own component comes back as 0, which it is not, and the others are
+    right.  A single padded amplitude is therefore harmless there, its
+    component being discarded, but a feature that is exactly zero, such as
+    a ReLU output of a classical encoder, silently gets no gradient, which
+    is worse than a NaN.
+  - On both, a pair that is small as a whole next to the other amplitudes
+    breaks the gradient without any exact zero.  In float32 it is **finite
+    but wrong** (off by 5e-2) when the pair is about 1e-4 of the others and
+    **NaN** at 1e-5; in float64 it is off by 9e-5 at 1e-7 and NaN at 1e-10.
   - On both, ``parameter-shift``, ``finite-diff`` and lightning's
-    ``adjoint`` agree with each other, while ``adjoint`` on
+    ``adjoint`` agree with each other, except that on such a small pair in
+    float64 the latter two lose accuracy first (off by 2e-5 at 1e-5 of the
+    others, where ``parameter-shift`` is right to 2e-8).  ``adjoint`` on
     ``default.qubit`` returns **zero** for every input they handle and NaN
     wherever they return NaN.
 
@@ -122,10 +131,9 @@ def _check_input_gradient(inputs: torch.Tensor, diff_method: str) -> None:
 
     Only relevant when ``inputs`` requires grad and autograd is recording.
     The rule depends on the method alone, not on the values in ``inputs``:
-    the non-backprop input gradient is NaN or silently wrong for zero
-    amplitudes (and, up to PennyLane 0.45, small ones), and which batches
-    contain those cannot be told in advance.  See the module docstring,
-    *Differentiation*.
+    the non-backprop input gradient is NaN or silently wrong for zero and
+    small amplitudes, and which batches contain those cannot be told in
+    advance.  See the module docstring, *Differentiation*.
     """
     if diff_method == "backprop" or not isinstance(inputs, torch.Tensor):
         return
@@ -135,9 +143,8 @@ def _check_input_gradient(inputs: torch.Tensor, diff_method: str) -> None:
         f"Amplitude embedding cannot differentiate with respect to its inputs under "
         f"diff_method={diff_method!r}: that method differentiates the state-preparation "
         f"decomposition, whose input gradient is NaN or silently wrong whenever an "
-        f"amplitude is zero (up to PennyLane 0.45 also when it is small).  Use "
-        f"diff_method='backprop' on default.qubit, or detach the inputs (weight gradients "
-        f"are unaffected)."
+        f"amplitude is zero or small.  Use diff_method='backprop' on default.qubit, or "
+        f"detach the inputs (weight gradients are unaffected)."
     )
 
 
@@ -309,8 +316,8 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
     Weight gradients are correct under every method.  The input gradient is
     only supported under ``"backprop"`` on ``default.qubit``; every other
     method raises ``RuntimeError`` when ``x`` requires a gradient, because
-    PennyLane returns NaN or a silently wrong value for zero amplitudes and,
-    up to 0.45, for small ones (see the module docstring).
+    PennyLane returns NaN or a silently wrong value for zero and small
+    amplitudes (see the module docstring).
 
     The check only applies when a gradient will actually be computed:
     detached inputs, and any input under ``torch.no_grad()``, are fine with

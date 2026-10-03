@@ -32,6 +32,8 @@ BATCH = 5
 # build: Version("0.46") sorts above every 0.46 pre-release and nightly.
 PENNYLANE_046 = Version(qml.__version__) >= Version("0.46.0.dev0")
 
+BOTH_DTYPES = (torch.float32, torch.float64)
+
 NON_BACKPROP = [
     ("parameter-shift", "default.qubit"),
     ("finite-diff", "default.qubit"),
@@ -370,8 +372,7 @@ class TestGradientFlow:
         """
         Refused from the method alone, even for dense float64 inputs where
         the gradient would happen to be right: whether a batch contains a
-        zero amplitude (or, up to PennyLane 0.45, a small one) cannot be
-        known in advance.
+        zero or small amplitude cannot be known in advance.
         """
         layer = _layer(diff_method, device_name, n_features=n_features).double()
         x = torch.randn(BATCH, n_features, dtype=torch.float64, requires_grad=True)
@@ -432,7 +433,7 @@ class TestGradientFlow:
         one instead gets a silently wrong gradient there: its own component
         comes back as 0 where backprop gives 1.03, the others are right.  If
         a case starts failing on some version, the guard may be relaxable
-        there.
+        there, once the small pair pinned below differentiates correctly too.
         """
         x = torch.tensor(features, dtype=dtype)
         reference = _unguarded_input_gradient("backprop", "default.qubit", x.double())
@@ -497,37 +498,81 @@ class TestGradientFlow:
             assert torch.isfinite(grad).all()
             assert (grad - reference).abs().max() > 1e-3
 
+    @pytest.mark.parametrize(("diff_method", "device_name"), NON_BACKPROP)
+    @pytest.mark.parametrize(("pair_scale", "is_nan"), [(1e-4, False), (1e-5, True)])
+    def test_small_pair_input_gradient_is_broken_on_every_version(
+        self, diff_method: str, device_name: str, pair_scale: float, is_nan: bool
+    ) -> None:
+        """
+        What PennyLane 0.46 does not fix: two partner amplitudes that are
+        both small next to the rest, with no exact zero anywhere.  In float32
+        the gradient is finite and off by 5e-2 at 1e-4, and NaN in every
+        component at 1e-5, on 0.45 and on the 0.46 pre-releases alike.  This
+        is why the guard still refuses small amplitudes on every version.
+        """
+        x = torch.tensor(
+            [0.3, 0.1, 0.5, 0.2, pair_scale, 2 * pair_scale, 0.2, 0.1], dtype=torch.float32
+        )
+        reference = _unguarded_input_gradient("backprop", "default.qubit", x.double())
+        grad = _unguarded_input_gradient(diff_method, device_name, x)
+        if is_nan:
+            assert torch.isnan(grad).all()
+        else:
+            assert torch.isfinite(grad).all()
+            assert (grad - reference).abs().max() > 1e-2
+
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     @pytest.mark.parametrize(
-        "features",
+        ("features", "nan_dtypes_045", "nan_on_046"),
         [
-            pytest.param([0.3, 0.1, 0.5, 0.2, 0.4, 0.6, 0.2, 0.1], id="dense"),
-            pytest.param([0.3, 0.1, 0.5, 0.2, 0.6e-5, 0.6, 0.2, 0.1], id="small"),
-            pytest.param([0.3, 0.1, 0.5, 0.2, 0.0, 0.6, 0.2, 0.1], id="zero-feature"),
-            pytest.param([0.3, 0.1, 0.5, 0.2, 0.4, 0.6, 0.2], id="padded-by-one"),
-            pytest.param([0.3, 0.1, 0.5, 0.2, 0.4, 0.6], id="padded-by-two"),
+            pytest.param([0.3, 0.1, 0.5, 0.2, 0.4, 0.6, 0.2, 0.1], (), False, id="dense"),
+            pytest.param(
+                [0.3, 0.1, 0.5, 0.2, 0.6e-5, 0.6, 0.2, 0.1], (torch.float32,), False, id="small"
+            ),
+            pytest.param(
+                [0.3, 0.1, 0.5, 0.2, 1e-4, 2e-4, 0.2, 0.1], (), False, id="small-pair-wrong"
+            ),
+            pytest.param(
+                [0.3, 0.1, 0.5, 0.2, 1e-10, 2e-10, 0.2, 0.1],
+                BOTH_DTYPES,
+                True,
+                id="small-pair-nan",
+            ),
+            pytest.param(
+                [0.3, 0.1, 0.5, 0.2, 0.0, 0.6, 0.2, 0.1], BOTH_DTYPES, False, id="zero-feature"
+            ),
+            pytest.param(
+                [0.3, 0.1, 0.5, 0.2, 0.4, 0.6, 0.2], BOTH_DTYPES, False, id="padded-by-one"
+            ),
+            pytest.param([0.3, 0.1, 0.5, 0.2, 0.4, 0.6], BOTH_DTYPES, True, id="padded-by-two"),
         ],
     )
     def test_default_qubit_adjoint_input_gradient_is_zero_or_nan(
-        self, dtype: torch.dtype, features: list[float]
+        self,
+        dtype: torch.dtype,
+        features: list[float],
+        nan_dtypes_045: tuple[torch.dtype, ...],
+        nan_on_046: bool,
     ) -> None:
         """
         ``adjoint`` on ``default.qubit`` returns NaN for the input gradient
-        where parameter-shift returns NaN, and exactly zero everywhere else,
-        although backprop shows the gradient is not zero.  Which inputs
-        parameter-shift returns NaN for depends on the PennyLane version and
-        is pinned by the tests above, so the rule holds on 0.45 and on the
-        0.46 pre-releases without a version switch here.
+        where parameter-shift returns NaN, and exactly zero everywhere else:
+        where parameter-shift is right, where it is silently wrong, and
+        although backprop shows the gradient is not zero.  Which inputs give
+        NaN depends on the PennyLane version and, for a small amplitude on
+        0.45, on the dtype.
         """
+        is_nan = nan_on_046 if PENNYLANE_046 else dtype in nan_dtypes_045
         x = torch.tensor(features, dtype=dtype)
         reference = _unguarded_input_gradient("backprop", "default.qubit", x.double())
         shifted = _unguarded_input_gradient("parameter-shift", "default.qubit", x)
         grad = _unguarded_input_gradient("adjoint", "default.qubit", x)
         assert reference.abs().max() > 0.5
-        if torch.isnan(shifted).any():
+        if is_nan:
             assert torch.isnan(shifted).all()
             assert torch.isnan(grad).all()
         else:
+            assert torch.isfinite(shifted).all()
             assert (grad == 0).all()
 
     @pytest.mark.parametrize("diff_method", ["adjoint", "parameter-shift", "finite-diff"])
