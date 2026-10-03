@@ -20,11 +20,15 @@ Loading uses NumPy only, like the rest of the library.
 
 from __future__ import annotations
 
+import codecs
 import os
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
-from typing import NamedTuple
+from typing import IO, NamedTuple, TextIO
 
 import numpy as np
 import numpy.typing as npt
@@ -39,6 +43,16 @@ FEATURE_NAMES: tuple[str, ...] = ("Time", *(f"V{i}" for i in range(1, 29)), "Amo
 COLUMNS: tuple[str, ...] = (*FEATURE_NAMES, "Class")
 EXPECTED_ROWS = 284_807
 EXPECTED_FRAUDS = 492
+#: The archive the CLI writes next to the CSV before ``--unzip`` extracts it.
+_ZIP_NAME = "creditcardfraud.zip"
+#: Seconds without any output from the CLI after which a download is stalled.
+#: Its progress bar redraws several times a second while bytes arrive; the
+#: silent unzip of the ~150 MB CSV at the end takes seconds, not minutes.
+_STALL_TIMEOUT = 120.0
+#: Seconds a whole download may take: ~150 MB at well under 1 MB/s.
+_DOWNLOAD_TIMEOUT = 3600.0
+#: Characters of CLI output kept for an error message.
+_TAIL_CHARS = 2000
 
 
 class DatasetNotFoundError(FileNotFoundError):
@@ -95,7 +109,98 @@ def _resolve_path(path: str | os.PathLike[str] | None) -> Path:
     return (Path(base) if base else DEFAULT_DIR) / FILE_NAME
 
 
-def _download(target: Path) -> None:
+def _run_cli(
+    cmd: list[str], *, timeout: float | None, stall_timeout: float | None
+) -> tuple[int, str]:
+    """
+    Run ``cmd``, passing its output through to this process's stdout and
+    stderr as it arrives, and return ``(returncode, tail of its output)``.
+
+    Output is read in raw chunks, not lines: the Kaggle CLI's progress bar
+    redraws with carriage returns, and a line reader would see nothing until
+    the download ended.  Every chunk counts as a sign of life for
+    ``stall_timeout``.
+
+    Raises
+    ------
+    DatasetDownloadError
+        After killing the process, when it prints nothing for
+        ``stall_timeout`` seconds (a stalled connection) or runs longer than
+        ``timeout`` seconds in total (too large or too slow), with a message
+        saying which.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    lock = threading.Lock()
+    last_output = [time.monotonic()]
+    tail: list[str] = []
+
+    def pump(source: IO[bytes], sink: TextIO | None) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        read = getattr(source, "read1", source.read)
+        while chunk := read(4096):
+            text = decoder.decode(chunk)
+            if sink is not None:
+                try:
+                    sink.write(text)
+                    sink.flush()
+                except (OSError, ValueError, AttributeError):
+                    # A closed or broken console, one that cannot encode the
+                    # text (UnicodeEncodeError is a ValueError), or a stand-in
+                    # without write().  Echoing is best effort; draining is not:
+                    # a pump that died would let the pipe fill, block the
+                    # CLI and have it misreported as a stall.
+                    sink = None
+            with lock:
+                last_output[0] = time.monotonic()
+                tail.append(text)
+                joined = "".join(tail)[-_TAIL_CHARS:]
+                tail[:] = [joined]
+
+    assert proc.stdout is not None and proc.stderr is not None
+    pumps = [
+        threading.Thread(target=pump, args=(proc.stdout, sys.stdout), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, sys.stderr), daemon=True),
+    ]
+    for thread in pumps:
+        thread.start()
+
+    start = time.monotonic()
+    reason = None
+    try:
+        while proc.poll() is None:
+            now = time.monotonic()
+            with lock:
+                silent = now - last_output[0]
+            if timeout is not None and now - start > timeout:
+                reason = f"did not finish within {timeout:g} s (download too large or too slow)"
+            elif stall_timeout is not None and silent > stall_timeout:
+                reason = f"stalled: no output for {stall_timeout:g} s (connection stalled)"
+            if reason is not None:
+                break
+            time.sleep(0.05)
+    finally:
+        # Also on Ctrl-C: the CLI must not keep writing into the directory.
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for thread in pumps:
+            thread.join(timeout=5)
+    output = "".join(tail).strip()
+    if reason is not None:
+        raise DatasetDownloadError(
+            f"Kaggle download {reason}; the process was stopped.  "
+            f"Retry, or run it by hand:\n    {' '.join(cmd)}"
+            + (f"\nLast output:\n{output}" if output else "")
+        )
+    return proc.returncode, output
+
+
+def _download(
+    target: Path,
+    *,
+    timeout: float | None = _DOWNLOAD_TIMEOUT,
+    stall_timeout: float | None = _STALL_TIMEOUT,
+) -> None:
     # The archive unpacks under FILE_NAME, so any other file name can never be
     # produced.  Refuse up front rather than after a ~150 MB download.
     if target.name != FILE_NAME:
@@ -110,15 +215,27 @@ def _download(target: Path) -> None:
             f"then retry, or download manually:\n    {' '.join(_download_command(target.parent))}"
         )
     target.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        _download_command(target.parent), capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        raise DatasetDownloadError(
-            f"Kaggle download failed (exit {result.returncode}):\n{result.stderr.strip()}"
+    # Whatever this call creates and does not finish is removed on failure, so a
+    # retry does not find a truncated CSV (or a half-written archive) and take
+    # it for the dataset.  Files that were there before are never touched.
+    new_files = [
+        target.parent / name
+        for name in (FILE_NAME, _ZIP_NAME)
+        if not (target.parent / name).exists()
+    ]
+    try:
+        returncode, output = _run_cli(
+            _download_command(target.parent), timeout=timeout, stall_timeout=stall_timeout
         )
-    if not target.exists():
-        raise DatasetDownloadError(f"Kaggle download finished but {target} was not created.")
+        if returncode != 0:
+            raise DatasetDownloadError(f"Kaggle download failed (exit {returncode}):\n{output}")
+        if not target.exists():
+            raise DatasetDownloadError(f"Kaggle download finished but {target} was not created.")
+    except BaseException:
+        # BaseException: a Ctrl-C mid-download must not leave a partial file either.
+        for leftover in new_files:
+            leftover.unlink(missing_ok=True)
+        raise
 
 
 def _read_header(path: Path) -> tuple[list[str], bool]:
@@ -153,6 +270,14 @@ def load_credit_card_fraud(
     download:
         If the file is missing, fetch it with the Kaggle CLI into the file's
         directory.  Requires ``kaggle`` on ``PATH`` and configured credentials.
+        The CSV is ~150 MB once unpacked: seconds on a fast link, several
+        minutes on a slow one.  The CLI's progress bar is passed
+        through to this process's stderr as it runs.  The download is
+        stopped if the CLI prints nothing for 120 s (a stalled connection)
+        or runs past 3600 s in total; the error then repeats the command, to
+        run by hand on a link too slow for that.  On any failure,
+        including a timeout or Ctrl-C, the files this call created are
+        removed, so a retry starts clean.
     drop_time:
         Drop the ``Time`` column (seconds since the first transaction), which
         the benchmark excludes as a leakage-prone ordering feature.
@@ -170,7 +295,8 @@ def load_credit_card_fraud(
         the Kaggle command that fetches it.
     DatasetDownloadError
         ``download`` is True but the file could not be fetched: the Kaggle CLI
-        is missing, the command failed, or it produced no file.  Distinct from
+        is missing, the command failed, it produced no file, it stalled, or it
+        ran past its total time -- the message says which.  Distinct from
         :class:`DatasetNotFoundError` so that retrying with ``download=True``
         after catching that one cannot loop.
     ValueError
@@ -187,7 +313,9 @@ def load_credit_card_fraud(
                 f"or pass download=True, or point path at the file or its directory "
                 f"(${DATA_DIR_ENV} names the directory)."
             )
-        _download(csv)
+        # Looked up at call time, so a test can monkeypatch them.  They are
+        # deliberately not public yet; see #390.
+        _download(csv, timeout=_DOWNLOAD_TIMEOUT, stall_timeout=_STALL_TIMEOUT)
 
     header, has_rows = _read_header(csv)
     if tuple(header) != COLUMNS:

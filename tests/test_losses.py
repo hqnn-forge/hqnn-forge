@@ -58,6 +58,8 @@ class TestFocalLoss:
             FocalLoss(alpha=0.0)
         with pytest.raises(ValueError, match="gamma"):
             FocalLoss(gamma=-1.0)
+        with pytest.raises(ValueError, match="reduction"):
+            FocalLoss(reduction="avg")
 
 
 class TestClassWeights:
@@ -106,6 +108,16 @@ class TestWeightedBCELoss:
         per_sample = weighted_bce_loss(logits, targets, self.CLASS_WEIGHTS, reduction="none")
         unweighted = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         torch.testing.assert_close(per_sample, unweighted * self.CLASS_WEIGHTS)
+
+    # "Mean" and "avg" used to fall through and return the per-sample tensor.
+    @pytest.mark.parametrize("reduction", ["Mean", "avg", "", "None"])
+    def test_rejects_unknown_reduction(
+        self, sample_logits: torch.Tensor, sample_targets: torch.Tensor, reduction: str
+    ) -> None:
+        with pytest.raises(ValueError, match="reduction must be 'mean', 'sum', or 'none'"):
+            weighted_bce_loss(
+                sample_logits, sample_targets, self.CLASS_WEIGHTS, reduction=reduction
+            )
 
     def test_column_logits_are_flattened(
         self, sample_logits: torch.Tensor, sample_targets: torch.Tensor

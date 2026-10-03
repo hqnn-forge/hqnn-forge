@@ -15,7 +15,7 @@ init-strategy variance) stay in the per-model files.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict, get_type_hints
 
 import pytest
 import torch
@@ -24,6 +24,7 @@ import torch.nn as nn
 from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.models import (
     BinaryClassifierBase,
+    ClassicalBaseline,
     HybridBinaryClassifier,
     ParallelHybridClassifier,
 )
@@ -37,7 +38,8 @@ FIXTURE_SEED = 0
 
 # The concrete classes. Fixtures and tests are typed with these rather than
 # BinaryClassifierBase, which has no __init__ of its own (so mypy would accept any
-# constructor arguments) and declares no head, encoder or quantum layer.
+# constructor arguments) and declares only the head: ClassicalBaseline has no
+# classical_encoder or quantum_layer, so reads of those need the hybrid classes.
 ConcreteClassifier = HybridBinaryClassifier | ParallelHybridClassifier
 
 CLASSIFIERS = [
@@ -97,6 +99,37 @@ class TestBaseClass:
 
         with pytest.raises(NotImplementedError, match="Incomplete must implement forward"):
             Incomplete()(torch.zeros(1, 3))
+
+    def test_declared_attributes_exist_on_every_subclass(self) -> None:
+        """What the base declares, mypy accepts on any subclass; it must exist at runtime.
+
+        Every ``BinaryClassifierBase`` subclass shipped in ``hqnn_forge`` is
+        built and checked against every annotation on the base, so declaring an
+        attribute one model lacks (``quantum_layer`` on ``ClassicalBaseline``)
+        fails here instead of as an ``AttributeError`` in user code.
+        """
+        build_kwargs: dict[type[BinaryClassifierBase], dict[str, Any]] = {
+            HybridBinaryClassifier: dict(n_input_features=4, n_qubits=2, **DEVICE_KWARGS),
+            ParallelHybridClassifier: dict(n_input_features=4, n_qubits=2, **DEVICE_KWARGS),
+            ClassicalBaseline: dict(n_input_features=4, hidden_dims=[3]),
+        }
+        pending = list(BinaryClassifierBase.__subclasses__())
+        shipped: set[type[BinaryClassifierBase]] = set()
+        while pending:
+            cls = pending.pop()
+            pending.extend(cls.__subclasses__())
+            if cls.__module__.startswith("hqnn_forge."):
+                shipped.add(cls)
+        assert shipped == set(build_kwargs), "add the new subclass to build_kwargs"
+
+        hints = get_type_hints(BinaryClassifierBase)
+        assert "head" in hints
+        for cls, kwargs in build_kwargs.items():
+            model = cls(**kwargs)
+            for name, hint in hints.items():
+                assert hasattr(model, name), f"{cls.__name__} lacks declared {name!r}"
+                if isinstance(hint, type):
+                    assert isinstance(getattr(model, name), hint), (cls.__name__, name)
 
 
 class TestForwardShape:

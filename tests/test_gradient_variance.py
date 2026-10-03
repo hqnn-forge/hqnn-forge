@@ -13,6 +13,8 @@ which quotes its own ranges.
 from __future__ import annotations
 
 import math
+import warnings
+from typing import TypedDict
 
 import pennylane as qml
 import pytest
@@ -24,11 +26,19 @@ from hqnn_forge.diagnostics import (
     gradient_variance,
     gradient_variance_sweep,
 )
+from hqnn_forge.diagnostics.gradients import InitName
 from hqnn_forge.encoding import DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod, RotationAxis
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier
 
-CPU = dict(device_name="default.qubit", diff_method="backprop")
+
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
+
+
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
 
 
 def _layer(n_qubits: int, n_layers: int = 2) -> QuantumEncodingLayer:
@@ -37,14 +47,6 @@ def _layer(n_qubits: int, n_layers: int = 2) -> QuantumEncodingLayer:
 
 def _gen(seed: int = 0) -> torch.Generator:
     return torch.Generator().manual_seed(seed)
-
-
-def _lightning_available() -> bool:
-    try:
-        qml.device("lightning.qubit", wires=1)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _two_weight_layer() -> torch.nn.Module:
@@ -64,6 +66,9 @@ def _two_weight_layer() -> torch.nn.Module:
             self.n_qubits = 2
             self.qlayer = qml.qnn.TorchLayer(circuit, {"w1": (1,), "w2": (1,)})
 
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.qlayer(x)
+
     return TwoWeightLayer()
 
 
@@ -81,6 +86,9 @@ def _result(init: str, n_qubits: int, total: float) -> GradientVarianceResult:
     )
 
 
+# Every test that reads ``measured`` is marked slow, not only one of them: the
+# module fixture's cost (most of this module's run time) goes to whichever of
+# its tests runs first, so deselecting one test would only move it to the next.
 @pytest.fixture(scope="module")
 def measured() -> dict[tuple[str, int, float], float]:
     """
@@ -100,6 +108,7 @@ def measured() -> dict[tuple[str, int, float], float]:
     }
 
 
+@pytest.mark.slow
 class TestMeasuredInitClaims:
     """
     The statements in hqnn_forge.initializers.restricted_variance's
@@ -140,7 +149,62 @@ class TestMeasuredInitClaims:
         assert 0.6 < decay["restricted"] / decay["uniform"] < 1.6, decay
 
 
+@pytest.fixture(scope="module")
+def entangler_sweep(measured: dict) -> dict[tuple[str, str, int], float]:
+    """
+    Total gradient variance per (entangler, init, n_qubits), 2 layers, inputs
+    over (-π, π), seed 0: only the keys TestBrickworkDecay reads.  The ring
+    comes from ``measured`` (200 draws; total = mean × 6n weights), the
+    brickwork runs take 150 draws.
+    """
+    out: dict[tuple[str, str, int], float] = {
+        ("ring", "uniform", n): measured["uniform", n, math.pi] * 6 * n for n in (4, 8)
+    }
+
+    def build(q: int, l: int) -> QuantumEncodingLayer:
+        return QuantumEncodingLayer(n_qubits=q, n_layers=l, entangler="brickwork", **CPU)
+
+    for init, qubit_counts in (("uniform", (4, 8)), ("restricted", (8,))):
+        for r in gradient_variance_sweep(
+            build, qubit_counts, n_samples=150, init=init, generator=_gen()
+        ):
+            out["brickwork", init, r.n_qubits] = r.total_variance
+    return out
+
+
+@pytest.mark.slow
+class TestBrickworkDecay:
+    """
+    The brickwork measurements in hqnn_forge.initializers.restricted_variance
+    (#161).  Over five seeds at 300 draws, total variance from 4 to 8 qubits
+    fell 4.1–5.4x for the ring and 0.90–1.02x for brickwork, and brickwork's
+    restricted/uniform ratio at 8 qubits was 0.77–0.83.  At the 150 draws
+    used here for brickwork, over six seeds: 0.88–1.08x and 0.70–0.95.  The
+    ring's decay comes from ``measured``, whose per-weight 8.1–10.7x
+    (TestMeasuredInitClaims) is 4.1–5.4x in total.
+    """
+
+    @staticmethod
+    def _decay(sweep: dict, entangler: str, init: str = "uniform") -> float:
+        return sweep[entangler, init, 4] / sweep[entangler, init, 8]
+
+    def test_brickwork_decays_slower_than_the_ring(self, entangler_sweep: dict) -> None:
+        ring, brickwork = (self._decay(entangler_sweep, e) for e in ("ring", "brickwork"))
+        assert ring > 3.0, ring
+        assert brickwork < 1.5, brickwork
+        assert ring > 2.5 * brickwork, (ring, brickwork)
+
+    def test_restricted_init_costs_variance_on_brickwork(self, entangler_sweep: dict) -> None:
+        """Below 1: at 8 qubits the restricted init loses variance, it never adds it."""
+        ratio = (
+            entangler_sweep["brickwork", "restricted", 8]
+            / entangler_sweep["brickwork", "uniform", 8]
+        )
+        assert 0.5 < ratio < 1.0, ratio
+
+
 class TestPhysics:
+    @pytest.mark.slow
     def test_uniform_init_variance_decays_with_qubits(self) -> None:
         small = gradient_variance(_layer(2), n_samples=100, generator=_gen())
         large = gradient_variance(_layer(6), n_samples=100, generator=_gen())
@@ -155,6 +219,13 @@ class TestPhysics:
 
 
 class TestMechanics:
+    @pytest.mark.parametrize("init", ["restricted", "block_local"])
+    def test_toy_sizes_do_not_warn(self, init: InitName) -> None:
+        """Comparing inits where restricted restricts nothing is the point, not a misuse (#167)."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            gradient_variance(_layer(2, 1), n_samples=3, init=init, generator=_gen())
+
     def test_result_fields(self) -> None:
         r = gradient_variance(_layer(3, 2), n_samples=5, init="block_local", input_scale=1.0)
         assert isinstance(r, GradientVarianceResult)
@@ -262,18 +333,16 @@ class TestMechanics:
         with pytest.raises(TypeError, match="got Linear"):
             gradient_variance(torch.nn.Linear(2, 1))
 
-    def test_several_weight_tensors_are_rejected(self) -> None:
-        """Measuring one of two weight tensors would understate total_variance."""
-        with pytest.raises(NotImplementedError, match="w1, w2"):
+    def test_several_tensors_without_a_weights_tensor_are_refused(self) -> None:
+        """With w1 and w2, which one holds the angles the init draws is a guess."""
+        with pytest.raises(ValueError, match="w1, w2.*none named 'weights'"):
             gradient_variance(_two_weight_layer(), n_samples=3)
 
-    def test_reuploading_layer_is_measured_only_without_input_scaling(self) -> None:
-        """Trainable input_scaling is a second tensor next to weights, so it is refused."""
-        plain = DataReuploadingLayer(n_qubits=2, n_layers=2, **CPU)
-        assert gradient_variance(plain, n_samples=3).per_parameter.shape == (2, 2, 3)
-        scaled = DataReuploadingLayer(n_qubits=2, n_layers=2, trainable_input_scaling=True, **CPU)
-        with pytest.raises(NotImplementedError, match="input_scaling, weights"):
-            gradient_variance(scaled, n_samples=3)
+    def test_single_tensor_keeps_its_per_parameter_shape(self) -> None:
+        result = gradient_variance(_layer(2), n_samples=3)
+        assert result.per_parameter.shape == (2, 2, 3)
+        assert list(result.per_tensor) == ["weights"]
+        torch.testing.assert_close(result.per_tensor["weights"], result.per_parameter)
 
     def test_equality_is_a_bool_and_the_result_hashes(self) -> None:
         """per_parameter is compare=False, so == does not return a Tensor."""
@@ -284,16 +353,141 @@ class TestMechanics:
         assert {a: "seen"}[b] == "seen"
 
 
+class TestSeveralTensors:
+    """
+    #180: a layer with several trainable tensors -- DataReuploadingLayer with
+    trainable_input_scaling -- is measured over its whole gradient vector.
+    The init draws the rotation angles; input_scaling keeps its values.
+    """
+
+    @staticmethod
+    def _scaled(rotation: RotationAxis = "X") -> DataReuploadingLayer:
+        torch.manual_seed(0)
+        return DataReuploadingLayer(
+            n_qubits=2, n_layers=2, rotation=rotation, trainable_input_scaling=True, **CPU
+        )
+
+    @pytest.mark.parametrize(("rotation", "scaling_shape"), [("X", (2, 2)), ("Z", (1, 2))])
+    def test_is_measured_over_every_tensor(
+        self, rotation: RotationAxis, scaling_shape: tuple
+    ) -> None:
+        result = gradient_variance(self._scaled(rotation), n_samples=5, generator=_gen())
+        assert set(result.per_tensor) == {"weights", "input_scaling"}
+        assert result.per_tensor["weights"].shape == (2, 2, 3)
+        assert result.per_tensor["input_scaling"].shape == scaling_shape
+        parts = [v.sum() for v in result.per_tensor.values()]
+        assert result.total_variance == pytest.approx(float(sum(parts)))
+        n_entries = sum(v.numel() for v in result.per_tensor.values())
+        assert result.per_parameter.shape == (n_entries,)
+        assert result.mean_variance == pytest.approx(result.total_variance / n_entries)
+        torch.testing.assert_close(
+            result.per_parameter,
+            torch.cat([v.reshape(-1) for v in result.per_tensor.values()]),
+        )
+        assert float(result.per_tensor["input_scaling"].sum()) > 0.0
+
+    def test_matches_a_hand_rolled_estimate(self) -> None:
+        layer = self._scaled()
+        gen = _gen(3)
+        result = gradient_variance(layer, n_samples=6, generator=_gen(3))
+        w, s = layer.qlayer.weights, layer.qlayer.input_scaling
+        w_before, s_before = w.detach().clone(), s.detach().clone()
+        grads_w, grads_s = [], []
+        for _ in range(6):
+            with torch.no_grad():
+                w.copy_(torch.rand(w.shape, generator=gen) * 2 * math.pi)
+            x = (torch.rand(1, 2, generator=gen) * 2 - 1) * math.pi
+            g_w, g_s = torch.autograd.grad(layer(x)[..., 0].sum(), [w, s])
+            grads_w.append(g_w.double())
+            grads_s.append(g_s.double())
+        with torch.no_grad():
+            w.copy_(w_before)
+        torch.testing.assert_close(result.per_tensor["weights"], torch.stack(grads_w).var(dim=0))
+        torch.testing.assert_close(
+            result.per_tensor["input_scaling"], torch.stack(grads_s).var(dim=0)
+        )
+        torch.testing.assert_close(s.detach(), s_before, rtol=0, atol=0)
+
+    def test_every_tensor_and_grad_is_restored(self) -> None:
+        layer = self._scaled()
+        before = {k: v.detach().clone() for k, v in layer.qlayer.qnode_weights.items()}
+        marker = torch.ones_like(layer.qlayer.input_scaling)
+        layer.qlayer.input_scaling.grad = marker
+        gradient_variance(layer, n_samples=3)
+        for name, value in layer.qlayer.qnode_weights.items():
+            torch.testing.assert_close(value.detach(), before[name], rtol=0, atol=0)
+        assert layer.qlayer.input_scaling.grad is marker
+        assert layer.qlayer.weights.grad is None
+
+    def test_to_dict_is_unchanged(self) -> None:
+        d = gradient_variance(self._scaled(), n_samples=3).to_dict()
+        assert set(d) == {
+            "layer_type",
+            "n_qubits",
+            "n_layers",
+            "init",
+            "input_scale",
+            "n_samples",
+            "total_variance",
+            "mean_variance",
+        }
+
+    def test_fisher_measures_every_tensor_too(self) -> None:
+        # Once refused (#308); see tests/test_fisher_multi_tensor.py.
+        from hqnn_forge.diagnostics import fisher_information_matrix
+
+        layer = self._scaled()
+        spectrum = fisher_information_matrix(layer, torch.zeros(2, 2))
+        assert spectrum.n_params == sum(p.numel() for p in layer.qlayer.qnode_weights.values())
+
+    def test_fisher_measures_several_tensors_without_a_weights_tensor(self) -> None:
+        """No init is drawn, so the angle tensor's ambiguity does not matter."""
+        from hqnn_forge.diagnostics import effective_dimension, fisher_information_matrix
+
+        layer = _two_weight_layer()
+        qlayer = layer.qlayer
+        assert isinstance(qlayer, qml.qnn.TorchLayer)
+        with torch.no_grad():
+            qlayer.w1.fill_(0.3)
+            qlayer.w2.fill_(-0.7)
+        x = torch.tensor([[0.2, -0.5], [1.1, 0.4]])
+        spectrum = fisher_information_matrix(layer, x)
+        assert spectrum.parameter_slices == {"w1": slice(0, 1), "w2": slice(1, 2)}
+        # <Z_0> = cos(x0 + w1), <Z_1> = cos(x1) cos(w2): J is diagonal, so is F.
+        expected = torch.zeros(2, 2, dtype=torch.float64)
+        expected[0, 0] = torch.sin(x[:, 0].double() + 0.3).pow(2).mean()
+        expected[1, 1] = (
+            (torch.cos(x[:, 1].double()) * torch.sin(torch.tensor(-0.7).double())).pow(2).mean()
+        )
+        torch.testing.assert_close(spectrum.matrix, expected, atol=1e-6, rtol=1e-5)
+        # The effective dimension draws an init, so there the ambiguity still refuses.
+        with pytest.raises(ValueError, match="ambiguous"):
+            effective_dimension(layer, torch.zeros(80, 2))
+
+
 class TestDefaultDevice:
-    @pytest.mark.skipif(not _lightning_available(), reason="pennylane-lightning not installed")
+    @pytest.mark.requires_lightning
     @pytest.mark.parametrize("layer_cls", [QuantumEncodingLayer, IQPEncodingLayer])
-    def test_estimates_on_the_library_default_device(self, layer_cls: type) -> None:
-        """Every other test pins default.qubit/backprop; the default is lightning/adjoint."""
+    def test_matches_default_qubit_on_the_library_default_device(self, layer_cls: type) -> None:
+        """
+        Every other test pins default.qubit/backprop; the default is
+        lightning/adjoint.  The same draws on both must give the same
+        per-parameter variances, so wrong adjoint gradients or draws that are
+        not reproduced on lightning fail here (they agree to about 3e-8).
+        """
+        torch.manual_seed(0)
         layer = layer_cls(n_qubits=3, n_layers=2)
+        qnode = layer.qlayer.qnode
+        assert (qnode.device.name, qnode.diff_method) == ("lightning.qubit", "adjoint")
+        reference = layer_cls(n_qubits=3, n_layers=2, **CPU)
+        reference.load_state_dict(layer.state_dict())
         before = layer.qlayer.weights.detach().clone()
-        result = gradient_variance(layer, n_samples=5, generator=_gen())
+
+        result = gradient_variance(layer, n_samples=5, generator=_gen(1))
+        expected = gradient_variance(reference, n_samples=5, generator=_gen(1))
+
         assert result.total_variance > 0.0
-        assert result.per_parameter.shape == before.shape
+        torch.testing.assert_close(result.per_parameter, expected.per_parameter, rtol=0, atol=1e-6)
         torch.testing.assert_close(layer.qlayer.weights.detach(), before, rtol=0, atol=0)
 
 

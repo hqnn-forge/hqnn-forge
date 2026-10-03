@@ -13,21 +13,14 @@ import pytest
 import torch
 
 from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 from hqnn_forge.noise import NoiseSweepPoint, apply_depolarizing_noise, noise_sweep
 
 N_QUBITS = 3
-
-
-def _lightning_available() -> bool:
-    try:
-        import pennylane as qml
-
-        qml.device("lightning.qubit", wires=1)
-        return True
-    except Exception:  # noqa: BLE001 - any failure means "not installed"
-        return False
+Layer = QuantumEncodingLayer | IQPEncodingLayer
+Model = HybridBinaryClassifier | ParallelHybridClassifier
 
 
 # The noisy QNode is rebuilt on default.mixed with backprop, which drops the
@@ -40,23 +33,28 @@ NON_BACKPROP_CONFIGS = [
         "lightning.qubit",
         "adjoint",
         id="lightning.qubit/adjoint",
-        marks=pytest.mark.skipif(
-            not _lightning_available(), reason="pennylane-lightning not installed"
-        ),
+        marks=pytest.mark.requires_lightning,
     ),
 ]
 
 
 def _layer(
-    cls: type = QuantumEncodingLayer,
-    diff_method: str = "backprop",
-    device_name: str = "default.qubit",
-) -> torch.nn.Module:
+    cls: type[Layer] = QuantumEncodingLayer,
+    diff_method: DiffMethod = "backprop",
+    device_name: DeviceName = "default.qubit",
+) -> Layer:
     torch.manual_seed(0)
     return cls(n_qubits=N_QUBITS, n_layers=2, device_name=device_name, diff_method=diff_method)
 
 
-def _model(cls: type = HybridBinaryClassifier) -> torch.nn.Module:
+def _weights(layer: Layer) -> torch.Tensor:
+    """The layer's variational weights, narrowed from ``nn.Module.__getattr__``."""
+    weights = layer.qlayer.weights
+    assert isinstance(weights, torch.Tensor)
+    return weights
+
+
+def _model(cls: type[Model] = HybridBinaryClassifier) -> Model:
     torch.manual_seed(0)
     return cls(
         n_input_features=5,
@@ -96,7 +94,7 @@ class TestNoiseEffect:
 
     @pytest.mark.parametrize(("device_name", "diff_method"), NON_BACKPROP_CONFIGS)
     def test_end_noise_damps_exactly_for_non_backprop_layers(
-        self, device_name: str, diff_method: str, x: torch.Tensor
+        self, device_name: DeviceName, diff_method: DiffMethod, x: torch.Tensor
     ) -> None:
         # The noisy QNode ignores the layer's own device and differentiation
         # method, so the analytic damping has to hold for a layer that was not
@@ -128,14 +126,14 @@ class TestNoiseEffect:
     def test_weights_are_untouched_and_qnode_restored(self, x: torch.Tensor) -> None:
         layer = _layer(diff_method="parameter-shift")
         qnode = layer.qlayer.qnode
-        before = layer.qlayer.weights.detach().clone()
+        before = _weights(layer).detach().clone()
         with torch.no_grad():
             clean = layer(x)
             with apply_depolarizing_noise(layer, 0.1):
                 assert layer.qlayer.qnode is not qnode
             assert layer.qlayer.qnode is qnode
             torch.testing.assert_close(layer(x), clean, rtol=0, atol=0)
-        torch.testing.assert_close(layer.qlayer.weights.detach(), before, rtol=0, atol=0)
+        torch.testing.assert_close(_weights(layer).detach(), before, rtol=0, atol=0)
 
     def test_restored_after_exception(self) -> None:
         layer = _layer()
@@ -151,11 +149,12 @@ class TestNoiseEffect:
         layer = _layer()
         with apply_depolarizing_noise(layer, 0.1):
             layer(x).sum().backward()
-        assert layer.qlayer.weights.grad is not None
-        assert layer.qlayer.weights.grad.abs().sum() > 0
+        grad = _weights(layer).grad
+        assert grad is not None
+        assert grad.abs().sum() > 0
 
     @pytest.mark.parametrize("cls", [HybridBinaryClassifier, ParallelHybridClassifier])
-    def test_models(self, cls: type) -> None:
+    def test_models(self, cls: type[Model]) -> None:
         model = _model(cls)
         X = torch.randn(4, 5)
         with apply_depolarizing_noise(model, 0.1) as m:
@@ -237,8 +236,9 @@ class TestSweep:
         torch.testing.assert_close(points[0].probabilities, model.predict_proba(X), rtol=0, atol=0)
         # More noise pushes the quantum features towards 0, so the output depends
         # less on the input: the probabilities spread less around 0.5
-        scores = [pt.score for pt in points]
-        assert scores[0] > scores[2]
+        first, last = points[0].score, points[2].score
+        assert first is not None and last is not None
+        assert first > last
 
     def test_sweep_without_scoring_accepts_an_iterator(self) -> None:
         points = noise_sweep(_model(), torch.randn(2, 5), (p for p in [0.2]))

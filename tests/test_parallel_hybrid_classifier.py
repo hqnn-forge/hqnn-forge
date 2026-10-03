@@ -146,14 +146,13 @@ class TestGradientFlow:
 # and at 4 qubits the per-layer std estimate is far too noisy to distinguish the
 # two strategies without flaking (cf. #21).
 #
-# The strategies are told apart by the slope of log(std_l) against log(l + 1),
-# fitted over all layers: 0 for restricted, -0.5 for block_local.  A first/last
-# std ratio uses only two layers and its spread overlaps a fixed threshold (0.3%
-# of seeds at 16 qubits / 8 layers).  At 16 qubits / 16 layers the slope has
-# sd 0.034 under either strategy, so the +/-0.25 band sits ~7 sd out — no failures
-# over 500 000 simulated draws — and, being half the gap between the targets, a
-# model that ignores init_strategy cannot pass both tests.  The margin, not
-# INIT_SEED, is what keeps these stable when __init__ changes re-roll the RNG.
+# ``restricted`` is checked by the slope of log(std_l) against log(l + 1),
+# fitted over all layers: 0 for one shared sigma.  At 16 qubits / 16 layers the
+# slope has sd 0.034, so the +/-0.25 band sits ~7 sd out — no failures over
+# 500 000 simulated draws.  ``block_local`` is checked exactly against
+# ``restricted`` built from the same seed, so it needs no tolerance.  The
+# margin, not INIT_SEED, is what keeps these stable when __init__ changes
+# re-roll the RNG.
 INIT_N_QUBITS = 16
 INIT_N_LAYERS = 16
 INIT_SEED = 0
@@ -195,13 +194,20 @@ class TestInitStrategies:
         actual = model.quantum_layer.qlayer.weights.data.std().item()
         assert actual == pytest.approx(expected, rel=0.25)
 
-    def test_block_local_variance_decays_with_depth(self) -> None:
+    def test_block_local_is_restricted_tapered_by_layer(self) -> None:
         """
-        ``block_local`` uses sigma_l = pi / sqrt(n_qubits * (l + 1)), i.e.
-        log(sigma_l) = const - 0.5 * log(l + 1): slope -0.5 in depth.
+        ``block_local`` uses sigma_l = pi / sqrt(n_qubits * (L + l)) (#166).
+        From the same seed that is exactly the ``restricted`` weights times
+        sqrt(L / (L + l)) on layer l.  This checks the model passes the
+        initialiser its whole weight tensor, whose first dimension is the
+        depth L.
         """
-        slope = _log_std_slope(_build_for_init("block_local"))
-        assert abs(slope + 0.5) < SLOPE_TOLERANCE
+        restricted = _build_for_init("restricted").quantum_layer.qlayer.weights.data
+        tapered = _build_for_init("block_local").quantum_layer.qlayer.weights.data
+        factor = torch.tensor(
+            [math.sqrt(INIT_N_LAYERS / (INIT_N_LAYERS + l)) for l in range(INIT_N_LAYERS)]
+        )
+        torch.testing.assert_close(tapered, restricted * factor.view(-1, 1, 1), rtol=1e-6, atol=0)
 
     def test_strategies_produce_different_weights(self) -> None:
         """

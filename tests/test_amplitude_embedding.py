@@ -28,19 +28,6 @@ N_LAYERS = 1
 BATCH = 5
 
 
-def _lightning_available() -> bool:
-    try:
-        qml.device("lightning.qubit", wires=1)
-    except Exception:  # noqa: BLE001 - any failure means "not installed"
-        return False
-    return True
-
-
-requires_lightning = pytest.mark.skipif(
-    not _lightning_available(), reason="pennylane-lightning not installed"
-)
-
-
 def _layer(
     diff_method: str = "backprop",
     device_name: str = "default.qubit",
@@ -336,7 +323,7 @@ class TestGradientFlow:
             ("adjoint", "default.qubit"),
             ("parameter-shift", "default.qubit"),
             ("finite-diff", "default.qubit"),
-            pytest.param("adjoint", "lightning.qubit", marks=requires_lightning),
+            pytest.param("adjoint", "lightning.qubit", marks=pytest.mark.requires_lightning),
         ],
     )
     @pytest.mark.parametrize("n_features", [N_AMPLITUDES, 6])
@@ -358,7 +345,7 @@ class TestGradientFlow:
         [
             ("parameter-shift", "default.qubit"),
             ("finite-diff", "default.qubit"),
-            pytest.param("adjoint", "lightning.qubit", marks=requires_lightning),
+            pytest.param("adjoint", "lightning.qubit", marks=pytest.mark.requires_lightning),
         ],
     )
     def test_weight_gradient_matches_backprop(self, diff_method: str, device_name: str) -> None:

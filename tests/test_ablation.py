@@ -1,25 +1,49 @@
 """
 tests/test_ablation.py
 ======================
-Unit tests for hqnn_forge.utils.disable_quantum_layer.
+Unit tests for hqnn_forge.utils.disable_quantum_layer and permute_quantum_layer.
 """
 
 from __future__ import annotations
+
+import warnings
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import Any, TypedDict, TypeVar
 
 import pytest
 import torch
 import torch.nn as nn
 
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
-from hqnn_forge.utils import disable_quantum_layer
+from hqnn_forge.utils import disable_quantum_layer, permute_quantum_layer
 
-CPU = dict(device_name="default.qubit", diff_method="backprop")
+
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
+
+
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
 N_FEATURES, N_QUBITS = 6, 3
 
 
-def _model(cls: type, **kw: object) -> nn.Module:
+Model = HybridBinaryClassifier | ParallelHybridClassifier
+M = TypeVar("M", bound=Model)
+_Ablation = Callable[[nn.Module], AbstractContextManager[nn.Module]]
+
+
+def _model(cls: type[M], **kw: Any) -> M:
     torch.manual_seed(0)
     return cls(n_input_features=N_FEATURES, n_qubits=N_QUBITS, n_layers=2, **CPU, **kw)
+
+
+def _qweights(model: Model) -> torch.Tensor:
+    """The quantum layer's weights, narrowed from ``nn.Module.__getattr__``."""
+    weights = model.quantum_layer.qlayer.weights
+    assert isinstance(weights, torch.Tensor)
+    return weights
 
 
 MODELS = [
@@ -35,26 +59,28 @@ def x() -> torch.Tensor:
 
 @pytest.mark.parametrize("cls", MODELS)
 class TestAblation:
-    def test_output_ignores_quantum_weights(self, cls: type, x: torch.Tensor) -> None:
+    def test_output_ignores_quantum_weights(self, cls: type[Model], x: torch.Tensor) -> None:
         model = _model(cls)
         with disable_quantum_layer(model):
             before = model(x).detach()
             with torch.no_grad():
-                model.quantum_layer.qlayer.weights.add_(1.0)
+                _qweights(model).add_(1.0)
             after = model(x).detach()
         torch.testing.assert_close(before, after, rtol=0, atol=0)
 
-    def test_no_gradient_reaches_the_quantum_branch(self, cls: type, x: torch.Tensor) -> None:
+    def test_no_gradient_reaches_the_quantum_branch(
+        self, cls: type[Model], x: torch.Tensor
+    ) -> None:
         model = _model(cls)
         with disable_quantum_layer(model):
             model(x).sum().backward()
-        assert model.quantum_layer.qlayer.weights.grad is None
+        assert _qweights(model).grad is None
         for p in model.classical_encoder.parameters():
             assert p.grad is None
         assert model.head.weight.grad is not None
 
     def test_circuit_is_not_executed(
-        self, cls: type, x: torch.Tensor, monkeypatch: pytest.MonkeyPatch
+        self, cls: type[Model], x: torch.Tensor, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         model = _model(cls)
 
@@ -65,7 +91,7 @@ class TestAblation:
         with disable_quantum_layer(model):
             model(x)
 
-    def test_forward_is_restored(self, cls: type, x: torch.Tensor) -> None:
+    def test_forward_is_restored(self, cls: type[Model], x: torch.Tensor) -> None:
         model = _model(cls)
         model.eval()
         with torch.no_grad():
@@ -75,20 +101,20 @@ class TestAblation:
             torch.testing.assert_close(model(x), expected, rtol=0, atol=0)
         assert "forward" not in vars(model.quantum_layer)
 
-    def test_restored_after_an_exception(self, cls: type) -> None:
+    def test_restored_after_an_exception(self, cls: type[Model]) -> None:
         model = _model(cls)
         with pytest.raises(KeyError):
             with disable_quantum_layer(model):
                 raise KeyError("inside")
         assert "forward" not in vars(model.quantum_layer)
 
-    def test_predict_proba_works_inside(self, cls: type, x: torch.Tensor) -> None:
+    def test_predict_proba_works_inside(self, cls: type[Model], x: torch.Tensor) -> None:
         model = _model(cls)
         with disable_quantum_layer(model):
             probs = model.predict_proba(x)
         assert probs.shape == (5,)
 
-    def test_nested_use_raises(self, cls: type) -> None:
+    def test_nested_use_raises(self, cls: type[Model]) -> None:
         model = _model(cls)
         with disable_quantum_layer(model):
             with pytest.raises(RuntimeError, match="cannot be nested"):
@@ -139,7 +165,7 @@ class TestExactReplacement:
 
     def test_training_inside_updates_only_live_parameters(self, x: torch.Tensor) -> None:
         model = _model(ParallelHybridClassifier)
-        quantum_before = model.quantum_layer.qlayer.weights.detach().clone()
+        quantum_before = _qweights(model).detach().clone()
         encoder_before = [p.detach().clone() for p in model.classical_encoder.parameters()]
         opt = torch.optim.SGD(model.parameters(), lr=0.1)
         with disable_quantum_layer(model):
@@ -147,9 +173,7 @@ class TestExactReplacement:
                 opt.zero_grad()
                 model(x).pow(2).mean().backward()
                 opt.step()
-        torch.testing.assert_close(
-            model.quantum_layer.qlayer.weights.detach(), quantum_before, rtol=0, atol=0
-        )
+        torch.testing.assert_close(_qweights(model).detach(), quantum_before, rtol=0, atol=0)
         for before, p in zip(encoder_before, model.classical_encoder.parameters()):
             torch.testing.assert_close(p.detach(), before, rtol=0, atol=0)
 
@@ -185,4 +209,109 @@ class TestValidation:
         model = _model(HybridBinaryClassifier)
         with pytest.raises(ValueError, match=r"fill must lie in \[-1, 1\]"):
             with disable_quantum_layer(model, fill=fill):
+                pass
+
+
+def _gen(seed: int = 0) -> torch.Generator:
+    return torch.Generator().manual_seed(seed)
+
+
+@pytest.mark.parametrize("cls", MODELS)
+class TestPermutation:
+    """#179: the circuit runs; its rows are shuffled across the batch."""
+
+    def test_output_is_a_row_permutation_of_the_real_output(
+        self, cls: type[Model], x: torch.Tensor
+    ) -> None:
+        model = _model(cls).eval()
+        layer = model.quantum_layer
+        q = torch.randn(5, N_QUBITS, generator=_gen(3))
+        with torch.no_grad():
+            real = layer(q)
+            with permute_quantum_layer(model, generator=_gen()):
+                shuffled = layer(q)
+        perm = torch.randperm(5, generator=_gen())
+        assert not torch.equal(perm, torch.arange(5))
+        torch.testing.assert_close(shuffled, real[perm], rtol=0, atol=0)
+
+    def test_same_seed_same_permutation(self, cls: type[Model], x: torch.Tensor) -> None:
+        model = _model(cls).eval()
+        outs = []
+        for _ in range(2):
+            with torch.no_grad(), permute_quantum_layer(model, generator=_gen(7)):
+                outs.append(model(x))
+        torch.testing.assert_close(outs[0], outs[1], rtol=0, atol=0)
+
+    def test_no_gradient_reaches_the_quantum_layer_or_upstream(
+        self, cls: type[Model], x: torch.Tensor
+    ) -> None:
+        model = _model(cls)
+        with permute_quantum_layer(model, generator=_gen()):
+            model(x).sum().backward()
+        assert model.quantum_layer.qlayer.weights.grad is None
+        encoder = model.classical_encoder
+        assert isinstance(encoder, nn.Sequential)
+        assert encoder[0].weight.grad is None
+
+    def test_forward_is_restored_including_on_exception(self, cls: type[Model]) -> None:
+        model = _model(cls)
+        with pytest.raises(RuntimeError, match="boom"), permute_quantum_layer(model):
+            raise RuntimeError("boom")
+        assert "forward" not in vars(model.quantum_layer)
+
+    def test_cannot_nest_with_either_ablation(self, cls: type[Model]) -> None:
+        model = _model(cls)
+        ablations: list[tuple[_Ablation, _Ablation]] = [
+            (permute_quantum_layer, permute_quantum_layer),
+            (permute_quantum_layer, disable_quantum_layer),
+            (disable_quantum_layer, permute_quantum_layer),
+        ]
+        for outer, inner in ablations:
+            with outer(model), pytest.raises(RuntimeError, match="cannot be nested"):
+                with inner(model):
+                    pass
+            assert "forward" not in vars(model.quantum_layer)
+
+
+class TestPermutationDegenerateCases:
+    def test_batch_of_one_warns(self) -> None:
+        model = _model(HybridBinaryClassifier).eval()
+        with (
+            torch.no_grad(),
+            permute_quantum_layer(model, generator=_gen()),
+            pytest.warns(RuntimeWarning, match="batch of 1 unchanged.*nothing to swap"),
+        ):
+            model(torch.randn(1, N_FEATURES))
+
+    def test_identity_draw_warns(self) -> None:
+        seed = next(
+            s
+            for s in range(100)
+            if torch.equal(torch.randperm(2, generator=_gen(s)), torch.arange(2))
+        )
+        model = _model(HybridBinaryClassifier).eval()
+        with (
+            torch.no_grad(),
+            permute_quantum_layer(model, generator=_gen(seed)),
+            pytest.warns(RuntimeWarning, match="identity permutation"),
+        ):
+            model(torch.randn(2, N_FEATURES))
+
+    def test_a_real_permutation_is_silent(self, x: torch.Tensor) -> None:
+        model = _model(HybridBinaryClassifier).eval()
+        with torch.no_grad(), permute_quantum_layer(model, generator=_gen()):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                model(x)
+
+    def test_serial_permuted_model_is_not_a_constant_predictor(self, x: torch.Tensor) -> None:
+        """Unlike the constant null, the permutation is meaningful for the serial topology."""
+        model = _model(HybridBinaryClassifier)
+        with permute_quantum_layer(model, generator=_gen()):
+            proba = model.predict_proba(x)
+        assert proba.unique().numel() > 1
+
+    def test_model_without_quantum_layer(self) -> None:
+        with pytest.raises(TypeError, match="permute_quantum_layer expects"):
+            with permute_quantum_layer(nn.Linear(2, 1)):
                 pass

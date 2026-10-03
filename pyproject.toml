@@ -32,16 +32,32 @@ classifiers = [
 ]
 
 # Every floor below is installed by the test-lowest CI job (--resolution
-# lowest-direct), so each one is the lowest version the suite actually passes on
+# lowest-direct) on 3.11, 3.13 and 3.14, so each one is the lowest version the
+# suite actually passes on for its interpreters. A package whose oldest usable
+# release has no wheels for a newer interpreter gets one floor per interpreter
+# range: the first release with wheels for it. 3.12 shares the 3.11 floors.
 dependencies = [
-    # 2.2 wheels were compiled against NumPy 1.x and fail to initialise NumPy 2
-    "torch>=2.3",
+    # 2.2 wheels were compiled against NumPy 1.x and fail to initialise NumPy 2.
+    # First cp313 wheels: 2.5; first cp314 wheels: 2.9.
+    "torch>=2.3; python_version < '3.13'",
+    "torch>=2.5; python_version == '3.13'",
+    "torch>=2.9; python_version >= '3.14'",
     # 0.38 breaks with autoray>=0.7 (NumpyMimic removed) and PennyLane declares
     # no upper bound of its own
     "pennylane>=0.45",
-    # pennylane>=0.45 already requires numpy>=2.0, so a lower floor is unreachable
-    "numpy>=2.0",
+    # pennylane>=0.45 already requires numpy>=2.0, so a lower floor is unreachable.
+    # First cp313 wheels: 2.1; first cp314 wheels: 2.3.2.
+    "numpy>=2.0; python_version < '3.13'",
+    "numpy>=2.1; python_version == '3.13'",
+    "numpy>=2.3.2; python_version >= '3.14'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/g8rdier/hqnn-forge"
+Documentation = "https://hqnn-forge.github.io/hqnn-forge/"
+Repository = "https://github.com/g8rdier/hqnn-forge"
+Issues = "https://github.com/g8rdier/hqnn-forge/issues"
+Changelog = "https://github.com/g8rdier/hqnn-forge/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 lightning = [
@@ -53,14 +69,35 @@ dev = [
     "ruff",
     "mypy",
     "vermin",
+    # Oracle for the Wilcoxon and ranking tests in tests/test_evaluation_statistics.py;
+    # hqnn_forge itself stays pure NumPy. 1.13 is the first release that installs
+    # alongside numpy>=2.0. pennylane brings scipy too, but only by coincidence.
+    "scipy>=1.13",
 ]
 sklearn = [
-    # hqnn_forge.sklearn needs validate_data and __sklearn_tags__, both new in 1.6
-    "scikit-learn>=1.6",
+    # hqnn_forge.sklearn needs validate_data and __sklearn_tags__, both new in 1.6.
+    # First cp314 wheels: 1.7.2.
+    "scikit-learn>=1.6; python_version < '3.14'",
+    "scikit-learn>=1.7.2; python_version >= '3.14'",
 ]
 examples = [
-    "scikit-learn>=1.6",  # dataset generation in examples, and hqnn_forge.sklearn
+    # dataset generation in examples, and hqnn_forge.sklearn; floors as in sklearn
+    "scikit-learn>=1.6; python_version < '3.14'",
+    "scikit-learn>=1.7.2; python_version >= '3.14'",
     "matplotlib",
+]
+
+[dependency-groups]
+docs = [
+    # The API reference site: mkdocs build --strict (docs/, mkdocs.yml).  A group,
+    # not an extra: users never need it, and CI's `--all-extras` jobs stay without it.
+    "mkdocs-material>=9.7",
+    "mkdocstrings[python]>=1.0",
+    # docs/griffe_sphinx_roles.py hooks griffe's on_package event (griffe 1.14+);
+    # an older griffe never fires it, and the roles then render as literal text
+    # without failing the strict build.  2.0.3 is the first mkdocstrings-python
+    # to require griffelib>=2.0 (earlier ones allow griffe 1.13).
+    "mkdocstrings-python>=2.0.3",
 ]
 
 [tool.setuptools.packages.find]
@@ -98,39 +135,18 @@ ignore = [
     "SIM117",
 ]
 
+[tool.pytest.ini_options]
+# A misspelled marker (@pytest.mark.slwo) would otherwise be a silent no-op,
+# and a slow test would stay in the quick local run.
+addopts = ["--strict-markers"]
+
 [tool.mypy]
 # 3.12, not the 3.11 floor: the numpy stubs use the PEP 695 `type` statement,
 # which mypy only accepts at a target of 3.12 or later (see #102)
 python_version = "3.12"
 ignore_missing_imports = true
 strict = false
-# Flags an override below that no longer matches a module, e.g. after a rename
+# Reports a [[tool.mypy.overrides]] entry that no longer matches a module, e.g.
+# after a rename (CI turns the note into a failure).  There are none since #232:
+# every module in hqnn_forge, tests and examples is type-checked.
 warn_unused_configs = true
-
-# Test and example modules that still fail the type check (#232). Each is
-# checked again once removed from this list, and new modules are checked from
-# the start. An entry for a renamed or deleted module fails the CI type-check
-# step (warn_unused_configs); a module that passes but is still listed does not.
-[[tool.mypy.overrides]]
-module = [
-    "noise_aware_training",  # examples/noise_aware_training.py
-    "test_ablation",
-    "test_checkpoint",
-    "test_circuit_options",
-    "test_circuit_summary",
-    "test_cv",
-    "test_data_reuploading",
-    "test_device_backends",
-    "test_evaluation_plots",
-    "test_evaluation_statistics",
-    "test_fisher",
-    "test_gradient_variance",
-    "test_kernels",
-    "test_multiclass_hybrid_classifier",
-    "test_noise",
-    "test_noise_aware_training",
-    "test_published_shnn_parity",
-    "test_sklearn_estimator",
-    "test_training",
-]
-ignore_errors = true

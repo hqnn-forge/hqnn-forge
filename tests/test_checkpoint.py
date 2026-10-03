@@ -8,16 +8,29 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Any, TypedDict, TypeVar
 
 import pytest
 import torch
 
 import hqnn_forge
-from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
+from hqnn_forge.models import (
+    ClassicalBaseline,
+    HybridBinaryClassifier,
+    MulticlassHybridClassifier,
+    ParallelHybridClassifier,
+)
 from hqnn_forge.utils import checkpoint as ckpt
 from hqnn_forge.utils import load_checkpoint, save_checkpoint
 
-CPU = dict(device_name="default.qubit", diff_method="backprop")
+
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
+
+
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
 
 MODELS = [
     pytest.param(HybridBinaryClassifier, dict(encoding_type="angle"), id="serial-angle"),
@@ -40,18 +53,41 @@ MODELS = [
         ),
         id="serial-published",
     ),
+    pytest.param(
+        MulticlassHybridClassifier,
+        dict(
+            n_classes=4,
+            embedding_rotation="Y",
+            entangler="strongly_entangling",
+            readout="first",
+            encoder_activation="sigmoid",
+            init_strategy="normal",
+        ),
+        id="multiclass-published-trunk",
+    ),
 ]
 
 
-def _trained(cls: type, extra: dict) -> torch.nn.Module:
+Classifier = HybridBinaryClassifier | ParallelHybridClassifier
+C = TypeVar("C", bound=Classifier)
+
+
+def _trained(cls: type[C], extra: dict[str, Any]) -> C:
     """A model whose weights differ from any fresh initialisation."""
     torch.manual_seed(0)
     model = cls(n_input_features=6, n_qubits=3, n_layers=2, **CPU, **extra)
     opt = torch.optim.SGD(model.parameters(), lr=0.5)
-    x, y = torch.randn(16, 6), torch.randint(0, 2, (16,)).float()
+    x, y = torch.randn(16, 6), torch.randint(0, 2, (16,))
     for _ in range(3):
         opt.zero_grad()
-        torch.nn.functional.binary_cross_entropy_with_logits(model(x).squeeze(-1), y).backward()
+        logits = model(x)
+        if isinstance(model, MulticlassHybridClassifier):
+            loss = torch.nn.functional.cross_entropy(logits, y)
+        else:
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits.squeeze(-1), y.float()
+            )
+        loss.backward()
         opt.step()
     return model
 
@@ -62,7 +98,7 @@ def _save_payload(payload: dict, path: Path) -> Path:
 
 
 @pytest.fixture
-def saved(tmp_path: Path) -> tuple[torch.nn.Module, Path]:
+def saved(tmp_path: Path) -> tuple[HybridBinaryClassifier, Path]:
     model = _trained(HybridBinaryClassifier, {})
     path = tmp_path / "model.pt"
     save_checkpoint(model, path)
@@ -70,8 +106,27 @@ def saved(tmp_path: Path) -> tuple[torch.nn.Module, Path]:
 
 
 class TestRoundTrip:
+    @pytest.mark.parametrize("init_strategy", ["restricted", "block_local"])
+    def test_toy_size_reloads_without_the_init_warning(
+        self, init_strategy: str, tmp_path: Path
+    ) -> None:
+        """The rebuild's weight draw is overwritten, so its #167 warning must not surface."""
+        with pytest.warns(UserWarning, match="restricts nothing"):
+            model = HybridBinaryClassifier(
+                n_input_features=2, n_qubits=2, n_layers=1, init_strategy=init_strategy, **CPU
+            )
+        path = tmp_path / "toy.pt"
+        save_checkpoint(model, path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            loaded = load_checkpoint(path)
+        for key, value in model.state_dict().items():
+            torch.testing.assert_close(loaded.state_dict()[key], value)
+
     @pytest.mark.parametrize("cls, extra", MODELS)
-    def test_identical_outputs_after_reload(self, cls: type, extra: dict, tmp_path: Path) -> None:
+    def test_identical_outputs_after_reload(
+        self, cls: type[Classifier], extra: dict[str, Any], tmp_path: Path
+    ) -> None:
         model = _trained(cls, extra)
         path = tmp_path / "model.pt"
         save_checkpoint(model, path)
@@ -125,6 +180,7 @@ class TestRoundTrip:
         assert all(p.device.type == device.type for p in loaded.parameters())
         assert all(b.device.type == device.type for b in loaded.buffers())
 
+    @pytest.mark.may_skip  # no CUDA device on the CI runners
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
     def test_map_location_cuda_does_not_return_a_cpu_model(self, saved: tuple) -> None:
         _, path = saved
@@ -148,19 +204,26 @@ class TestCheckpointsOlderThanAnOption:
     """
 
     @staticmethod
-    def _stripped(model: torch.nn.Module, path: Path, out: Path) -> Path:
-        """``path``'s payload with every post-#131 key removed from its config."""
+    def _stripped(model: Classifier, path: Path, out: Path) -> Path:
+        """
+        ``path``'s payload as a file from before #131: every post-#131 key
+        removed from its config, and no ``known_args``, which such a file
+        never had.
+        """
         save_checkpoint(model, path)
         payload = torch.load(path, weights_only=True)
         for name in ckpt._LEGACY_DEFAULTS:
             del payload["config"][name]
+        del payload["known_args"]
         return _save_payload(payload, out)
 
     @pytest.mark.parametrize(
-        "cls", [HybridBinaryClassifier, ParallelHybridClassifier], ids=["serial", "parallel"]
+        "cls",
+        [HybridBinaryClassifier, ParallelHybridClassifier, MulticlassHybridClassifier],
+        ids=["serial", "parallel", "multiclass"],
     )
     def test_it_loads_and_predicts_what_the_saved_model_predicted(
-        self, cls: type, tmp_path: Path
+        self, cls: type[Classifier], tmp_path: Path
     ) -> None:
         model = _trained(cls, {})
         old = self._stripped(model, tmp_path / "new.pt", tmp_path / "old.pt")
@@ -196,7 +259,7 @@ class TestCheckpointsOlderThanAnOption:
     def test_the_table_only_names_real_constructor_arguments(self) -> None:
         # Guards the table against rot: an argument renamed or dropped would
         # otherwise leave an entry here that silently never matches.
-        for cls in (HybridBinaryClassifier, ParallelHybridClassifier):
+        for cls in (HybridBinaryClassifier, ParallelHybridClassifier, MulticlassHybridClassifier):
             assert set(ckpt._LEGACY_DEFAULTS) <= ckpt._init_parameter_names(cls)
 
     def test_re_saving_pins_the_filled_arguments(self, tmp_path: Path) -> None:
@@ -218,7 +281,7 @@ class TestFailures:
             TypeError,
             match="supports the classifiers in hqnn_forge.models.*got torch.nn.modules.linear.Linear",
         ):
-            save_checkpoint(torch.nn.Linear(2, 1), tmp_path / "x.pt")
+            save_checkpoint(torch.nn.Linear(2, 1), tmp_path / "x.pt")  # type: ignore[arg-type]
 
     def test_subclass_is_not_silently_saved_as_parent(self, tmp_path: Path) -> None:
         class Custom(HybridBinaryClassifier):
@@ -251,12 +314,25 @@ class TestFailures:
     def test_missing_constructor_field(self, saved: tuple, tmp_path: Path) -> None:
         # Not in _LEGACY_DEFAULTS, so it is a broken config rather than an old
         # one: back-filling it would rebuild an 'iqp' checkpoint as 'angle',
-        # which fits the same weight shapes and predicts differently.
+        # which fits the same weight shapes and predicts differently.  Without
+        # known_args (a file from before it existed) that is all we can say.
         _, path = saved
         payload = torch.load(path, weights_only=True)
         del payload["config"]["encoding_type"]
+        del payload["known_args"]
         with pytest.raises(ValueError, match=r"missing \['encoding_type'\]"):
             load_checkpoint(_save_payload(payload, tmp_path / "partial.pt"))
+
+    def test_value_no_longer_accepted_is_refused(self, saved: tuple, tmp_path: Path) -> None:
+        # A checkpoint written with embedding_rotation="Z" held a constant
+        # quantum layer (#212).  The constructor now refuses the value, and a
+        # load goes through the constructor, so the file is refused with the
+        # same explanation rather than rebuilt as some other circuit.
+        _, path = saved
+        payload = torch.load(path, weights_only=True)
+        payload["config"]["embedding_rotation"] = "Z"
+        with pytest.raises(ValueError, match="global phase"):
+            load_checkpoint(_save_payload(payload, tmp_path / "z.pt"))
 
     def test_unexpected_constructor_field(self, saved: tuple, tmp_path: Path) -> None:
         _, path = saved
@@ -321,6 +397,16 @@ class TestFailures:
         with pytest.raises(ValueError, match=r"\['init_strategy'\]"):
             load_checkpoint(path, init_strategy="block_local")
 
+    def test_init_seed_override_is_refused(self, saved: tuple) -> None:
+        # The same reasoning as init_strategy: init_seed has no effect on the
+        # loaded weights, but it records where the initial weights came from,
+        # so an override would bake false provenance into get_config().  It
+        # stays out of WEIGHT_SAFE_ARGS on purpose.
+        _, path = saved
+        assert "init_seed" not in ckpt.WEIGHT_SAFE_ARGS
+        with pytest.raises(ValueError, match=r"\['init_seed'\]"):
+            load_checkpoint(path, init_seed=3)
+
     def test_weight_safe_overrides_need_no_opt_in(self, saved: tuple) -> None:
         _, path = saved
         loaded = load_checkpoint(path, **CPU)
@@ -331,6 +417,10 @@ class TestFailures:
             "dropout_p",
             "noise_level",
             "noise_position",
+            "noise_method",
+            "noise_trajectories",
+            "shots",
+            "noise_channel",
         }
 
     def test_dropout_override_needs_no_opt_in_and_keeps_the_weights(self, saved: tuple) -> None:
@@ -338,6 +428,7 @@ class TestFailures:
         # -- the point of WEIGHT_SAFE_ARGS.  Assert that, not just that it loads.
         model, path = saved
         loaded = load_checkpoint(path, dropout_p=0.5)
+        assert isinstance(loaded, HybridBinaryClassifier)
         assert loaded.get_config()["dropout_p"] == 0.5
         assert loaded.dropout.p == 0.5
         for (name, a), (_, b) in zip(model.state_dict().items(), loaded.state_dict().items()):
@@ -356,6 +447,7 @@ class TestFailures:
         # architecture opt-in nor mark the model so save_checkpoint refuses it.
         model, path = saved
         loaded = load_checkpoint(path, noise_level=0.1, noise_position="end")
+        assert isinstance(loaded, HybridBinaryClassifier)
         assert loaded.quantum_layer.noise_level == 0.1
         assert loaded.quantum_layer.noise_position == "end"
         for (name, a), (_, b) in zip(model.state_dict().items(), loaded.state_dict().items()):
@@ -461,3 +553,261 @@ class TestForcedOverrideProvenance:
         assert not getattr(loaded, ckpt._FORCED_OVERRIDES_ATTR, ())
         save_checkpoint(loaded, tmp_path / "ok.pt")
         assert load_checkpoint(tmp_path / "ok.pt").get_config() == loaded.get_config()
+
+
+class TestKnownArgs:
+    """
+    #185: ``save_checkpoint`` records the constructor arguments the writing
+    version had, so a missing config key can be told apart as "written before
+    this argument existed" (filled) or "edited out" (refused).
+    """
+
+    def test_save_records_every_constructor_argument(self, saved: tuple) -> None:
+        _, path = saved
+        payload = torch.load(path, weights_only=True)
+        assert payload["known_args"] == sorted(ckpt._init_parameter_names(HybridBinaryClassifier))
+
+    def test_a_key_the_writer_knew_is_refused_not_filled(
+        self, saved: tuple, tmp_path: Path
+    ) -> None:
+        """entangler is in _LEGACY_DEFAULTS, but this writer had it: an edit, not an old file."""
+        _, path = saved
+        payload = torch.load(path, weights_only=True)
+        del payload["config"]["entangler"]
+        with pytest.raises(ValueError, match=r"lacks \['entangler'\].*edited or is corrupt"):
+            load_checkpoint(_save_payload(payload, tmp_path / "edited.pt"))
+
+    def test_a_key_the_writer_did_not_know_is_filled(self, saved: tuple, tmp_path: Path) -> None:
+        model, path = saved
+        payload = torch.load(path, weights_only=True)
+        del payload["config"]["entangler"]
+        payload["known_args"].remove("entangler")
+        with pytest.warns(RuntimeWarning, match="predates.*entangler"):
+            loaded = load_checkpoint(_save_payload(payload, tmp_path / "older.pt"))
+        assert loaded.get_config() == model.get_config()
+
+    def test_a_predated_argument_without_legacy_default_is_refused(
+        self, saved: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, path = saved
+        monkeypatch.setattr(ckpt, "_NO_LEGACY_DEFAULT", frozenset({"readout"}))
+        payload = torch.load(path, weights_only=True)
+        del payload["config"]["readout"]
+        payload["known_args"].remove("readout")
+        with pytest.raises(ValueError, match=r"predates \['readout'\].*no legacy default"):
+            load_checkpoint(_save_payload(payload, tmp_path / "older.pt"))
+
+    @pytest.mark.parametrize("bad", ["entangler", [1, 2], None])
+    def test_malformed_known_args(self, saved: tuple, tmp_path: Path, bad: object) -> None:
+        _, path = saved
+        payload = torch.load(path, weights_only=True)
+        payload["known_args"] = bad
+        with pytest.raises(ValueError, match="known_args"):
+            load_checkpoint(_save_payload(payload, tmp_path / "bad.pt"))
+
+
+DATA = Path(__file__).parent / "data"
+
+
+class TestRealOldCheckpoint:
+    """
+    Files written by the tree before #159 (commit 12952f2), not payloads
+    stripped by hand: they carry no known_args and none of the five arguments
+    #159 added.  checkpoint_pre159_expected.pt holds the inputs and the
+    outputs that tree computed for them.
+    """
+
+    @pytest.mark.parametrize("name", ["hybrid_angle", "hybrid_iqp", "parallel_angle"])
+    def test_rebuilds_the_model_that_tree_saved(self, name: str) -> None:
+        expected = torch.load(DATA / "checkpoint_pre159_expected.pt", weights_only=True)
+        with pytest.warns(RuntimeWarning, match="predates") as record:
+            model = load_checkpoint(
+                DATA / f"checkpoint_pre159_{name}.pt", allow_version_mismatch=True
+            )
+        (backfill,) = [w for w in record if issubclass(w.category, RuntimeWarning)]
+        message = str(backfill.message)
+        for added in (
+            "embedding_rotation",
+            "entangler",
+            "readout",
+            "encoder_activation",
+            "init_std",
+        ):
+            assert added in message
+        with torch.no_grad():
+            torch.testing.assert_close(
+                model(expected["inputs"]), expected[name], rtol=0, atol=1e-6
+            )
+
+    def test_the_files_predate_known_args(self) -> None:
+        payload = torch.load(DATA / "checkpoint_pre159_hybrid_angle.pt", weights_only=True)
+        assert "known_args" not in payload
+        assert "entangler" not in payload["config"]
+
+
+#: Every classifier's constructor arguments, pinned.  A change here is a
+#: checkpoint-compatibility decision: see "Compatibility rules" in
+#: hqnn_forge/utils/checkpoint.py.
+CONSTRUCTOR_ARGS = {
+    HybridBinaryClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "encoding_type",
+        "embedding_rotation",
+        "entangler",
+        "readout",
+        "encoder_activation",
+        "init_std",
+        "noise_level",
+        "noise_position",
+        "init_seed",
+        "classical_encoder",
+        "noise_method",
+        "noise_trajectories",
+        "trainable_input_scaling",
+        "shots",
+        "noise_channel",
+    },
+    ParallelHybridClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "classical_hidden_dim",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "encoding_type",
+        "embedding_rotation",
+        "entangler",
+        "readout",
+        "encoder_activation",
+        "init_std",
+        "noise_level",
+        "noise_position",
+        "init_seed",
+        "classical_encoder",
+        "noise_method",
+        "noise_trajectories",
+        "trainable_input_scaling",
+        "shots",
+        "noise_channel",
+    },
+    MulticlassHybridClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "n_classes",
+        "strategy",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "init_std",
+        "encoding_type",
+        "init_seed",
+        # The shared trunk's options (#226); each has a _LEGACY_DEFAULTS entry.
+        "embedding_rotation",
+        "entangler",
+        "readout",
+        "encoder_activation",
+        "noise_level",
+        "noise_position",
+        "noise_method",
+        "noise_trajectories",
+        "classical_encoder",
+        "trainable_input_scaling",
+        "shots",
+        "noise_channel",
+    },
+    ClassicalBaseline: {
+        "n_input_features",
+        "hidden_dims",
+        "activation",
+        "dropout_p",
+        "init_seed",
+    },
+}
+
+#: The arguments each class had when checkpoints of it were first written: the
+#: binary classifiers at #120 (31c9879), the multiclass one at #156 (11936cf),
+#: ClassicalBaseline at #250.
+FIRST_CHECKPOINTED_ARGS = {
+    HybridBinaryClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "encoding_type",
+    },
+    ParallelHybridClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "classical_hidden_dim",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "encoding_type",
+    },
+    MulticlassHybridClassifier: {
+        "n_input_features",
+        "n_qubits",
+        "n_layers",
+        "n_classes",
+        "strategy",
+        "use_classical_encoder",
+        "dropout_p",
+        "device_name",
+        "diff_method",
+        "init_strategy",
+        "init_std",
+        "encoding_type",
+    },
+    ClassicalBaseline: {
+        "n_input_features",
+        "hidden_dims",
+        "activation",
+        "dropout_p",
+        "init_seed",
+    },
+}
+
+
+class TestConstructorChangesAreDecided:
+    @pytest.mark.parametrize("cls", list(CONSTRUCTOR_ARGS), ids=lambda c: c.__name__)
+    def test_constructor_arguments_are_pinned(self, cls: type) -> None:
+        current = ckpt._init_parameter_names(cls)
+        assert current == CONSTRUCTOR_ARGS[cls], (
+            f"{cls.__name__} gained {sorted(current - CONSTRUCTOR_ARGS[cls])} and lost "
+            f"{sorted(CONSTRUCTOR_ARGS[cls] - current)}.  Checkpoints written before the "
+            f"change do not carry a new argument: give it an entry in _LEGACY_DEFAULTS "
+            f"(the old behaviour) or _NO_LEGACY_DEFAULT in hqnn_forge/utils/checkpoint.py, "
+            f"then update CONSTRUCTOR_ARGS here."
+        )
+
+    def test_every_registered_class_is_pinned(self) -> None:
+        assert set(ckpt._registry().values()) == set(CONSTRUCTOR_ARGS)
+
+    @pytest.mark.parametrize("cls", list(CONSTRUCTOR_ARGS), ids=lambda c: c.__name__)
+    def test_every_argument_added_since_has_a_decision(self, cls: type) -> None:
+        added = CONSTRUCTOR_ARGS[cls] - FIRST_CHECKPOINTED_ARGS[cls]
+        decided = set(ckpt._LEGACY_DEFAULTS) | ckpt._NO_LEGACY_DEFAULT
+        assert added <= decided, sorted(added - decided)
+
+    def test_the_two_tables_do_not_overlap(self) -> None:
+        assert not set(ckpt._LEGACY_DEFAULTS) & ckpt._NO_LEGACY_DEFAULT

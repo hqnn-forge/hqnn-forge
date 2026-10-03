@@ -92,8 +92,7 @@ class FocalLoss(nn.Module):
             raise ValueError(f"alpha must be in (0, 1); got {alpha}.")
         if gamma < 0.0:
             raise ValueError(f"gamma must be ≥ 0; got {gamma}.")
-        if reduction not in ("mean", "sum", "none"):
-            raise ValueError(f"reduction must be 'mean', 'sum', or 'none'; got {reduction!r}.")
+        _check_reduction(reduction)
 
         self.alpha = alpha
         self.gamma = gamma
@@ -151,6 +150,38 @@ class FocalLoss(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+class SoftmaxFocalLoss(nn.Module):
+    """
+    Focal loss for ``K``-class softmax classification (Lin et al. 2017).
+
+    ``FL = −(1 − p_t)^γ · log p_t`` with ``p_t`` the softmax probability of the
+    true class: cross-entropy that down-weights well-classified samples.
+    ``γ = 0`` is ``nn.CrossEntropyLoss`` exactly.  (For one-vs-rest heads, the
+    binary :class:`FocalLoss` applied to one-hot targets is the per-class
+    version.)
+
+    Parameters
+    ----------
+    gamma:
+        Focusing parameter, ``≥ 0``.  Default: 2.0.
+
+    Forward
+    -------
+    ``logits`` of shape ``(N, K)`` and integer class indices ``(N,)``; returns
+    the mean loss.
+    """
+
+    def __init__(self, gamma: float = 2.0) -> None:
+        super().__init__()
+        if gamma < 0.0:
+            raise ValueError(f"gamma must be ≥ 0; got {gamma}.")
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_p = F.log_softmax(logits, dim=-1).gather(-1, targets.long().unsqueeze(-1)).squeeze(-1)
+        return (-((1 - log_p.exp()) ** self.gamma) * log_p).mean()
+
+
 def compute_class_weights(
     labels: torch.Tensor,
     *,
@@ -199,6 +230,12 @@ def compute_class_weights(
     return torch.tensor([w_neg, w_pos], dtype=torch.float32)
 
 
+def _check_reduction(reduction: str) -> None:
+    """Refuse a *reduction* other than ``"mean"``, ``"sum"`` or ``"none"``."""
+    if reduction not in ("mean", "sum", "none"):
+        raise ValueError(f"reduction must be 'mean', 'sum', or 'none'; got {reduction!r}.")
+
+
 def weighted_bce_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -225,6 +262,11 @@ def weighted_bce_loss(
     torch.Tensor
         Weighted loss, scalar or per-sample depending on *reduction*.
 
+    Raises
+    ------
+    ValueError
+        If *reduction* is not one of the three values above.
+
     Examples
     --------
     >>> import torch
@@ -235,6 +277,7 @@ def weighted_bce_loss(
     >>> weighted_bce_loss(pred, y, cw)
     tensor(0.4081)
     """
+    _check_reduction(reduction)
     logits = logits.view(-1)
     targets = targets.view(-1).float()
 

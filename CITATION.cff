@@ -1,0 +1,27 @@
+# Citation metadata for GitHub's "Cite this repository" button (Citation File
+# Format 1.2.0).  `version` must match `version` in pyproject.toml; a test in
+# tests/test_citation.py checks it.  Validate after editing with:
+#   uvx cffconvert --validate
+cff-version: 1.2.0
+message: "If you use hqnn-forge in your research, please cite it as below."
+type: software
+title: "hqnn-forge"
+abstract: >-
+  Test whether a small quantum layer earns its parameters on imbalanced binary
+  tabular data: hybrid quantum-classical classifiers (PennyLane circuits inside
+  PyTorch models) with matched classical controls, imbalance-aware training and
+  evaluation, and circuit diagnostics.
+authors:
+  - family-names: "Kobilarov"
+    given-names: "Gregor"
+  - name: "HQNN-Forge Contributors"
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/g8rdier/hqnn-forge"
+url: "https://github.com/g8rdier/hqnn-forge"
+keywords:
+  - quantum machine learning
+  - hybrid quantum neural network
+  - PennyLane
+  - PyTorch
+  - imbalanced classification

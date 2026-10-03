@@ -1,0 +1,269 @@
+"""
+tests/test_noise_channels.py
+============================
+Amplitude damping, phase damping, bit flip and phase flip beside the
+depolarizing channel, post hoc and for training (#313).
+
+At ``position="end"`` every channel's effect on a ⟨Z⟩ readout is known in
+closed form (the table in ``hqnn_forge.noise``), so those checks are exact.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Any, get_args
+
+import pytest
+import torch
+
+from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.models import (
+    HybridBinaryClassifier,
+    MulticlassHybridClassifier,
+    ParallelHybridClassifier,
+)
+from hqnn_forge.noise import (
+    CHANNELS,
+    Channel,
+    apply_depolarizing_noise,
+    apply_shots,
+    noise_sweep,
+    training_noise_qnode,
+)
+from hqnn_forge.utils import load_checkpoint, save_checkpoint
+
+CPU: dict[str, Any] = {"device_name": "default.qubit", "diff_method": "backprop"}
+Z = 5.0
+
+END_EFFECT = {
+    "depolarizing": lambda z, p: (1 - 4 * p / 3) * z,
+    "amplitude_damping": lambda z, p: (1 - p) * z + p,
+    "phase_damping": lambda z, p: z,
+    "bit_flip": lambda z, p: (1 - 2 * p) * z,
+    "phase_flip": lambda z, p: z,
+}
+CHANNEL_NAMES: list[Channel] = [
+    "depolarizing",
+    "amplitude_damping",
+    "phase_damping",
+    "bit_flip",
+    "phase_flip",
+]
+
+
+def _layer(**kwargs: Any) -> Any:
+    torch.manual_seed(0)
+    return QuantumEncodingLayer(n_qubits=3, n_layers=2, **{**CPU, **kwargs})
+
+
+def _x() -> torch.Tensor:
+    return torch.rand(4, 3, generator=torch.Generator().manual_seed(1)) * 4 - 2
+
+
+def test_every_channel_is_tabulated() -> None:
+    assert set(CHANNELS) == set(END_EFFECT)
+
+
+def test_channel_map_matches_the_literal() -> None:
+    # The Literal is what mypy checks call sites against; the map is what
+    # validate_noise accepts at run time.  They must name the same channels.
+    assert set(CHANNELS) == set(get_args(Channel))
+
+
+@pytest.mark.parametrize("channel", CHANNEL_NAMES)
+class TestPostHoc:
+    def test_end_effect_on_every_readout(self, channel: Channel) -> None:
+        layer = _layer()
+        x = _x()
+        p = 0.3
+        with torch.no_grad():
+            clean = layer(x)
+            with apply_depolarizing_noise(layer, p, position="end", channel=channel):
+                noisy = layer(x)
+        torch.testing.assert_close(noisy, END_EFFECT[channel](clean, p), atol=1e-5, rtol=0)
+
+    def test_gate_noise_moves_every_channel(self, channel: Channel) -> None:
+        # With channels after every gate even the dephasing ones act, through
+        # the gates that follow them.
+        layer = _layer()
+        x = _x()
+        with torch.no_grad():
+            clean = layer(x)
+            with apply_depolarizing_noise(layer, 0.3, position="all", channel=channel):
+                noisy = layer(x)
+        assert (noisy - clean).abs().max() > 1e-2
+
+    def test_sweep_follows_the_end_formula(self, channel: Channel) -> None:
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(n_input_features=4, n_qubits=3, n_layers=1, **CPU)
+        x = torch.randn(6, 4)
+        points = noise_sweep(model, x, [0.0, 0.2, 0.5], position="end", channel=channel)
+        clean = points[0].probabilities
+        assert [pt.p for pt in points] == [0.0, 0.2, 0.5]
+        if channel in ("phase_damping", "phase_flip"):
+            for pt in points:
+                torch.testing.assert_close(pt.probabilities, clean, atol=1e-5, rtol=0)
+        else:
+            assert (points[2].probabilities - clean).abs().max() > 1e-3
+
+
+@pytest.mark.parametrize("channel", CHANNEL_NAMES)
+def test_training_noise_density_has_the_end_effect(channel: Channel) -> None:
+    p = 0.2
+    noisy = _layer(noise_level=p, noise_position="end", noise_channel=channel)
+    clean = _layer()
+    x = _x()
+    with torch.no_grad():
+        noisy.train()
+        torch.testing.assert_close(noisy(x), END_EFFECT[channel](clean(x), p), atol=1e-5, rtol=0)
+        noisy.eval()
+        torch.testing.assert_close(noisy(x), clean(x), rtol=0, atol=0)
+
+
+class TestTrajectories:
+    @pytest.mark.parametrize("channel", ["bit_flip", "phase_flip"])
+    def test_mean_matches_the_density_channel(self, channel: Channel) -> None:
+        p, draws = 0.2, 3000
+        layer = _layer(noise_level=p, noise_channel=channel, noise_method="trajectories")
+        x = _x()[:2]
+        density = training_noise_qnode(layer.qlayer.qnode, 3, p, "all", channel=channel)
+        with torch.no_grad():
+            exact = torch.stack(
+                [torch.stack(density(xi, layer.qlayer.weights)) for xi in x]
+            ).float()
+            layer.train()
+            torch.manual_seed(2)
+            runs = layer(x.repeat(draws, 1)).reshape(draws, 2, -1).double()
+        se = runs.std(0) / math.sqrt(draws)
+        assert ((runs.mean(0) - exact).abs() <= Z * se + 1e-6).all()
+
+    def test_bit_flip_at_the_end_is_plus_or_minus_clean(self) -> None:
+        p = 0.25
+        layer = _layer(
+            noise_level=p,
+            noise_position="end",
+            noise_channel="bit_flip",
+            noise_method="trajectories",
+        )
+        x = _x()
+        with torch.no_grad():
+            layer.eval()
+            clean = layer(x)
+            layer.train()
+            torch.manual_seed(3)
+            runs = torch.stack([layer(x) for _ in range(400)])
+        torch.testing.assert_close(runs.abs(), clean.abs().expand_as(runs))
+        rate = (torch.sign(runs) != torch.sign(clean)).double().mean().item()
+        assert abs(rate - p) <= Z * math.sqrt(p * (1 - p) / runs.numel())
+
+    def test_phase_flip_at_the_end_changes_nothing(self) -> None:
+        layer = _layer(
+            noise_level=0.4,
+            noise_position="end",
+            noise_channel="phase_flip",
+            noise_method="trajectories",
+        )
+        x = _x()
+        with torch.no_grad():
+            layer.eval()
+            clean = layer(x)
+            layer.train()
+            for _ in range(20):
+                torch.testing.assert_close(layer(x), clean, atol=1e-6, rtol=0)
+
+    # 0.9 is a valid bit-flip strength but above the depolarizing maximum.
+    @pytest.mark.parametrize("p", [0.3, 0.9])
+    def test_bit_flip_keeps_its_channel_inside_apply_shots(self, p: float) -> None:
+        # apply_shots rebuilds the train-mode trajectory QNode on its sampled
+        # one; the rebuilt QNode must sample the layer's channel, whose mean
+        # damps each readout by 1 − 2p at the end (depolarizing: 1 − 4p/3).
+        # Parameter-shift runs sample by sample, so one input keeps it quick.
+        draws, shots = 1000, 100
+        layer = _layer(
+            noise_level=p,
+            noise_position="end",
+            noise_channel="bit_flip",
+            noise_method="trajectories",
+        )
+        x = _x()[:1]
+        with torch.no_grad():
+            layer.eval()
+            clean = layer(x).double()
+            layer.train()
+            torch.manual_seed(4)
+            with apply_shots(layer, shots):
+                runs = layer(x.repeat(draws, 1)).reshape(draws, *clean.shape).double()
+        se = runs.std(0) / math.sqrt(draws)
+        assert ((runs.mean(0) - (1 - 2 * p) * clean).abs() <= Z * se + 1e-6).all()
+
+    @pytest.mark.parametrize("channel", ["amplitude_damping", "phase_damping"])
+    @pytest.mark.parametrize("noise_level", [0.0, 0.1])
+    def test_damping_cannot_be_sampled(self, channel: str, noise_level: float) -> None:
+        with pytest.raises(ValueError, match="not a mixture of Pauli errors"):
+            _layer(noise_level=noise_level, noise_channel=channel, noise_method="trajectories")
+
+
+class TestValidation:
+    def test_ranges_are_per_channel(self) -> None:
+        _layer(noise_level=0.9, noise_channel="amplitude_damping")  # a full decay is 1
+        with pytest.raises(ValueError, match=r"noise_level must lie in \[0, 0.75\]"):
+            _layer(noise_level=0.9)
+        with pytest.raises(ValueError, match=r"must lie in \[0, 1.0\] for 'bit_flip'"):
+            with apply_depolarizing_noise(_layer(), 1.2, channel="bit_flip"):
+                pass
+
+    def test_unknown_channel_is_named(self) -> None:
+        with pytest.raises(ValueError, match="noise_channel must be one of"):
+            _layer(noise_channel="thermal")
+        # Anchored: unanchored, the pattern would also match the
+        # "noise_channel must be one of" message above.
+        with pytest.raises(ValueError, match="^channel must be one of"):
+            model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
+            noise_sweep(model, _x(), [0.1], channel="thermal")  # type: ignore[arg-type]
+
+    def test_repr_names_a_non_default_channel(self) -> None:
+        assert "noise_channel='bit_flip'" in repr(
+            _layer(noise_level=0.1, noise_channel="bit_flip")
+        )
+        assert "noise_channel" not in repr(_layer(noise_level=0.1))
+
+
+@pytest.mark.parametrize(
+    "cls, extra",
+    [
+        (HybridBinaryClassifier, {}),
+        (ParallelHybridClassifier, {}),
+        (MulticlassHybridClassifier, {"n_classes": 3}),
+    ],
+)
+def test_classifiers_record_and_restore_the_channel(
+    cls: type, extra: dict[str, Any], tmp_path: Path
+) -> None:
+    torch.manual_seed(0)
+    model = cls(
+        n_input_features=4,
+        n_qubits=3,
+        n_layers=1,
+        noise_level=0.1,
+        noise_channel="amplitude_damping",
+        **CPU,
+        **extra,
+    )
+    assert model.quantum_layer.noise_channel == "amplitude_damping"
+    save_checkpoint(model, tmp_path / "m.pt")
+    loaded = load_checkpoint(tmp_path / "m.pt")
+    assert loaded.get_config()["noise_channel"] == "amplitude_damping"
+    # Weight-safe: a channel can be swapped at load time for fine-tuning.
+    swapped: Any = load_checkpoint(tmp_path / "m.pt", noise_channel="bit_flip")
+    assert swapped.quantum_layer.noise_channel == "bit_flip"
+    # ... and the swapped channel is the one the train-mode forward applies,
+    # not only the recorded one: at the end, bit flip damps every readout by
+    # 1 − 2p where amplitude damping would give (1 − p)⟨Z⟩ + p.
+    end: Any = load_checkpoint(tmp_path / "m.pt", noise_channel="bit_flip", noise_position="end")
+    layer = end.quantum_layer
+    x = torch.rand(4, layer.n_features, generator=torch.Generator().manual_seed(1)) * 4 - 2
+    with torch.no_grad():
+        clean = layer.eval()(x)
+        noisy = layer.train()(x)
+    torch.testing.assert_close(noisy, END_EFFECT["bit_flip"](clean, 0.1), atol=1e-5, rtol=0)

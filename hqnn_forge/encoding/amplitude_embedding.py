@@ -78,15 +78,24 @@ import pennylane as qml
 import torch
 import torch.nn as nn
 
-from hqnn_forge.encoding.angle_embedding import (
+from hqnn_forge.encoding._common import (
     DeviceName,
     DiffMethod,
-    _expand_batch_dimension,
-    _resolve_device,
+    Entangler,
+    Readout,
     apply_variational_layers,
     check_inputs,
+    expand_batch_dimension,
     measure_z,
+    readout_wires,
+    resolve_device,
+    shots_repr,
+    validate_circuit_options,
+    validate_device_shots,
+    validate_shots,
+    variational_weight_shape,
 )
+from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +132,8 @@ def _make_amplitude_embedding_circuit(
     n_qubits: int,
     n_layers: int,
     diff_method: str,
+    entangler: Entangler = "ring",
+    readout: Readout = "all",
 ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
     """
     Factory returning the bare quantum function for the amplitude feature map.
@@ -163,8 +174,8 @@ def _make_amplitude_embedding_circuit(
         qml.AmplitudeEmbedding(features=inputs, wires=range(n_qubits))
 
         # ── 2 & 3. Variational layers, then ⟨Z⟩ on every wire ──────────────
-        apply_variational_layers(weights, n_qubits, n_layers)
-        return measure_z(n_qubits)
+        apply_variational_layers(weights, n_qubits, n_layers, entangler)
+        return measure_z(n_qubits, readout)
 
     return circuit
 
@@ -179,6 +190,9 @@ def build_amplitude_qnode(
     n_layers: int = 2,
     device_name: DeviceName = "lightning.qubit",
     diff_method: DiffMethod = "adjoint",
+    entangler: Entangler = "ring",
+    readout: Readout = "all",
+    shots: int | None = None,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the amplitude feature map.
@@ -198,27 +212,33 @@ def build_amplitude_qnode(
         Number of qubits.  The state has ``2**n_qubits`` amplitudes.
     n_layers:
         Number of entangling + rotation layers in the VQC ansatz.
-    device_name, diff_method:
+    device_name, diff_method, entangler, readout:
         As for :func:`hqnn_forge.encoding.build_encoding_qnode`.
 
     Raises
     ------
     ValueError
-        If ``n_qubits < 2``.
+        If ``n_qubits < 2``, or ``entangler`` or ``readout`` is unknown.
     """
     if n_qubits < 2:
         raise ValueError(f"n_qubits must be ≥ 2 for the CNOT entangling ring; got {n_qubits}.")
+    validate_circuit_options(n_qubits, entangler, readout)
 
-    device = _resolve_device(device_name, n_qubits)
-    circuit_fn = _make_amplitude_embedding_circuit(n_qubits, n_layers, diff_method)
+    validate_shots(shots, diff_method)
+    device = resolve_device(device_name, n_qubits)
+    validate_device_shots(device, shots)
+    circuit_fn = _make_amplitude_embedding_circuit(
+        n_qubits, n_layers, diff_method, entangler, readout
+    )
 
     qnode = qml.QNode(
         func=circuit_fn,
         device=device,
         diff_method=diff_method,
         interface="torch",
+        shots=shots,
     )
-    qnode = _expand_batch_dimension(qnode, diff_method)
+    qnode = expand_batch_dimension(qnode, diff_method)
 
     logger.info(
         "Amplitude QNode built | device=%s | qubits=%d | layers=%d | diff=%s",
@@ -235,7 +255,7 @@ def build_amplitude_qnode(
 # ---------------------------------------------------------------------------
 
 
-class AmplitudeEncodingLayer(nn.Module):
+class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
     """
     A PyTorch ``nn.Module`` wrapping the amplitude-embedding QNode.
 
@@ -293,17 +313,40 @@ class AmplitudeEncodingLayer(nn.Module):
         Width of the input vectors, ``1 ≤ n_features ≤ 2**n_qubits``.
         Default: ``2**n_qubits`` (no padding).
     device_name:
-        PennyLane device, one of :data:`DeviceName`.  An unavailable backend
-        falls back along ``lightning.qubit → default.qubit`` with a warning
-        per step.
+        PennyLane device name.  The simulators in
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
+        ``lightning.qubit → default.qubit`` with a warning per step when
+        unavailable; any other name (a plugin or hardware) is constructed as
+        given, and PennyLane's error surfaces if it cannot be.  Hardware
+        needs ``shots`` and ``diff_method="parameter-shift"``.
     diff_method:
         Gradient method.  See *Differentiation methods* above.
+    entangler:
+        The variational block: ``"ring"`` (default), ``"strongly_entangling"``,
+        ``"brickwork"`` or ``"hardware_efficient"``; see
+        :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
+    readout:
+        ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
+        ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``.
+    noise_level, noise_position, noise_method, noise_trajectories, noise_channel:
+        Training-time noise, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: ``noise_level``
+        is the strength of ``noise_channel`` (default ``"depolarizing"``), in
+        ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping and flip
+        channels (default 0, noiseless), applied in train mode only, at
+        ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
+        or by Pauli trajectories (the Pauli channels only).  See
+        :mod:`hqnn_forge.noise`.
+    shots:
+        Finite-shot sampling, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
 
     Attributes
     ----------
     n_qubits : int
     n_layers : int
     n_features : int
+        Width of the input, before padding to ``n_amplitudes``.
     n_amplitudes : int
         ``2**n_qubits``.
     qlayer : pennylane.qnn.TorchLayer
@@ -326,6 +369,12 @@ class AmplitudeEncodingLayer(nn.Module):
     torch.Size([4, 3])
     """
 
+    #: Re-applied by :func:`hqnn_forge.noise.apply_shots`, whose
+    #: parameter-shift QNode replays this circuit function: the check built
+    #: into it holds the construction-time ``diff_method``, which under
+    #: ``backprop`` would let parameter-shift differentiate the inputs.
+    _input_gradient_check = staticmethod(_check_input_gradient)
+
     def __init__(
         self,
         n_qubits: int = 8,
@@ -333,6 +382,14 @@ class AmplitudeEncodingLayer(nn.Module):
         n_features: int | None = None,
         device_name: DeviceName = "lightning.qubit",
         diff_method: DiffMethod = "adjoint",
+        entangler: Entangler = "ring",
+        readout: Readout = "all",
+        noise_level: float = 0.0,
+        noise_position: Position = "all",
+        noise_method: NoiseMethod = "density",
+        noise_trajectories: int = 1,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
     ) -> None:
         super().__init__()
 
@@ -351,18 +408,34 @@ class AmplitudeEncodingLayer(nn.Module):
         self.n_layers = n_layers
         self.n_features = n_features
         self.n_amplitudes = n_amplitudes
+        self.entangler = entangler
+        self.readout = readout
+        self.n_outputs = len(readout_wires(n_qubits, readout))
 
         qnode = build_amplitude_qnode(
             n_qubits=n_qubits,
             n_layers=n_layers,
             device_name=device_name,
             diff_method=diff_method,
+            entangler=entangler,
+            readout=readout,
+            shots=shots,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
-            "weights": (n_layers, n_qubits, 3),
+            "weights": variational_weight_shape(entangler, n_qubits, n_layers),
         }
         self.qlayer = qml.qnn.TorchLayer(qnode, weight_shapes)
+        self._init_training_noise(
+            qnode,
+            n_qubits,
+            noise_level,
+            noise_position,
+            noise_method,
+            noise_trajectories,
+            shots=shots,
+            noise_channel=noise_channel,
+        )
 
     # ------------------------------------------------------------------
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
@@ -413,7 +486,8 @@ class AmplitudeEncodingLayer(nn.Module):
         Returns
         -------
         torch.Tensor
-            Shape ``(batch_size, n_qubits)``, each element ∈ [-1, 1].
+            Shape ``(batch_size, n_outputs)`` (``n_qubits``, or 1 with
+            ``readout="first"``), each element ∈ [-1, 1].
 
         Raises
         ------
@@ -426,13 +500,19 @@ class AmplitudeEncodingLayer(nn.Module):
         """
         amplitudes = self.prepare_inputs(x)
         # Whole batch in one call; see QuantumEncodingLayer.forward.
-        return self.qlayer(amplitudes)
+        return self._run_circuit(amplitudes)
 
     # ------------------------------------------------------------------
     def extra_repr(self) -> str:
+        options = ""
+        if self.entangler != "ring":
+            options += f", entangler={self.entangler!r}"
+        if self.readout != "all":
+            options += f", readout={self.readout!r}"
         return (
             f"n_qubits={self.n_qubits}, "
             f"n_layers={self.n_layers}, "
             f"n_features={self.n_features}, "
-            f"n_params={self.n_layers * self.n_qubits * 3}"
+            f"n_params={sum(p.numel() for p in self.parameters())}{options}"
+            f"{self._noise_repr()}{shots_repr(self.shots)}"
         )

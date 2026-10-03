@@ -58,6 +58,10 @@ class PCANormalizer:
     """
     Fit/apply PCA + per-feature standardisation without scikit-learn.
 
+    The fitted arrays (``mean_``, ``components_``, ``explained_variance_`` and
+    ``std_``) are set by ``fit`` and absent until then, as in scikit-learn;
+    ``is_fitted_`` exists from construction.
+
     Parameters
     ----------
     n_components:
@@ -69,10 +73,6 @@ class PCANormalizer:
         If ``True`` (default), rescale standardised components into ``[-π, π]``
         via ``tanh(x) * π`` before returning.  Ensures valid angle-embedding
         range without hard clipping.
-
-    The fitted arrays (``mean_``, ``components_``, ``explained_variance_`` and
-    ``std_``) are set by ``fit`` and absent until then, as in scikit-learn;
-    ``is_fitted_`` exists from construction.
 
     Attributes
     ----------
@@ -116,7 +116,8 @@ class PCANormalizer:
     >>> rng = np.random.default_rng(42)
     >>> X_train = rng.standard_normal((1000, 30))  # 1000 samples, 30 raw features
     >>> pca = PCANormalizer(n_components=8)
-    >>> pca.fit(X_train)
+    >>> pca.fit(X_train)  # returns the fitted normaliser
+    PCANormalizer(n_components=8, scale_to_pi=True, status=fitted)
     >>> X_enc = pca.transform(X_train)  # torch.Tensor, shape (1000, 8)
     >>> X_enc.shape
     torch.Size([1000, 8])

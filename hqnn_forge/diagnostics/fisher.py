@@ -36,10 +36,15 @@ The likelihood follows from which of the two was passed, not from the output
 width: a one-qubit layer, or one with ``readout="first"``, still returns an
 expectation value, not a logit.
 
-Only the quantum layer's weights are differentiated, so the spectrum is that
-of the circuit's parameters, whatever classical layers sit around it.  They
-are differentiated even when frozen (``requires_grad=False``); the flag is
-restored afterwards.
+Only the quantum layer's trainable tensors are differentiated, so the spectrum
+is that of the circuit's parameters, whatever classical layers sit around it.
+A layer with several -- ``DataReuploadingLayer``'s ``weights`` and
+``input_scaling`` -- gets one matrix over all of them, flattened in the
+TorchLayer's argument order (the order ``gradient_variance`` reports them
+in); :attr:`FisherSpectrum.parameter_slices` says which rows and columns belong
+to which tensor, and ``parameters=`` restricts the matrix to named tensors.
+They are differentiated even when frozen (``requires_grad=False``); the flag
+is restored afterwards.
 
 Effective dimension
 -------------------
@@ -74,8 +79,8 @@ References
 ----------
 * Abbas et al. (2021) "The power of quantum neural networks", Nature
   Computational Science 1, 403.
-* Berezniuk et al. (2020) "A scale-dependent notion of effective dimension
-  for generalization", arXiv:2001.10872.
+* Berezniuk et al. (2020) "A scale-dependent notion of effective dimension",
+  arXiv:2001.10872.
 """
 
 from __future__ import annotations
@@ -88,7 +93,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from hqnn_forge.diagnostics.gradients import InitFn, InitName, _make_init, _resolve_weights
+from hqnn_forge.diagnostics.gradients import (
+    InitFn,
+    InitName,
+    _make_init,
+    _resolve_layer,
+    _resolve_tensors,
+)
 from hqnn_forge.utils.modes import eval_mode
 
 
@@ -104,13 +115,16 @@ class FisherSpectrum:
     likelihood:
         ``"bernoulli"`` for a classifier, ``"gaussian"`` for an encoding layer.
     n_params:
-        Number of quantum weights, ``d``.
+        Number of quantum parameters measured, ``d``.
     n_data:
         Rows of ``data_sample`` the expectation over ``x`` was taken over.
     matrix:
         The ``(d, d)`` Fisher matrix, ``float64``.
     eigenvalues:
         Its eigenvalues in descending order, ``float64``, length ``d``.
+    parameter_slices:
+        For each measured tensor, by TorchLayer argument name, the slice of
+        rows and columns of ``matrix`` that belongs to it.
     """
 
     layer_type: str
@@ -121,6 +135,12 @@ class FisherSpectrum:
     # call bool() on an element-wise tensor comparison and raise.
     matrix: torch.Tensor = field(compare=False)
     eigenvalues: torch.Tensor = field(compare=False)
+    parameter_slices: dict[str, slice] = field(compare=False, default_factory=dict)
+
+    def block(self, name: str) -> torch.Tensor:
+        """The ``(d_name, d_name)`` block of ``matrix`` for tensor ``name``."""
+        sl = self.parameter_slices[name]
+        return self.matrix[sl, sl]
 
     @property
     def trace(self) -> float:
@@ -218,11 +238,12 @@ def _check_data(data_sample: torch.Tensor) -> torch.Tensor:
 
 
 def _per_sample_jacobian(
-    model: nn.Module, weights: torch.Tensor, x: torch.Tensor
+    model: nn.Module, tensors: list[torch.Tensor], x: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     ``(outputs, J)`` for one sample: outputs of shape ``(k,)`` and the
-    Jacobian ``J`` of shape ``(k, d)`` with respect to the flattened weights.
+    Jacobian ``J`` of shape ``(k, d)`` with respect to ``tensors``, flattened
+    and concatenated in order.
     """
     out = model(x.unsqueeze(0)).reshape(-1)
     rows = []
@@ -230,20 +251,25 @@ def _per_sample_jacobian(
         if out[i].requires_grad:
             # An output that does not reach the weights (an ablated quantum
             # layer) contributes a zero row rather than an autograd error.
-            (grad,) = torch.autograd.grad(
+            grads = torch.autograd.grad(
                 out[i],
-                weights,
+                tensors,
                 retain_graph=i < out.shape[0] - 1,
                 allow_unused=True,
                 materialize_grads=True,
             )
         else:
-            grad = torch.zeros_like(weights)
-        rows.append(grad.reshape(-1).to(torch.float64))
+            grads = tuple(torch.zeros_like(t) for t in tensors)
+        rows.append(torch.cat([g.reshape(-1).to(torch.float64) for g in grads]))
     return out.detach().to(torch.float64), torch.stack(rows)
 
 
-def fisher_information_matrix(model: nn.Module, data_sample: torch.Tensor) -> FisherSpectrum:
+def fisher_information_matrix(
+    model: nn.Module,
+    data_sample: torch.Tensor,
+    *,
+    parameters: Sequence[str] | None = None,
+) -> FisherSpectrum:
     """
     Fisher information matrix of the quantum weights at their current values.
 
@@ -257,34 +283,72 @@ def fisher_information_matrix(model: nn.Module, data_sample: torch.Tensor) -> Fi
         Inputs of shape ``(n_samples, n_features)`` the expectation over ``x``
         is taken over.  For a classifier these go through its classical
         encoder; for a layer they are fed to the circuit directly.
+    parameters:
+        Names of the quantum layer's trainable tensors to measure, e.g.
+        ``["weights"]``.  Default: all of them, in the TorchLayer's order.
+        The matrix of a subset equals the corresponding block of the full
+        one: ``F = E[Jᵀ J]`` blockwise.
 
     Returns
     -------
     FisherSpectrum
 
+    Raises
+    ------
+    ValueError
+        If ``parameters`` names a tensor the layer does not have, one twice,
+        or none.
+
     Notes
     -----
     Cost is one forward pass and ``k`` backward passes per row, ``k`` being
     the number of outputs (1 for a classifier), plus one ``(d, d)``
-    eigendecomposition.  The model is run in eval mode (its mode is restored
-    afterwards), so dropout is off and a model built with ``noise_level > 0``
-    is measured on its noiseless circuit, as :func:`gradient_variance` is.  To
-    measure it under noise, call this inside
+    eigendecomposition.  The ``k`` backward passes do not each re-run the
+    circuit's gradient under ``backprop`` or ``adjoint``: PennyLane computes a
+    forward pass's Jacobian once and reuses it, so a row costs one circuit
+    execution on ``default.qubit`` and two (forward and adjoint Jacobian) on
+    ``lightning.qubit``, whatever ``k`` is.  Only ``parameter-shift`` repeats
+    its ``2d`` shifted circuits for each output.
+
+    Computing the Jacobians from one batched forward instead, with vectorised
+    backward passes, was measured slower on every path, with the same number
+    of executions, and it cannot vectorise through ``parameter-shift`` at all
+    (#223, #286), so the per-row loop is kept.
+
+    The model is run in eval mode (its mode is restored afterwards), so
+    dropout is off and a model built with ``noise_level > 0`` is measured on
+    its noiseless circuit, as :func:`gradient_variance` is.  To measure it
+    under noise, call this inside
     :func:`hqnn_forge.noise.apply_depolarizing_noise`.
     """
-    layer, weights, _, _ = _resolve_weights(model, caller="fisher_information_matrix")
+    # No init is drawn here, so no tensor has to be singled out as the angles:
+    # a layer with several tensors and none named "weights" is measured too.
+    layer, all_tensors, _ = _resolve_layer(model, caller="fisher_information_matrix")
+    names = list(all_tensors) if parameters is None else list(parameters)
+    unknown = [n for n in names if n not in all_tensors]
+    if unknown or not names or len(set(names)) != len(names):
+        raise ValueError(
+            f"parameters must name some of {', '.join(map(repr, all_tensors))}, "
+            f"each once; got {names!r}."
+        )
+    tensors = [all_tensors[n] for n in names]
+    slices, start = {}, 0
+    for name, t in zip(names, tensors, strict=True):
+        slices[name] = slice(start, start + t.numel())
+        start += t.numel()
     X = _check_data(data_sample)
     # Decided by what was passed, not by the output width: a one-qubit or
     # readout="first" layer also returns a single value, which is not a logit.
     likelihood = "gaussian" if layer is model else "bernoulli"
-    d = weights.numel()
+    d = start
     fisher = torch.zeros(d, d, dtype=torch.float64)
-    was_frozen = not weights.requires_grad
-    weights.requires_grad_(True)
+    frozen = [t for t in tensors if not t.requires_grad]
+    for t in frozen:
+        t.requires_grad_(True)
     try:
         with eval_mode(model):
             for i in range(X.shape[0]):
-                out, jac = _per_sample_jacobian(model, weights, X[i])
+                out, jac = _per_sample_jacobian(model, tensors, X[i])
                 if likelihood == "bernoulli":
                     if out.shape[0] != 1:
                         raise ValueError(
@@ -296,8 +360,8 @@ def fisher_information_matrix(model: nn.Module, data_sample: torch.Tensor) -> Fi
                 else:
                     fisher += jac.T @ jac
     finally:
-        if was_frozen:
-            weights.requires_grad_(False)
+        for t in frozen:
+            t.requires_grad_(False)
     fisher /= X.shape[0]
     fisher = 0.5 * (fisher + fisher.T)
     eigenvalues = torch.linalg.eigvalsh(fisher).flip(0).clamp_min(0.0)
@@ -308,6 +372,7 @@ def fisher_information_matrix(model: nn.Module, data_sample: torch.Tensor) -> Fi
         n_data=X.shape[0],
         matrix=fisher,
         eigenvalues=eigenvalues,
+        parameter_slices=slices,
     )
 
 
@@ -463,7 +528,10 @@ def effective_dimension(
     init:
         ``"uniform"`` over [0, 2π) (default, as in the paper),
         ``"restricted"``, ``"block_local"``, or a callable that fills the
-        weight tensor in place.
+        weight tensor in place.  As in
+        :func:`~hqnn_forge.diagnostics.gradient_variance`, only the rotation
+        angles are drawn; another trainable tensor (``input_scaling``) keeps
+        its values, but is measured: ``d`` counts every tensor.
     generator:
         Source of randomness for the draws; the global RNG is left untouched.
 
@@ -476,7 +544,8 @@ def effective_dimension(
     X = _check_data(data_sample)
     n = X.shape[0] if n_data is None else n_data
     kappa = _check_kappa(n, gamma)
-    _, weights, n_qubits, n_layers = _resolve_weights(model, caller="effective_dimension")
+    _, tensors, angles, n_qubits, n_layers = _resolve_tensors(model, caller="effective_dimension")
+    weights = tensors[angles]
     gen = generator if generator is not None else torch.Generator().manual_seed(0)
     init_name, init_fn = _make_init(init, n_qubits, n_layers, gen)
 
@@ -493,7 +562,7 @@ def effective_dimension(
 
     normalised = _normalise_spectra(torch.stack(spectra))
     d_eff = _effective_dimension(normalised, kappa)
-    d = weights.numel()
+    d = sum(t.numel() for t in tensors.values())
     return EffectiveDimensionResult(
         layer_type=type(model).__name__,
         init=init_name,

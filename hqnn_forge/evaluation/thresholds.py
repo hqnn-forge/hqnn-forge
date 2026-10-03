@@ -9,9 +9,12 @@ the usual remedy -- sweep thresholds on a validation split and keep the one
 that maximises a rank-insensitive metric such as MCC -- is what
 :func:`find_optimal_threshold` does.
 
-All metrics here take hard labels and are computed from the confusion matrix
-with plain tensor arithmetic, so nothing depends on scikit-learn at runtime.
-Inputs may be ``torch.Tensor`` or anything ``torch.as_tensor`` accepts.
+The metrics in :data:`METRICS` take hard labels and are computed from the
+confusion matrix with plain tensor arithmetic, so nothing depends on
+scikit-learn at runtime.  :func:`pr_auc` is the exception in kind, not in
+dependencies: it is threshold-free, scored from the probabilities over every
+operating point, and so is deliberately not in :data:`METRICS`.  Inputs may
+be ``torch.Tensor`` or anything ``torch.as_tensor`` accepts.
 
 Conventions
 -----------
@@ -166,6 +169,16 @@ class ThresholdSearchResult(NamedTuple):
     score: float
 
 
+class _Counts(NamedTuple):
+    """Confusion counts per distinct labelling, in order of increasing threshold."""
+
+    unique: torch.Tensor  # the sorted unique scores, one fewer than the labellings
+    tp: torch.Tensor
+    tn: torch.Tensor
+    fp: torch.Tensor
+    fn: torch.Tensor
+
+
 class _Sweep(NamedTuple):
     """One entry per distinct labelling the probabilities can produce."""
 
@@ -176,21 +189,33 @@ class _Sweep(NamedTuple):
     fn: torch.Tensor
 
 
-def _sweep(t: torch.Tensor, p: torch.Tensor, dtype: torch.dtype) -> _Sweep:
+def _validate_scores(y_true: object, y_prob: object) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Binary labels and float64 scores, both flattened, checked for agreement.
+
+    Checks what every scorer here needs: non-empty, equal lengths, 0/1
+    labels.  Which score values are admissible (finite, within [0, 1]) is
+    the caller's to decide.
+    """
+    t = _as_binary(y_true, "y_true")
+    p = torch.as_tensor(y_prob, dtype=torch.float64).reshape(-1)
+    if t.numel() == 0:
+        raise ValueError("y_true is empty; nothing can be scored from no samples.")
+    if t.shape != p.shape:
+        raise ValueError(f"y_true and y_prob differ in length: {t.numel()} vs {p.numel()}.")
+    return t, p
+
+
+def _counts(t: torch.Tensor, p: torch.Tensor) -> _Counts:
     """
     Confusion counts for every distinct labelling, in O(n log n).
 
     Thresholds in ``(u[i-1], u[i]]`` all produce the same labelling, where
-    ``u`` are the sorted unique probabilities, so there are ``len(u) + 1``
+    ``u`` are the sorted unique scores, so there are ``len(u) + 1``
     labellings: one per unique value, plus the all-negative one above the
     maximum.  Sorting the labels once and taking a cumulative sum gives the
     counts for all of them without re-scanning the vector per candidate.
-
-    ``dtype`` is the precision the caller's probabilities came in.  The
-    counts are exact in any case, but the thresholds are rounded to it so
-    that ``prob >= threshold`` reproduces the scored labelling in that dtype
-    too -- a float64 midpoint of two adjacent float32 probabilities rounds
-    back onto one of them, which would relabel the samples sitting there.
+    Only the order of ``p`` matters, so any real-valued score works.
     """
     n = p.numel()
     unique, counts = torch.unique(p, return_counts=True)  # sorted ascending
@@ -204,6 +229,21 @@ def _sweep(t: torch.Tensor, p: torch.Tensor, dtype: torch.dtype) -> _Sweep:
     tn = starts.to(torch.float64) - below
     tp = below[-1] - below  # positives at or above it
     fp = (n - starts).to(torch.float64) - tp
+    return _Counts(unique, tp, tn, fp, fn)
+
+
+def _sweep(t: torch.Tensor, p: torch.Tensor, dtype: torch.dtype) -> _Sweep:
+    """
+    :func:`_counts` with a representative threshold for each labelling.
+
+    ``p`` must lie in [0, 1], which bounds the lowest and highest intervals.
+    ``dtype`` is the precision the caller's probabilities came in.  The
+    counts are exact in any case, but the thresholds are rounded to it so
+    that ``prob >= threshold`` reproduces the scored labelling in that dtype
+    too -- a float64 midpoint of two adjacent float32 probabilities rounds
+    back onto one of them, which would relabel the samples sitting there.
+    """
+    unique, tp, tn, fp, fn = _counts(t, p)
 
     # Each candidate is reported as the midpoint of the interval of thresholds
     # that produce its labelling, not as the observed probability at its upper
@@ -258,9 +298,12 @@ def find_optimal_threshold(
         ``model.predict_proba(X_val)``.
     metric:
         ``"mcc"`` (default), ``"f1"``, ``"balanced_accuracy"``, or any callable
-        ``(y_true, y_pred) -> float`` taking hard labels.  Threshold-free
-        metrics such as PR-AUC do not depend on the threshold and cannot be
-        searched.
+        ``(y_true, y_pred) -> float``.  A callable is always passed hard 0/1
+        predictions, ``(y_prob >= threshold).long()``, never the
+        probabilities.  Threshold-free metrics such as PR-AUC or ROC-AUC
+        therefore do not belong here: given hard labels they score one
+        degenerate operating point, not the ranking.  :func:`pr_auc` is
+        refused outright; other such scorers are not detected.
 
     Returns
     -------
@@ -271,8 +314,10 @@ def find_optimal_threshold(
     Raises
     ------
     ValueError
-        If ``metric`` is an unknown name, if the inputs are empty or differ in
-        length, or if ``y_true`` is not binary.
+        If ``metric`` is an unknown name or is :func:`pr_auc` (by name or as
+        the function), if the inputs are empty or differ in length, if
+        ``y_true`` is not binary, or if ``y_prob`` contains NaN or lies
+        outside ``[0, 1]``.
 
     Examples
     --------
@@ -285,6 +330,12 @@ def find_optimal_threshold(
     """
     scorer: Metric | None = None
     counts_metric: CountMetric | None = None
+    if metric is pr_auc or metric == "pr_auc":
+        raise ValueError(
+            "pr_auc is threshold-free: it scores the probabilities over every "
+            "threshold, so no threshold maximises it.  Search on 'mcc', 'f1' or "
+            "'balanced_accuracy' and report pr_auc(y_true, y_prob) alongside."
+        )
     if isinstance(metric, str):
         if metric not in METRICS:
             raise ValueError(
@@ -294,17 +345,12 @@ def find_optimal_threshold(
     else:
         scorer = metric
 
-    t = _as_binary(y_true, "y_true")
-    p = torch.as_tensor(y_prob, dtype=torch.float64).reshape(-1)
+    t, p = _validate_scores(y_true, y_prob)
     # Counts are taken in float64 whatever came in, but the threshold is
     # reported in the precision the probabilities carry (see _sweep); a plain
     # Python sequence carries none, so it is taken at face value as float64.
     native = torch.as_tensor(y_prob).dtype if hasattr(y_prob, "dtype") else torch.float64
     dtype = native if native.is_floating_point else torch.float64
-    if t.numel() == 0:
-        raise ValueError("y_true is empty; a threshold cannot be chosen from no samples.")
-    if t.shape != p.shape:
-        raise ValueError(f"y_true and y_prob differ in length: {t.numel()} vs {p.numel()}.")
     # NaN passes both comparisons below and would be silently labelled
     # negative at every threshold, which a diverged model makes easy to hit.
     if torch.any(torch.isnan(p)):
@@ -331,6 +377,80 @@ def find_optimal_threshold(
 
 
 # ---------------------------------------------------------------------------
+# Threshold-free metric
+# ---------------------------------------------------------------------------
+
+
+def pr_auc(y_true: object, y_prob: object) -> float:
+    """
+    Area under the precision-recall curve, as average precision.
+
+    With the operating points taken in order of decreasing threshold,
+
+        AP = Σ_k (R_k − R_{k−1}) · P_k
+
+    the step interpolation of ``sklearn.metrics.average_precision_score``:
+    each gain in recall is credited at the precision of the operating point
+    that achieves it.  It is not the trapezoidal ``auc(recall, precision)``,
+    which interpolates linearly between operating points and so credits
+    precision no threshold actually attains.
+
+    Samples that share a probability form one operating point: a threshold
+    cannot separate them, so the result does not depend on the order in which
+    tied samples arrive.
+
+    PR-AUC is threshold-free, the usual companion of MCC on imbalanced data;
+    it is not in :data:`METRICS`, and :func:`find_optimal_threshold` refuses
+    it, because no threshold maximises it.  It depends only on the ranking,
+    so any score monotone in the positive-class probability (a logit, say)
+    gives the same value.
+
+    Parameters
+    ----------
+    y_true:
+        Binary labels, shape ``(n,)``.
+    y_prob:
+        Positive-class scores, shape ``(n,)``, e.g. from
+        ``model.predict_proba(X_val)``.
+
+    Returns
+    -------
+    float
+        In ``[0, 1]``.  ``0.0`` when ``y_true`` has no positives, where recall
+        is undefined; scikit-learn returns the same value, with a warning.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are empty or differ in length, if ``y_true`` is not
+        binary, or if ``y_prob`` contains NaN or ±inf.
+
+    Examples
+    --------
+    >>> round(pr_auc([0, 1, 1, 0, 1], [0.1, 0.4, 0.35, 0.8, 0.9]), 4)  # 1/3 + 2/9 + 1/4
+    0.8056
+    """
+    t, p = _validate_scores(y_true, y_prob)
+    if not bool(torch.isfinite(p).all()):
+        raise ValueError(
+            f"y_prob contains {int((~torch.isfinite(p)).sum())} NaN or ±inf value(s)."
+        )
+
+    # One entry per distinct labelling, in order of increasing threshold: the
+    # first predicts every sample positive, the last none.
+    counts = _counts(t, p)
+    positives = counts.tp[0]
+    if positives == 0:
+        return 0.0
+    recall = counts.tp / positives
+    precision = _guarded_div(counts.tp, counts.tp + counts.fp)
+    # Lowering the threshold from entry k+1 to entry k gains recall
+    # R_k - R_{k+1}, credited at precision P_k.  The all-negative entry has
+    # no predictions and so no precision; it only anchors recall at 0.
+    return float(((recall[:-1] - recall[1:]) * precision[:-1]).sum())
+
+
+# ---------------------------------------------------------------------------
 # Parameter efficiency
 # ---------------------------------------------------------------------------
 
@@ -338,6 +458,12 @@ def find_optimal_threshold(
 def parameter_efficiency(model: nn.Module | int, score: float) -> float:
     """
     ``score`` per thousand trainable parameters, e.g. MCC/kParam.
+
+    A model's count includes every trainable parameter, also those that can
+    never move the output (``circuit_summary(...).n_inert_params``; 20 of the
+    published SHNN's 122).  That is the convention of the published results.
+    To state efficiency over the live parameters instead, pass that count as
+    an integer, and say which one was used.
 
     Parameters
     ----------

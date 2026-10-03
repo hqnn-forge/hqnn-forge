@@ -12,10 +12,12 @@ repeats it over qubit and layer counts so the trend is visible, and
 
 Estimator
 ---------
-For each of ``n_samples`` draws the layer's weights are re-initialised with
-``init``, an input is drawn uniformly from ``[-input_scale, input_scale]^n``,
-the cost is evaluated for that single sample and its gradient with respect to
-every quantum weight is recorded.  The sample variance is taken per weight;
+For each of ``n_samples`` draws the layer's rotation angles (its ``weights``
+tensor) are re-initialised with ``init`` -- any other trainable tensor, such
+as ``input_scaling``, keeps its values -- an input is drawn uniformly from
+``[-input_scale, input_scale]^n``, the cost is evaluated for that single
+sample and its gradient with respect to every quantum weight, in every
+trainable tensor, is recorded.  The sample variance is taken per weight;
 ``total_variance`` is its sum over weights (the variance of the gradient
 vector, which does not shrink just because a larger circuit has more
 parameters) and ``mean_variance`` its mean.  The default cost is ⟨Z_0⟩, a
@@ -30,7 +32,10 @@ samples, ``default.qubit``):
 * ``total_variance`` falls by roughly 5x from 2 to 6 qubits under uniform
   init, even with the local cost at 2 layers.  The CNOT ring is a cascade, so
   the backward light cone of Z_0 covers every qubit within one layer and the
-  "local" cost behaves like a global one.
+  "local" cost behaves like a global one.  ``entangler="brickwork"`` is the
+  exception: its light cone does not grow with the register, and its
+  ``total_variance`` stays flat from 4 to 8 qubits at 2 layers (see
+  :mod:`hqnn_forge.initializers.restricted_variance`).
 * With inputs spread over (-π, π) -- what both classifiers produce, and what
   ``PCANormalizer(scale_to_pi=True)`` produces -- the restricted-variance init
   gives the same gradient variance as uniform init: the angle embedding
@@ -49,16 +54,21 @@ follow the same rule.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import pennylane as qml
 import torch
 import torch.nn as nn
 
+from hqnn_forge._encoding_contract import CircuitLayer
+from hqnn_forge._resolve import resolve_encoding_layer
+from hqnn_forge.diagnostics.circuit import input_width
 from hqnn_forge.initializers import block_local_init_, restricted_normal_init_
+from hqnn_forge.initializers.restricted_variance import _not_restricting_ignored
 from hqnn_forge.utils.modes import eval_mode
+from hqnn_forge.utils.rng import seeded_rng
 
 InitName = Literal["uniform", "restricted", "block_local"]
 InitFn = Callable[[torch.Tensor], Any]
@@ -69,6 +79,10 @@ CostFn = Callable[[torch.Tensor], torch.Tensor]
 class GradientVarianceResult:
     """
     Gradient-variance estimate for one layer configuration.
+
+    ``per_parameter`` and ``per_tensor`` are excluded from ``==`` and
+    ``hash``: comparing them would return a Tensor rather than a bool, so two
+    results compare on their scalar fields only.
 
     Attributes
     ----------
@@ -81,14 +95,19 @@ class GradientVarianceResult:
     n_samples:
         Number of random draws.
     total_variance:
-        Sum over weights of the per-weight gradient variance.
+        Sum of the per-entry gradient variance over every trainable tensor of
+        the layer, i.e. over the whole gradient vector.
     mean_variance:
-        Mean over weights of the per-weight gradient variance.
+        ``total_variance`` divided by the number of trainable entries.
     per_parameter:
-        Per-weight variance, same shape as the layer's weight tensor.  This
-        field is excluded from ``==`` and ``hash``: comparing it would return
-        a Tensor rather than a bool, so two results compare on their scalar
-        fields only.
+        Per-entry variance.  For a layer with one trainable tensor, the
+        common case, it has that tensor's shape.  With several, it is the
+        flat concatenation of ``per_tensor``'s values, in that mapping's
+        order.
+    per_tensor:
+        Per-entry variance per trainable tensor, keyed by the TorchLayer
+        argument name (``"weights"``, ``"input_scaling"``), each shaped like
+        its tensor.
     """
 
     layer_type: str
@@ -100,6 +119,7 @@ class GradientVarianceResult:
     total_variance: float
     mean_variance: float
     per_parameter: torch.Tensor = field(compare=False)
+    per_tensor: Mapping[str, torch.Tensor] = field(default_factory=dict, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Scalar fields only, for logging."""
@@ -115,48 +135,55 @@ class GradientVarianceResult:
         }
 
 
-def _resolve_weights(
+def _resolve_layer(
     target: nn.Module, caller: str = "gradient_variance"
-) -> tuple[nn.Module, torch.Tensor, int, int]:
+) -> tuple[CircuitLayer, dict[str, torch.Tensor], int]:
     """
-    Return ``(layer, weights, n_qubits, n_layers)`` for the layer inside *target*.
+    Return ``(layer, tensors, n_qubits)`` for the layer inside *target*.
     *caller* names the public function in the error messages.
 
-    The trainable tensor is read off the TorchLayer's ``qnode_weights`` mapping
-    rather than a fixed attribute name, the same way
+    ``tensors`` is the TorchLayer's ``qnode_weights`` mapping, every trainable
+    argument by name, read the same way
     :func:`~hqnn_forge.diagnostics.circuit.circuit_summary` resolves a layer.
-    A layer with several trainable arguments -- such as ``DataReuploadingLayer``
-    with ``trainable_input_scaling=True``, which adds ``input_scaling`` next
-    to ``weights`` -- is rejected rather than silently measured in part,
-    because ``total_variance`` is documented as the variance of the whole
-    gradient vector.
+    Which tensor holds the rotation angles is not decided here, so a caller
+    that draws none (the Fisher matrix) accepts any set of tensors.
     """
-    layer = getattr(target, "quantum_layer", target)
-    qlayer = getattr(layer, "qlayer", None)
-    n_qubits = getattr(layer, "n_qubits", None)
-    if (
-        not isinstance(layer, nn.Module)
-        or not isinstance(qlayer, qml.qnn.TorchLayer)
-        or not isinstance(n_qubits, int)
-    ):
-        raise TypeError(
-            f"{caller} expects an encoding layer (QuantumEncodingLayer, "
-            f"IQPEncodingLayer) or a hybrid classifier with a quantum_layer attribute; "
-            f"got {type(target).__name__}."
+    layer, qlayer, n_qubits = resolve_encoding_layer(target, caller)
+    tensors = dict(qlayer.qnode_weights.items())
+    return layer, tensors, n_qubits
+
+
+def _resolve_tensors(
+    target: nn.Module, caller: str = "gradient_variance"
+) -> tuple[CircuitLayer, dict[str, torch.Tensor], str, int, int]:
+    """
+    Return ``(layer, tensors, angles, n_qubits, n_layers)`` for the layer
+    inside *target*, as :func:`_resolve_layer` does, plus the angle tensor.
+
+    ``angles`` names the rotation-angle tensor the init strategies draw:
+    ``"weights"``, or the only tensor there is.  A layer with several tensors
+    and none named ``weights`` is refused, since which of them is the angles
+    would be a guess.  ``n_layers`` falls back to the angle tensor's first
+    dimension when the layer has no ``n_layers`` attribute.
+    """
+    layer, tensors, n_qubits = _resolve_layer(target, caller)
+    if len(tensors) == 1:
+        (angles,) = tensors
+    elif "weights" in tensors:
+        angles = "weights"
+    else:
+        raise ValueError(
+            f"{caller}: {type(layer).__name__} has {len(tensors)} trainable tensors "
+            f"({', '.join(sorted(tensors))}) and none named 'weights', so which of them "
+            f"holds the rotation angles the init draws is ambiguous."
         )
-    if len(qlayer.qnode_weights) != 1:
-        raise NotImplementedError(
-            f"{caller} measures a single trainable weight tensor; "
-            f"{type(layer).__name__} has {len(qlayer.qnode_weights)} "
-            f"({', '.join(sorted(qlayer.qnode_weights))})."
-        )
-    (weights,) = qlayer.qnode_weights.values()
     n_layers = getattr(layer, "n_layers", None)
     return (
         layer,
-        weights,
+        tensors,
+        angles,
         n_qubits,
-        n_layers if isinstance(n_layers, int) else int(weights.shape[0]),
+        n_layers if isinstance(n_layers, int) else int(tensors[angles].shape[0]),
     )
 
 
@@ -172,14 +199,16 @@ def _make_init(
     if init == "restricted":
 
         def restricted(w: torch.Tensor) -> None:
-            with _seeded(generator):
+            # Small sizes are measured on purpose here, not a misuse.
+            with _seeded(generator), _not_restricting_ignored():
                 restricted_normal_init_(w, n_qubits=n_qubits, n_layers=n_layers)
 
         return init, restricted
     if init == "block_local":
 
         def block_local(w: torch.Tensor) -> None:
-            with _seeded(generator):
+            # Small sizes are measured on purpose here, not a misuse.
+            with _seeded(generator), _not_restricting_ignored():
                 block_local_init_(w, n_qubits=n_qubits)
 
         return init, block_local
@@ -188,30 +217,16 @@ def _make_init(
     )
 
 
-class _seeded:
+@contextmanager
+def _seeded(generator: torch.Generator) -> Iterator[None]:
     """
-    Run the library initialisers (which use the global RNG) from ``generator``.
-
-    ``torch.manual_seed`` reseeds every initialised accelerator RNG, not just
-    the CPU one, so the CUDA state is saved and restored alongside it.  Other
-    accelerator backends (MPS, XPU) expose no state accessor to save; their
-    RNG is reseeded and not restored, which is why the initialisers are only
-    driven through this helper and never the estimator's own draws.
+    Run the library initialisers (which use the global RNG) from ``generator``:
+    a seed drawn from it drives :func:`hqnn_forge.utils.rng.seeded_rng`, which
+    restores the caller's CPU and CUDA RNG state afterwards.
     """
-
-    def __init__(self, generator: torch.Generator) -> None:
-        self.generator = generator
-
-    def __enter__(self) -> None:
-        self.saved = torch.get_rng_state()
-        self.saved_cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
-        seed = int(torch.randint(0, 2**62, (1,), generator=self.generator))
-        torch.manual_seed(seed)
-
-    def __exit__(self, *exc: object) -> None:
-        torch.set_rng_state(self.saved)
-        if self.saved_cuda is not None:
-            torch.cuda.set_rng_state_all(self.saved_cuda)
+    seed = int(torch.randint(0, 2**62, (1,), generator=generator))
+    with seeded_rng(seed):
+        yield
 
 
 def _local_z0(outputs: torch.Tensor) -> torch.Tensor:
@@ -241,10 +256,18 @@ def gradient_variance(
     init:
         ``"uniform"`` over [0, 2π) (the barren-plateau reference),
         ``"restricted"``, ``"block_local"``, or a callable that fills the
-        weight tensor in place.
+        weight tensor in place.  Only the rotation angles are drawn: the
+        tensor named ``weights`` (or the layer's only tensor).  Any other
+        trainable tensor -- ``DataReuploadingLayer``'s ``input_scaling`` --
+        keeps its current values for every draw, since an angle distribution
+        means nothing for a scale factor, but its gradient is measured and
+        counted in ``total_variance`` like the rest of the gradient vector.
     input_scale:
-        Inputs are uniform in ``[-input_scale, input_scale]``.  ``π`` matches
-        what the classifiers feed the circuit; ``0`` feeds zeros.
+        Inputs are uniform in ``[-input_scale, input_scale]``, one per input
+        feature (``n_features`` for the amplitude encoder, else one per
+        qubit), and go through the layer's ``prepare_inputs``.  ``π`` matches
+        what the classifiers feed the circuit; ``0`` feeds zeros, which the
+        amplitude encoder refuses (no state has zero norm).
     cost_fn:
         Maps the layer output of shape ``(1, n_qubits)`` to a scalar.
         Default: ⟨Z_0⟩.
@@ -260,21 +283,32 @@ def gradient_variance(
         raise ValueError(f"n_samples must be >= 2 to estimate a variance; got {n_samples}.")
     if input_scale < 0:
         raise ValueError(f"input_scale must be >= 0; got {input_scale}.")
-    layer, weights, n_qubits, n_layers = _resolve_weights(target)
+    layer, tensors, angles, n_qubits, n_layers = _resolve_tensors(target)
+    weights = tensors[angles]
+    # One value per input feature, which is not one per qubit for the
+    # amplitude encoder; forward's prepare_inputs pads and normalises them.
+    width = input_width(layer)
     gen = generator if generator is not None else torch.Generator().manual_seed(0)
     init_name, init_fn = _make_init(init, n_qubits, n_layers, gen)
     cost = cost_fn if cost_fn is not None else _local_z0
 
-    original = weights.detach().clone()
-    original_grad = weights.grad
-    grads = torch.empty((n_samples, *weights.shape), dtype=torch.float64)
+    names = list(tensors)
+    originals = {name: (t.detach().clone(), t.grad) for name, t in tensors.items()}
+    grads = {
+        name: torch.empty((n_samples, *t.shape), dtype=torch.float64)
+        for name, t in tensors.items()
+    }
+    # resolve_encoding_layer checked this; the narrowing adds the module API
+    # the CircuitLayer protocol cannot declare.
+    assert isinstance(layer, nn.Module)
     try:
         with eval_mode(layer):
             for s in range(n_samples):
                 with torch.no_grad():
                     init_fn(weights)
-                x = (torch.rand(1, n_qubits, generator=gen) * 2 - 1) * input_scale
-                weights.grad = None
+                x = (torch.rand(1, width, generator=gen) * 2 - 1) * input_scale
+                for t in tensors.values():
+                    t.grad = None
                 value = cost(layer(x))
                 if not isinstance(value, torch.Tensor):
                     # existing behaviour; switching to TypeError is not a style change
@@ -286,14 +320,25 @@ def gradient_variance(
                     raise ValueError(
                         f"cost_fn must return a scalar; got shape {tuple(value.shape)}."
                     )
-                (grad,) = torch.autograd.grad(value, weights)
-                grads[s] = grad.detach().to(torch.float64)
+                # allow_unused: a tensor the cost cannot reach has gradient 0
+                # for this draw, not an undefined one.
+                sample = torch.autograd.grad(
+                    value, [tensors[name] for name in names], allow_unused=True
+                )
+                for name, grad in zip(names, sample, strict=True):
+                    grads[name][s] = 0.0 if grad is None else grad.detach().to(torch.float64)
     finally:
         with torch.no_grad():
-            weights.copy_(original)
-        weights.grad = original_grad
+            for name, (value_before, grad_before) in originals.items():
+                tensors[name].copy_(value_before)
+                tensors[name].grad = grad_before
 
-    per_parameter = grads.var(dim=0)
+    per_tensor = {name: g.var(dim=0) for name, g in grads.items()}
+    per_parameter = (
+        per_tensor[names[0]]
+        if len(names) == 1
+        else torch.cat([v.reshape(-1) for v in per_tensor.values()])
+    )
     return GradientVarianceResult(
         layer_type=type(layer).__name__,
         n_qubits=n_qubits,
@@ -304,6 +349,7 @@ def gradient_variance(
         total_variance=float(per_parameter.sum()),
         mean_variance=float(per_parameter.mean()),
         per_parameter=per_parameter,
+        per_tensor=per_tensor,
     )
 
 

@@ -6,7 +6,7 @@ Small-angle (restricted-variance) weight initialisation for variational quantum 
 Exported symbols
 ----------------
 restricted_normal_init_     In-place initialiser; variance scaled as σ² ∝ 1/(n_qubits * n_layers).
-block_local_init_           Applies restricted_normal_init_ independently per circuit block/layer.
+block_local_init_           restricted_normal_init_ tapered by layer: σ_ℓ² ∝ 1/(n_qubits * (n_layers + ℓ)).
 """
 
 from hqnn_forge.initializers.restricted_variance import (

@@ -325,7 +325,11 @@ class TestBatchedMatchesPerSample:
             xi = x.clone().requires_grad_(True)
             out = forward(xi)
             (out * loss_weights).sum().backward()
-            grads = [p.grad.clone() for p in layer.parameters()]
+            grads = []
+            for p in layer.parameters():
+                assert p.grad is not None
+                grads.append(p.grad.clone())
+            assert xi.grad is not None
             return (out.detach(), xi.grad, *grads)
 
         batched = run(layer)
@@ -460,7 +464,7 @@ class TestInputValidation:
 
     def test_invalid_entangler_raises(self) -> None:
         with pytest.raises(ValueError, match="entangler must be"):
-            _layer(entangler="brickwork")
+            _layer(entangler="ladder")
 
     def test_invalid_readout_raises(self) -> None:
         with pytest.raises(ValueError, match="readout must be"):

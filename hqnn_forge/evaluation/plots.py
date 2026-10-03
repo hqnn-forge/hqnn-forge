@@ -1,13 +1,14 @@
 """
 hqnn_forge.evaluation.plots
 ===========================
-Figures for benchmarking hybrid models: confusion matrix, per-fold metric
+Figures for benchmarking hybrid models: confusion matrix, reliability diagram, per-fold metric
 distributions, and the score-versus-parameter-count frontier.
 
 Every function returns the ``matplotlib.figure.Figure`` it drew on and never
 calls ``plt.show()``, so the figures compose with notebooks and with
-``fig.savefig`` pipelines.  Pass ``ax`` to draw into an existing axes (the
-returned figure is then that axes' figure).
+``fig.savefig`` pipelines.  Pass ``ax`` to draw into an existing axes; the
+returned figure is then that axes' root figure, the top-level ``Figure`` even
+when the axes sits on a ``fig.subfigures()`` sub-figure.
 
 matplotlib is an optional dependency (the ``examples`` extra); it is imported
 when a plotting function is first called, and a missing install raises an
@@ -27,6 +28,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
+    from hqnn_forge.evaluation.calibration import BinStrategy
+
 
 def _pyplot() -> Any:
     try:
@@ -41,7 +44,14 @@ def _pyplot() -> Any:
 
 def _axes(ax: Axes | None, figsize: tuple[float, float]) -> tuple[Figure, Axes]:
     if ax is not None:
-        return ax.figure, ax  # type: ignore[return-value]
+        # For an axes on a sub-figure, ax.figure is the SubFigure, which has no
+        # savefig. Its .figure is the root Figure (and a Figure's .figure is
+        # itself), which works on every matplotlib with sub-figures, unlike
+        # ax.get_figure(root=True), new in 3.10.
+        parent = ax.figure
+        if parent is None:  # a removed or never-attached axes; the stubs leave out None
+            raise ValueError("ax is not attached to a figure.")
+        return parent.figure, ax
     fig, new_ax = _pyplot().subplots(figsize=figsize)
     return fig, new_ax
 
@@ -136,6 +146,53 @@ def plot_confusion_matrix(
     axes.set_xlabel("Predicted")
     axes.set_ylabel("True")
     axes.set_title(title if title is not None else "Confusion matrix")
+    return fig
+
+
+def plot_reliability_diagram(
+    y_true: npt.ArrayLike,
+    prob: npt.ArrayLike,
+    *,
+    n_bins: int = 10,
+    strategy: BinStrategy = "uniform",
+    title: str | None = None,
+    ax: Axes | None = None,
+) -> Figure:
+    """
+    Reliability diagram: observed positive frequency against mean predicted
+    probability per bin, with the diagonal of perfect calibration and the
+    expected calibration error in the legend.
+
+    Parameters
+    ----------
+    y_true, prob:
+        Binary labels and positive-class probabilities.
+    n_bins, strategy:
+        As for :func:`hqnn_forge.evaluation.calibration.reliability_curve`;
+        ``"quantile"`` suits imbalanced data.
+    title:
+        Axes title.  Default: ``"Reliability diagram"``.
+    ax:
+        Draw into this axes.
+    """
+    from hqnn_forge.evaluation.calibration import reliability_curve
+
+    confidence, frequency, counts = reliability_curve(y_true, prob, n_bins, strategy)
+    # expected_calibration_error, from the curve already computed.
+    ece = float((counts / counts.sum() * (frequency - confidence).abs()).sum())
+    fig, axes = _axes(ax, (4.2, 4.0))
+    axes.plot([0, 1], [0, 1], linestyle="--", color="grey", label="perfect calibration")
+    axes.plot(confidence.numpy(), frequency.numpy(), marker="o", label=f"model (ECE {ece:.3f})")
+    for x, yv, n in zip(confidence.tolist(), frequency.tolist(), counts.tolist(), strict=True):
+        axes.annotate(
+            f"{int(n)}", (x, yv), textcoords="offset points", xytext=(4, -10), fontsize=7
+        )
+    axes.set_xlim(0, 1)
+    axes.set_ylim(0, 1)
+    axes.set_xlabel("Mean predicted probability")
+    axes.set_ylabel("Observed frequency")
+    axes.legend(loc="upper left")
+    axes.set_title(title if title is not None else "Reliability diagram")
     return fig
 
 

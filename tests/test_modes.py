@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from hqnn_forge.utils.modes import eval_mode
+from hqnn_forge.utils.modes import eval_mode, train_mode
 
 
 def _net() -> nn.Sequential:
@@ -91,3 +91,44 @@ class TestEvalMode:
         assert net.training
         assert inner.training
         assert not shared.training
+
+
+class TestTrainMode:
+    def test_a_training_model_keeps_its_frozen_submodules(self) -> None:
+        net = _net()
+        _inner_dropout(net).eval()
+        before = _modes(net)
+        with train_mode(net):
+            assert _modes(net) == before
+            assert not _inner_dropout(net).training
+        assert _modes(net) == before
+
+    def test_an_eval_root_keeps_a_submodule_left_in_train_mode(self) -> None:
+        """Everything frozen but the inner block: the root's flag alone must not decide."""
+        net = _net().eval()
+        net[1].train()
+        before = _modes(net)
+        with train_mode(net):
+            assert _modes(net) == before
+        assert _modes(net) == before
+
+    def test_an_eval_model_trains_throughout(self) -> None:
+        net = _net().eval()
+        with train_mode(net):
+            assert all(_modes(net))
+        assert not any(_modes(net))
+
+    def test_restores_modes_when_block_raises(self) -> None:
+        net = _net().eval()
+        with pytest.raises(RuntimeError), train_mode(net):
+            raise RuntimeError
+        assert not any(_modes(net))
+
+    def test_restore_calls_train_overrides(self) -> None:
+        net = nn.Sequential(_RecordsTrainCalls()).eval()
+        recorder = net[0]
+        assert isinstance(recorder, _RecordsTrainCalls)
+        recorder.calls.clear()
+        with train_mode(net):
+            pass
+        assert recorder.calls[-1] is False

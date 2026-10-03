@@ -23,17 +23,16 @@ Checked structurally (fast, no training):
   that differ (head width, embedding axis, entangler order and range, depth,
   encoder range) are pinned so a change to them shows up here.
 
-Not checked, and why: the published MCC (0.5758 ± 0.0371) and MCC/kParam
+Not checked here: the published MCC (0.5758 ± 0.0371) and MCC/kParam
 (4.720) come from 5-fold CV on the 284,807-row Kaggle dataset with SMOTE and
-100 epochs; reproducing them needs the dataset (not redistributable) and hours
-of simulation, so they are out of scope for the test suite.  With the
-structure now identical, a full run of ``published_shnn()`` on that data is
-the remaining check of the reported numbers.
+100 epochs.  That run is ``tests/test_published_shnn_reproduction.py``, opt-in
+because it needs the dataset (not redistributable) and days of simulation.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import pennylane as qml
 import pytest
@@ -41,6 +40,7 @@ import torch
 from torch import nn
 
 from hqnn_forge.diagnostics import LOGICAL_GATE_SET, CircuitSummary, circuit_summary
+from hqnn_forge.diagnostics.circuit import _tape_resources
 from hqnn_forge.models import HybridBinaryClassifier
 
 pytestmark = pytest.mark.reproducibility
@@ -68,7 +68,7 @@ def _published_circuit() -> qml.QNode:
     return circuit
 
 
-def _published_shnn() -> tuple[nn.Module, qml.QNode]:
+def _published_shnn() -> tuple[nn.ModuleDict, qml.QNode]:
     circuit = _published_circuit()
     vqc = qml.qnn.TorchLayer(circuit, {"weights": (N_LAYERS, N_QUBITS, 3)})
     pre = nn.Sequential(nn.Linear(N_QUBITS, N_QUBITS), _PiSigmoid())
@@ -83,10 +83,6 @@ def _logical_tape(circuit: qml.QNode, **weights: torch.Tensor) -> qml.tape.Quant
     return decomposed
 
 
-def _cnot_pairs(tape: qml.tape.QuantumScript) -> list[tuple[int, int]]:
-    return [tuple(op.wires.tolist()) for op in tape.operations if op.name == "CNOT"]
-
-
 def _first_entangler_gate(tape: qml.tape.QuantumScript) -> str:
     """Name of the first gate after the ``N_QUBITS`` embedding rotations."""
     return str(tape.operations[N_QUBITS].name)
@@ -96,15 +92,15 @@ def _published_summary(
     circuit: qml.QNode, n_quantum_params: int
 ) -> tuple[CircuitSummary, qml.tape.QuantumScript]:
     tape = _logical_tape(circuit, weights=torch.zeros(N_LAYERS, N_QUBITS, 3))
-    res = tape.specs["resources"]
+    res = _tape_resources(tape)
     summary = CircuitSummary(
         layer_type="published",
         n_qubits=N_QUBITS,
         n_trainable_params=n_quantum_params,
-        depth=int(res.depth),
-        n_gates=int(res.num_gates),
-        n_two_qubit_gates=sum(c for size, c in res.gate_sizes.items() if size >= 2),
-        gate_counts=dict(sorted(res.gate_types.items())),
+        depth=res.depth,
+        n_gates=res.n_gates,
+        n_two_qubit_gates=res.n_two_qubit_gates,
+        gate_counts=res.gate_counts,
     )
     return summary, tape
 
@@ -126,7 +122,7 @@ def _ours() -> HybridBinaryClassifier:
 
 
 @pytest.fixture(scope="module")
-def published() -> tuple[nn.Module, CircuitSummary, qml.tape.QuantumScript]:
+def published() -> tuple[nn.ModuleDict, CircuitSummary, qml.tape.QuantumScript]:
     model, circuit = _published_shnn()
     # Counted from the rebuild rather than assumed: ``test_rebuild_quantum_parameters``
     # is what checks this number against the published table.
@@ -185,12 +181,12 @@ class TestPublishedConfigurationParity:
         assert summary.gate_counts["RY"] == 8 and "RX" not in summary.gate_counts
 
     def test_cnot_pairs_and_gate_order_are_identical(
-        self, published: tuple, configured: tuple
+        self, published: tuple, configured: tuple, cnot_pairs: Callable
     ) -> None:
         _, _, ref_tape = published
         model, _ = configured
         our_tape = _our_tape(model)
-        assert _cnot_pairs(our_tape) == _cnot_pairs(ref_tape)
+        assert cnot_pairs(our_tape) == cnot_pairs(ref_tape)
         assert _first_entangler_gate(our_tape) == _first_entangler_gate(ref_tape) == "Rot"
 
     def test_same_logits_with_the_same_weights(self, published: tuple, configured: tuple) -> None:
@@ -263,15 +259,15 @@ class TestDefaultConfigurationIsAVariant:
         assert ref.gate_counts.get("RY") == 8 and "RX" not in ref.gate_counts
         assert summary.gate_counts.get("RX") == 8 and "RY" not in summary.gate_counts
 
-    def test_entangler_range(self, published: tuple, ours: tuple) -> None:
+    def test_entangler_range(self, published: tuple, ours: tuple, cnot_pairs: Callable) -> None:
         _, ref, ref_tape = published
         _, summary, our_tape = ours
         ring = [(i, (i + 1) % N_QUBITS) for i in range(N_QUBITS)]
         ring2 = [(i, (i + 2) % N_QUBITS) for i in range(N_QUBITS)]
         # StronglyEntanglingLayers uses range l mod (n-1) + 1: range 1, then range 2.
-        assert _cnot_pairs(ref_tape) == ring + ring2
+        assert cnot_pairs(ref_tape) == ring + ring2
         # Ours is a range-1 ring in every layer.
-        assert _cnot_pairs(our_tape) == ring + ring
+        assert cnot_pairs(our_tape) == ring + ring
         # The range, not the gate order, is what costs the depth: a range-2 ring on
         # 8 qubits splits into two independent 4-cycles, while a range-1 ring
         # serialises around all 8.  Swapping Rot and CNOT leaves both numbers alone.
@@ -290,3 +286,58 @@ class TestDefaultConfigurationIsAVariant:
             scaled = model.classical_encoder(x) * torch.pi
             published = _PiSigmoid()(x)
         assert scaled.min() < 0 <= published.min()  # (-π, π) vs (0, π)
+
+
+class TestLiveParameters:
+    """
+    #234: with the ⟨Z_0⟩ readout 20 of the 48 quantum weights never move the
+    output.  They are kept (the published shape); the live count is pinned
+    here against autograd, and the structural count stays a lower bound.
+    """
+
+    #: Dead entries of the (layer, wire, angle) weight tensor: the whole
+    #: last-layer Rot on wires 0, 1, 3, 5, 7, its ω on 2, 4, 6, and the
+    #: first-layer ω on wires 0 and 1.
+    DEAD = sorted(
+        [(1, w, a) for w in (0, 1, 3, 5, 7) for a in range(3)]
+        + [(1, w, 2) for w in (2, 4, 6)]
+        + [(0, 0, 2), (0, 1, 2)]
+    )
+
+    def _always_zero(self) -> dict[str, torch.Tensor]:
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier.published_shnn(
+            device_name="default.qubit", diff_method="backprop"
+        ).double()
+        params = dict(model.named_parameters())
+        zero = {name: torch.ones_like(p, dtype=torch.bool) for name, p in params.items()}
+        g = torch.Generator().manual_seed(1)
+        for _ in range(8):
+            with torch.no_grad():
+                for name, p in params.items():
+                    low, high = (0.0, 2 * math.pi) if "qlayer" in name else (-1.0, 1.0)
+                    p.uniform_(low, high, generator=g)
+            x = torch.randn(4, N_QUBITS, generator=g, dtype=torch.float64)
+            model.zero_grad()
+            model(x).sum().backward()
+            for name, p in params.items():
+                assert p.grad is not None
+                zero[name] &= p.grad.abs() < 1e-12
+        return zero
+
+    def test_dead_quantum_weights_and_the_live_count(self) -> None:
+        zero = self._always_zero()
+        quantum = zero["quantum_layer.qlayer.weights"]
+        assert sorted(tuple(int(i) for i in idx) for idx in quantum.nonzero()) == self.DEAD
+        # Every classical parameter is live: all eight wires reach the readout.
+        assert all(not z.any() for name, z in zero.items() if "qlayer" not in name)
+        live = sum(int((~z).sum()) for z in zero.values())
+        assert (live, sum(z.numel() for z in zero.values())) == (102, PUBLISHED_PARAMS)
+
+    def test_structural_count_is_a_lower_bound(self) -> None:
+        model = HybridBinaryClassifier.published_shnn(
+            device_name="default.qubit", diff_method="backprop"
+        )
+        summary = circuit_summary(model)
+        assert summary.n_inert_params == 16
+        assert summary.n_inert_params <= len(self.DEAD)
