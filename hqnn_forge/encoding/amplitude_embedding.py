@@ -35,19 +35,29 @@ Design Rationale
   preparation, whose angles are ``arcsin`` of amplitude ratios.  That
   derivative is infinite when an amplitude is zero and ill-conditioned when
   it is merely small next to its partner.  How PennyLane fails there
-  depends on its version, but it never raises:
+  depends on its version, but it never raises.  Measured on 0.45.1 and on
+  the 0.46.0.dev114 nightly (0.46 itself is not released yet), on the
+  three-qubit circuit the tests pin:
 
-  - Up to 0.45 the input gradient is **NaN** for an exactly-zero amplitude,
-    and in float32 already for one below about 1e-4 of its partner.
-  - From 0.46 small amplitudes differentiate correctly, but an exactly-zero
-    amplitude gives a **finite but wrong** gradient (off by order one, about
-    1.0 on the three-qubit circuit the test pins) for ``parameter-shift``,
-    ``finite-diff`` and lightning's ``adjoint`` alike.  Zero padding puts
-    such an amplitude into every sample, and a silently wrong gradient is
-    worse than a NaN one.
-  - On every version ``finite-diff`` is also wrong whenever an amplitude is
-    smaller than its step, and ``adjoint`` on ``default.qubit`` returns
-    **zero** for every input.
+  - On 0.45 the input gradient is **NaN** in every component as soon as one
+    amplitude is exactly zero, which zero padding makes true of every
+    sample.  It is also NaN for an amplitude that is merely small next to
+    its partner: below about 1e-4 of it in float32, and in float64
+    somewhere between 1e-6 (finite, off by 5e-5) and 1e-8 of it.
+  - On the 0.46 pre-releases small amplitudes differentiate correctly, and
+    what an exactly-zero amplitude does depends on its partner.  If the
+    partner is zero too, as with two or more padded amplitudes, the gradient
+    is still **NaN** in every component.  If it is not, the gradient is
+    **finite but wrong**: the zero amplitude's own component comes back as
+    0 (the true value on the pinned circuit is 1.03) and the others are
+    right.  A single padded amplitude is therefore harmless there, its
+    component being discarded, but a feature that is exactly zero, such as
+    a ReLU output of a classical encoder, silently gets no gradient, which
+    is worse than a NaN.
+  - On both, ``parameter-shift``, ``finite-diff`` and lightning's
+    ``adjoint`` agree with each other, while ``adjoint`` on
+    ``default.qubit`` returns **zero** for every input they handle and NaN
+    wherever they return NaN.
 
   Which inputs are affected depends on the data, so no per-batch check can
   catch them reliably.
@@ -111,9 +121,10 @@ def _check_input_gradient(inputs: torch.Tensor, diff_method: str) -> None:
 
     Only relevant when ``inputs`` requires grad and autograd is recording.
     The rule depends on the method alone, not on the values in ``inputs``:
-    the non-backprop input gradient is NaN or silently wrong for zero and
-    small amplitudes, and which batches contain those cannot be told in
-    advance.  See the module docstring, *Differentiation*.
+    the non-backprop input gradient is NaN or silently wrong for zero
+    amplitudes (and, up to PennyLane 0.45, small ones), and which batches
+    contain those cannot be told in advance.  See the module docstring,
+    *Differentiation*.
     """
     if diff_method == "backprop" or not isinstance(inputs, torch.Tensor):
         return
@@ -123,7 +134,7 @@ def _check_input_gradient(inputs: torch.Tensor, diff_method: str) -> None:
         f"Amplitude embedding cannot differentiate with respect to its inputs under "
         f"diff_method={diff_method!r}: that method differentiates the state-preparation "
         f"decomposition, whose input gradient is NaN or silently wrong whenever an "
-        f"amplitude is zero or small.  Use diff_method='backprop' on default.qubit, or "
+        f"amplitude is zero (up to PennyLane 0.45 also when it is small).  Use diff_method='backprop' on default.qubit, or "
         f"detach the inputs (weight gradients are unaffected)."
     )
 
@@ -296,8 +307,8 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
     Weight gradients are correct under every method.  The input gradient is
     only supported under ``"backprop"`` on ``default.qubit``; every other
     method raises ``RuntimeError`` when ``x`` requires a gradient, because
-    PennyLane returns NaN or a silently wrong value for zero and small
-    amplitudes (see the module docstring).
+    PennyLane returns NaN or a silently wrong value for zero amplitudes and,
+    up to 0.45, for small ones (see the module docstring).
 
     The check only applies when a gradient will actually be computed:
     detached inputs, and any input under ``torch.no_grad()``, are fine with
