@@ -8,7 +8,7 @@ the diagnostics to judge them, built on PennyLane and PyTorch.
 hqnn-forge is not on PyPI; install it from a clone of the repository:
 
 ```bash
-git clone https://github.com/g8rdier/hqnn-forge.git
+git clone https://github.com/hqnn-forge/hqnn-forge.git
 cd hqnn-forge
 pip install -e ".[lightning]"    # the library, plus the fast C++ simulator
 ```
@@ -21,7 +21,7 @@ model = HybridBinaryClassifier(n_input_features=30, n_qubits=8, n_layers=2)
 probabilities = model.predict_proba(torch.randn(4, 30))
 ```
 
-The [README](https://github.com/g8rdier/hqnn-forge#readme) covers installation,
+The [README](https://github.com/hqnn-forge/hqnn-forge#readme) covers installation,
 device backends and the architectures in detail; this site is the API
 reference, generated from the docstrings.
 

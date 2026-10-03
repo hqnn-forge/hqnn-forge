@@ -17,8 +17,8 @@ authors:
   - name: "HQNN-Forge Contributors"
 version: 0.1.0
 license: Apache-2.0
-repository-code: "https://github.com/g8rdier/hqnn-forge"
-url: "https://github.com/g8rdier/hqnn-forge"
+repository-code: "https://github.com/hqnn-forge/hqnn-forge"
+url: "https://github.com/hqnn-forge/hqnn-forge"
 keywords:
   - quantum machine learning
   - hybrid quantum neural network
