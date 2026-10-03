@@ -48,8 +48,8 @@ CHANGELOG = textwrap.dedent(
     ### Added
     - First thing (#10)
 
-    [0.2.0]: https://github.com/g8rdier/hqnn-forge/compare/v0.1.0...v0.2.0
-    [0.1.0]: https://github.com/g8rdier/hqnn-forge/releases/tag/v0.1.0
+    [0.2.0]: https://github.com/hqnn-forge/hqnn-forge/compare/v0.1.0...v0.2.0
+    [0.1.0]: https://github.com/hqnn-forge/hqnn-forge/releases/tag/v0.1.0
     """
 )
 

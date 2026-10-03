@@ -1,7 +1,7 @@
 site_name: hqnn-forge
 site_description: Hybrid quantum-classical neural networks for tabular classification
-repo_url: https://github.com/g8rdier/hqnn-forge
-repo_name: g8rdier/hqnn-forge
+repo_url: https://github.com/hqnn-forge/hqnn-forge
+repo_name: hqnn-forge/hqnn-forge
 edit_uri: edit/main/docs/
 # Every warning -- an unresolved cross-reference, a missing page -- fails
 # `mkdocs build --strict`, which CI runs (#322).

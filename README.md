@@ -1,8 +1,8 @@
-<h1><img src="https://raw.githubusercontent.com/g8rdier/hqnn-forge/main/assets/social-preview.png" alt="hqnn-forge" width="640"></h1>
+<h1><img src="https://raw.githubusercontent.com/hqnn-forge/hqnn-forge/main/assets/social-preview.png" alt="hqnn-forge" width="640"></h1>
 
-[![Tests](https://github.com/g8rdier/hqnn-forge/actions/workflows/tests.yml/badge.svg)](https://github.com/g8rdier/hqnn-forge/actions/workflows/tests.yml)
-[![License](https://img.shields.io/github/license/g8rdier/hqnn-forge)](https://github.com/g8rdier/hqnn-forge/blob/main/LICENSE)
-[![Docs](https://github.com/g8rdier/hqnn-forge/actions/workflows/docs.yml/badge.svg)](https://hqnn-forge.github.io/hqnn-forge/)
+[![Tests](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/tests.yml/badge.svg)](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/tests.yml)
+[![License](https://img.shields.io/github/license/hqnn-forge/hqnn-forge)](https://github.com/hqnn-forge/hqnn-forge/blob/main/LICENSE)
+[![Docs](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/docs.yml/badge.svg)](https://hqnn-forge.github.io/hqnn-forge/)
 
 > **Test whether a small quantum layer earns its parameters on imbalanced binary tabular data.**
 
@@ -16,7 +16,7 @@ layer, and circuit diagnostics.
 
 **Scope.** Binary classification on imbalanced tabular data, or data made tabular by a
 pretrained embedding (see
-[Non-tabular data](https://github.com/g8rdier/hqnn-forge#non-tabular-data-precomputed-embeddings)).
+[Non-tabular data](https://github.com/hqnn-forge/hqnn-forge#non-tabular-data-precomputed-embeddings)).
 The estimator, losses, thresholds and metrics are built for binary targets;
 `MulticlassHybridClassifier` covers multiclass targets at the model level only. End-to-end
 image, text or time-series pipelines are out of scope.
@@ -104,10 +104,10 @@ The extras add optional parts; combine them as needed, e.g. `".[lightning,sklear
 | `lightning` | `pennylane-lightning` | the `lightning.qubit` backend and adjoint differentiation, the library defaults |
 | `sklearn` | `scikit-learn` | the scikit-learn estimator in `hqnn_forge.sklearn` |
 | `examples` | `scikit-learn`, `matplotlib` | the scripts in `examples/` and the plots in `hqnn_forge.evaluation` |
-| `dev` | test and lint tools | development; see [Development Setup](https://github.com/g8rdier/hqnn-forge#development-setup) |
+| `dev` | test and lint tools | development; see [Development Setup](https://github.com/hqnn-forge/hqnn-forge#development-setup) |
 
 pip installs the newest versions that `pyproject.toml` allows. To work on the project in the
-environment CI tests against, use the uv setup under [Development Setup](https://github.com/g8rdier/hqnn-forge#development-setup).
+environment CI tests against, use the uv setup under [Development Setup](https://github.com/hqnn-forge/hqnn-forge#development-setup).
 
 ### Device backends
 
@@ -477,12 +477,12 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     --exclude long hqnn_forge tests examples .github/scripts
 ```
 
-[`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md#linting) lists every command the lint job runs.
+[`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md#linting) lists every command the lint job runs.
 
 The full test suite takes a few minutes. For the edit–test loop, leave out the tests marked
 `slow` (end-to-end training, the gradient-variance physics checks, parameter-shift batching,
 repeated fits and bootstraps), which account for most of that time; CI always runs everything
-(see [`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md#testing)):
+(see [`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md#testing)):
 
 ```bash
 pytest -m "not slow"   # about a minute
@@ -514,10 +514,10 @@ uv run --frozen --group docs mkdocs serve   # or: mkdocs build --strict, as CI d
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md) for the
+See [`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md) for the
 issue/branch/PR workflow, commit conventions, and versioning policy this project follows. To add
 a dataset loader, an encoding layer or a variational block, see
-[`docs/extending.md`](https://github.com/g8rdier/hqnn-forge/blob/main/docs/extending.md) for the
+[`docs/extending.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/docs/extending.md) for the
 conventions each must keep and the tests each must pass.
 
 ---
@@ -525,7 +525,7 @@ conventions each must keep and the tests each must pass.
 ## Citing
 
 If you use hqnn-forge in research, please cite it.
-[`CITATION.cff`](https://github.com/g8rdier/hqnn-forge/blob/main/CITATION.cff) holds the citation
+[`CITATION.cff`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CITATION.cff) holds the citation
 metadata, and GitHub's **Cite this repository** button in the sidebar turns it into BibTeX or
 APA.
 

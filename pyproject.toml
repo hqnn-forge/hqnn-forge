@@ -53,11 +53,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/g8rdier/hqnn-forge"
+Homepage = "https://github.com/hqnn-forge/hqnn-forge"
 Documentation = "https://hqnn-forge.github.io/hqnn-forge/"
-Repository = "https://github.com/g8rdier/hqnn-forge"
-Issues = "https://github.com/g8rdier/hqnn-forge/issues"
-Changelog = "https://github.com/g8rdier/hqnn-forge/blob/main/CHANGELOG.md"
+Repository = "https://github.com/hqnn-forge/hqnn-forge"
+Issues = "https://github.com/hqnn-forge/hqnn-forge/issues"
+Changelog = "https://github.com/hqnn-forge/hqnn-forge/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 lightning = [
