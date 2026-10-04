@@ -337,23 +337,74 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
         )
 
 
+def _raise_device_samples(device_name: str, *, finite_shots: int | None = None) -> None:
+    reason = (
+        f"has finite shots ({finite_shots})"
+        if finite_shots is not None
+        else "does not support analytic execution"
+    )
+    raise ValueError(
+        f"Device {device_name!r} {reason}, but "
+        "shots=None was requested. This device samples, so pass shots= and "
+        "diff_method='parameter-shift'."
+    )
+
+
 def validate_device_shots(device: qml.devices.Device, shots: int | None) -> None:
     """
-    Raise ``ValueError`` if *device* has finite shots but *shots* is ``None``.
+    Raise ``ValueError`` if *device* only samples or has finite shots but *shots* is ``None``.
 
-    A real sampling device (hardware, ``"qiskit.remote"``, ...) fails at the
-    first forward pass when given ``shots=None``, typically with the default
-    ``diff_method="adjoint"``.  Raising at construction with an informative
-    message guides users to pass explicit ``shots`` and ``parameter-shift``.
+    A real sampling device (hardware, ``"qiskit.remote"``, sampling plugins, ...)
+    cannot return exact expectation values and fails at the first forward pass when
+    given ``shots=None``, typically with the default ``diff_method="adjoint"``.
+    Raising at construction with an informative message guides users to pass
+    explicit ``shots`` and ``diff_method='parameter-shift'``.
     """
+    if shots is not None:
+        return
+
+    # 1. Device-level shots (while supported in PennyLane)
     dev_shots = getattr(device, "shots", None)
-    total_shots = getattr(dev_shots, "total_shots", dev_shots)
-    if total_shots is not None and shots is None:
-        raise ValueError(
-            f"Device {device.name!r} has finite shots ({total_shots}), but "
-            "shots=None was requested. This device samples, so pass shots= and "
-            "diff_method='parameter-shift'."
-        )
+    if dev_shots is not None:
+        total_shots = getattr(dev_shots, "total_shots", dev_shots)
+        if total_shots is not None:
+            _raise_device_samples(device.name, finite_shots=total_shots)
+
+    # 2. Probe device preprocessing pipeline
+    cached = getattr(device, "_hqnn_supports_analytic", None)
+    if cached is not None:
+        if not cached:
+            _raise_device_samples(device.name)
+        return
+
+    preprocess_fn = getattr(device, "preprocess", None)
+    if not callable(preprocess_fn):
+        return
+
+    try:
+        pipeline, _ = device.preprocess()
+    except Exception:  # noqa: BLE001 - unexpected device errors must not block layer construction
+        return
+
+    tape_analytic = qml.tape.QuantumScript([], [qml.expval(qml.Z(0))], shots=None)
+    try:
+        pipeline([tape_analytic])
+        device._hqnn_supports_analytic = True
+        return
+    except DeviceError:
+        pass
+    except Exception:  # noqa: BLE001 - non-DeviceError means the probe failed for an unrelated reason
+        return
+
+    tape_finite = qml.tape.QuantumScript([], [qml.expval(qml.Z(0))], shots=100)
+    try:
+        pipeline([tape_finite])
+    except Exception:  # noqa: BLE001 - finite shots probe failed; device rejects the probe for other reasons
+        return
+
+    # Analytic fails with DeviceError and finite shots pass: device is sampling-only
+    device._hqnn_supports_analytic = False
+    _raise_device_samples(device.name)
 
 
 def shots_repr(shots: int | None) -> str:

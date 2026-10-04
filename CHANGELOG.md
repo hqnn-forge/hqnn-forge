@@ -366,6 +366,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of ASCII (#451)
 
 ### Fixed
+- `validate_device_shots` detects sampling-only devices from device capabilities and
+  preprocessing (`no_analytic`) rather than relying solely on deprecated device-level shots,
+  raising a construction-time `ValueError` when `shots=None` was requested (#462)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
   shots but `shots=None` was requested, guiding users to pass explicit `shots` and
   `diff_method="parameter-shift"` (#431)
