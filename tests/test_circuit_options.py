@@ -15,6 +15,8 @@ the template it wraps.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import Any, TypedDict, TypeVar
 
 import pennylane as qml
 import pytest
@@ -23,6 +25,8 @@ import torch.nn as nn
 
 from hqnn_forge.encoding import DataReuploadingLayer, QuantumEncodingLayer
 from hqnn_forge.encoding.angle_embedding import (
+    DeviceName,
+    DiffMethod,
     apply_variational_layers,
     build_encoding_qnode,
     measure_z,
@@ -31,7 +35,13 @@ from hqnn_forge.encoding.angle_embedding import (
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 
-CPU = {"device_name": "default.qubit", "diff_method": "backprop"}
+
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
+
+
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
 N_QUBITS = 4
 N_LAYERS = 3  # > n-1 so the range rule wraps: ranges 1, 2, 3 for 4 qubits
 BATCH = 5
@@ -146,18 +156,20 @@ class TestEntangler:
         assert "entangler='strongly_entangling'" in sel.extra_repr()
         assert "entangler" not in ring.extra_repr()
 
-    def test_gradients_flow_through_the_template(self) -> None:
+    def test_gradients_flow_through_the_template(
+        self, grad_of: Callable[[torch.Tensor], torch.Tensor]
+    ) -> None:
         layer = QuantumEncodingLayer(
             n_qubits=N_QUBITS, n_layers=2, entangler="strongly_entangling", **CPU
         )
         x = _angles().requires_grad_(True)
         layer(x).sum().backward()
-        assert layer.qlayer.weights.grad.abs().sum().item() > 0
-        assert x.grad.abs().sum().item() > 0
+        assert grad_of(_tensor(layer.qlayer.weights)).abs().sum().item() > 0
+        assert grad_of(x).abs().sum().item() > 0
 
     def test_unknown_entangler_raises(self) -> None:
         with pytest.raises(ValueError, match="entangler"):
-            QuantumEncodingLayer(n_qubits=N_QUBITS, n_layers=1, entangler="ladder", **CPU)
+            QuantumEncodingLayer(n_qubits=N_QUBITS, n_layers=1, entangler="ladder", **CPU)  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="entangler"):
             apply_variational_layers(torch.zeros(1, 2, 3), 2, 1, "ladder")  # type: ignore[arg-type]
 
@@ -317,6 +329,23 @@ class TestReadoutFeatures:
             ("brickwork", "Y", 1, [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3], [2, 3, 4], [2, 3, 4]]),
             ("brickwork", "X", 2, [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3], _ALL, _ALL]),
             ("brickwork", "Y", 2, [[0, 1, 2, 3], _ALL, _ALL, _ALL, _ALL]),
+            # CZ is diagonal: ⟨Z_i⟩ sees a neighbour only through the X_i the RY mixes
+            # in, which the CZs dress with Z_{i±1}.  After L layers ⟨Z_i⟩ sees
+            # x_{i-L} … x_{i+L}, except that one layer under RX (⟨X⟩ = 0) sees x_i alone
+            ("hardware_efficient", "X", 1, [[0], [1], [2], [3], [4]]),
+            ("hardware_efficient", "Y", 1, [[0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4], [3, 4]]),
+            (
+                "hardware_efficient",
+                "X",
+                2,
+                [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]],
+            ),
+            (
+                "hardware_efficient",
+                "Y",
+                2,
+                [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]],
+            ),
             # "Z" sees nothing at any depth and is refused; see TestRotationZIsRefused
         ],
     )
@@ -349,12 +378,14 @@ class TestReadoutFeatures:
 
 class TestReadout:
     @pytest.mark.parametrize("cls", [QuantumEncodingLayer, IQPEncodingLayer])
-    def test_first_is_column_zero_of_all(self, cls: type) -> None:
+    def test_first_is_column_zero_of_all(
+        self, cls: type[QuantumEncodingLayer | IQPEncodingLayer]
+    ) -> None:
         torch.manual_seed(0)
         every = cls(n_qubits=N_QUBITS, n_layers=2, **CPU)
         first = cls(n_qubits=N_QUBITS, n_layers=2, readout="first", **CPU)
         with torch.no_grad():
-            first.qlayer.weights.copy_(every.qlayer.weights)
+            _tensor(first.qlayer.weights).copy_(_tensor(every.qlayer.weights))
         x = _angles()
         with torch.no_grad():
             out_first = first(x)
@@ -369,7 +400,7 @@ class TestReadout:
         with pytest.raises(ValueError, match="readout"):
             readout_wires(4, "last")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="readout"):
-            QuantumEncodingLayer(n_qubits=N_QUBITS, n_layers=1, readout="last", **CPU)
+            QuantumEncodingLayer(n_qubits=N_QUBITS, n_layers=1, readout="last", **CPU)  # type: ignore[arg-type]
 
     def test_unknown_rotation_raises_at_construction(self) -> None:
         # qml.AngleEmbedding only rejects the axis when the circuit first runs,
@@ -459,24 +490,41 @@ CLASSIFIERS = [
 ]
 
 
-def _classifier(cls: type, **kwargs: object) -> nn.Module:
+Classifier = HybridBinaryClassifier | ParallelHybridClassifier
+C = TypeVar("C", bound=Classifier)
+
+
+def _classifier(cls: type[C], **kwargs: Any) -> C:
     torch.manual_seed(0)
     return cls(n_input_features=6, n_qubits=N_QUBITS, n_layers=2, **CPU, **kwargs)
 
 
+def _tensor(value: object) -> torch.Tensor:
+    """A parameter reached through ``nn.Module.__getattr__``, narrowed to a tensor."""
+    assert isinstance(value, torch.Tensor)
+    return value
+
+
+def _encoder_part(model: Classifier, index: int) -> nn.Module:
+    """``model.classical_encoder[index]``: the Linear (0) or the activation (1)."""
+    encoder = model.classical_encoder
+    assert isinstance(encoder, nn.Sequential)
+    return encoder[index]
+
+
 class TestClassifierOptions:
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_defaults_are_unchanged(self, cls: type) -> None:
+    def test_defaults_are_unchanged(self, cls: type[Classifier]) -> None:
         model = _classifier(cls)
         assert model.quantum_layer.entangler == "ring"
         assert model.quantum_layer.readout == "all"
         assert model.encoder_activation == "tanh"
-        assert isinstance(model.classical_encoder[1], nn.Tanh)
+        assert isinstance(_encoder_part(model, 1), nn.Tanh)
         expected_in = N_QUBITS if cls is HybridBinaryClassifier else 16 + N_QUBITS
         assert model.head.in_features == expected_in
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_readout_first_narrows_the_head(self, cls: type) -> None:
+    def test_readout_first_narrows_the_head(self, cls: type[Classifier]) -> None:
         model = _classifier(cls, readout="first")
         expected_in = 1 if cls is HybridBinaryClassifier else 16 + 1
         assert model.head.in_features == expected_in
@@ -484,9 +532,9 @@ class TestClassifierOptions:
         assert model.predict_proba(torch.randn(BATCH, 6)).shape == (BATCH,)
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_sigmoid_encoder_maps_into_zero_to_pi(self, cls: type) -> None:
+    def test_sigmoid_encoder_maps_into_zero_to_pi(self, cls: type[Classifier]) -> None:
         model = _classifier(cls, encoder_activation="sigmoid")
-        assert isinstance(model.classical_encoder[1], nn.Sigmoid)
+        assert isinstance(_encoder_part(model, 1), nn.Sigmoid)
         x = torch.linspace(-50, 50, 6 * 10).reshape(10, 6)
         with torch.no_grad():
             angles = model.classical_encoder(x) * torch.pi
@@ -501,7 +549,9 @@ class TestClassifierOptions:
         torch.testing.assert_close(seen[0], angles)
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_embedding_rotation_and_entangler_reach_the_quantum_layer(self, cls: type) -> None:
+    def test_embedding_rotation_and_entangler_reach_the_quantum_layer(
+        self, cls: type[Classifier]
+    ) -> None:
         model = _classifier(cls, embedding_rotation="Y", entangler="strongly_entangling")
         tape = qml.workflow.construct_tape(model.quantum_layer.qlayer.qnode, level=0)(
             torch.zeros(N_QUBITS), torch.zeros(2, N_QUBITS, 3)
@@ -511,7 +561,7 @@ class TestClassifierOptions:
         assert tape.operations[0].hyperparameters["rotation"] is qml.RY
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_normal_init(self, cls: type) -> None:
+    def test_normal_init(self, cls: type[Classifier]) -> None:
         torch.manual_seed(0)
         model = cls(
             n_input_features=16,
@@ -521,12 +571,14 @@ class TestClassifierOptions:
             init_std=0.05,
             **CPU,
         )
-        weights = model.quantum_layer.qlayer.weights.detach()
+        weights = _tensor(model.quantum_layer.qlayer.weights).detach()
         assert weights.std().item() == pytest.approx(0.05, rel=0.1)
         assert abs(weights.mean().item()) < 0.01
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_options_train(self, cls: type) -> None:
+    def test_options_train(
+        self, cls: type[Classifier], grad_of: Callable[[torch.Tensor], torch.Tensor]
+    ) -> None:
         model = _classifier(
             cls,
             embedding_rotation="Y",
@@ -537,9 +589,9 @@ class TestClassifierOptions:
         )
         x = torch.randn(BATCH, 6)
         model(x).sum().backward()
-        assert model.quantum_layer.qlayer.weights.grad.abs().sum().item() > 0
-        assert model.classical_encoder[0].weight.grad.abs().sum().item() > 0
-        assert model.head.weight.grad.abs().sum().item() > 0
+        assert grad_of(_tensor(model.quantum_layer.qlayer.weights)).abs().sum().item() > 0
+        assert grad_of(_tensor(_encoder_part(model, 0).weight)).abs().sum().item() > 0
+        assert grad_of(model.head.weight).abs().sum().item() > 0
 
     def test_iqp_rejects_embedding_rotation(self) -> None:
         with pytest.raises(ValueError, match="embedding_rotation"):
@@ -556,7 +608,7 @@ class TestClassifierOptions:
         assert model(torch.randn(BATCH, 6)).shape == (BATCH, 1)
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_validation(self, cls: type) -> None:
+    def test_validation(self, cls: type[Classifier]) -> None:
         with pytest.raises(ValueError, match="encoder_activation"):
             _classifier(cls, encoder_activation="relu")
         with pytest.raises(ValueError, match="init_strategy"):
@@ -567,7 +619,7 @@ class TestClassifierOptions:
             _classifier(cls, init_std=0.0)
 
     @pytest.mark.parametrize("cls", CLASSIFIERS)
-    def test_an_option_that_would_be_ignored_raises_instead(self, cls: type) -> None:
+    def test_an_option_that_would_be_ignored_raises_instead(self, cls: type[Classifier]) -> None:
         """
         Both options below are inert outside the configuration that uses them.
         Accepting one there would record it in get_config() and in a checkpoint,

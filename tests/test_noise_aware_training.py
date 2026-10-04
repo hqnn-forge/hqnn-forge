@@ -9,18 +9,27 @@ the noise, and the post-hoc wrapper takes precedence.
 
 from __future__ import annotations
 
+import inspect
 import math
 import warnings
+from collections.abc import Callable
+from functools import partial
+from typing import Any, TypedDict
 
-import pennylane as qml
 import pytest
 import torch
 
 from hqnn_forge.diagnostics import effective_dimension, gradient_variance
-from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
-from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
+from hqnn_forge.models import (
+    HybridBinaryClassifier,
+    MulticlassHybridClassifier,
+    ParallelHybridClassifier,
+)
 from hqnn_forge.noise import (
+    TrainingNoiseMixin,
     apply_depolarizing_noise,
     noise_sweep,
     run_with_training_noise,
@@ -28,37 +37,49 @@ from hqnn_forge.noise import (
 )
 
 N_QUBITS = 3
-CPU = {"device_name": "default.qubit", "diff_method": "backprop"}
-LAYERS = [QuantumEncodingLayer, IQPEncodingLayer]
-MODELS = [HybridBinaryClassifier, ParallelHybridClassifier]
 
 
-def _lightning_available() -> bool:
-    try:
-        qml.device("lightning.qubit", wires=1)
-    except Exception:  # noqa: BLE001 - any failure means "not installed"
-        return False
-    return True
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
 
 
-requires_lightning = pytest.mark.skipif(
-    not _lightning_available(), reason="pennylane-lightning not installed"
-)
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
+Layer = QuantumEncodingLayer | IQPEncodingLayer | AmplitudeEncodingLayer | DataReuploadingLayer
+LayerFactory = Callable[..., Layer]
+Model = HybridBinaryClassifier | ParallelHybridClassifier | MulticlassHybridClassifier
+# Every encoding layer (#227).  The amplitude layer is built for N_QUBITS
+# features, padded to 2**N_QUBITS amplitudes, so it takes the same inputs.
+LAYERS = [
+    pytest.param(QuantumEncodingLayer, id="angle"),
+    pytest.param(IQPEncodingLayer, id="iqp"),
+    pytest.param(partial(AmplitudeEncodingLayer, n_features=N_QUBITS), id="amplitude"),
+    pytest.param(DataReuploadingLayer, id="reuploading"),
+    pytest.param(
+        partial(DataReuploadingLayer, trainable_input_scaling=True), id="reuploading-scaled"
+    ),
+]
+MODELS: list[type[Model]] = [HybridBinaryClassifier, ParallelHybridClassifier]
 
 
-def _layer(cls: type = QuantumEncodingLayer, **kwargs: object) -> torch.nn.Module:
+def _layer(cls: LayerFactory = QuantumEncodingLayer, **kwargs: Any) -> Layer:
     torch.manual_seed(0)
     return cls(n_qubits=N_QUBITS, n_layers=2, **CPU, **kwargs)
 
 
-def _pair(
-    cls: type = QuantumEncodingLayer, **noise: object
-) -> tuple[torch.nn.Module, torch.nn.Module]:
+def _weights(layer: Layer) -> torch.Tensor:
+    """The layer's variational weights, narrowed from ``nn.Module.__getattr__``."""
+    weights = layer.qlayer.weights
+    assert isinstance(weights, torch.Tensor)
+    return weights
+
+
+def _pair(cls: LayerFactory = QuantumEncodingLayer, **noise: Any) -> tuple[Layer, Layer]:
     """A noisy layer and a noiseless one with identical weights."""
     noisy = _layer(cls, **noise)
     clean = _layer(cls)
     with torch.no_grad():
-        clean.qlayer.weights.copy_(noisy.qlayer.weights)
+        _weights(clean).copy_(_weights(noisy))
     return noisy, clean
 
 
@@ -74,7 +95,9 @@ def x() -> torch.Tensor:
 
 class TestNoiselessDefault:
     @pytest.mark.parametrize("cls", LAYERS)
-    def test_zero_noise_is_bit_identical_in_both_modes(self, cls: type, x: torch.Tensor) -> None:
+    def test_zero_noise_is_bit_identical_in_both_modes(
+        self, cls: LayerFactory, x: torch.Tensor
+    ) -> None:
         explicit, default = _pair(cls, noise_level=0.0)
         assert explicit._training_noise_qnode is None
         for mode in (True, False):
@@ -90,8 +113,8 @@ class TestNoiselessDefault:
             explicit.qlayer.weights.grad, default.qlayer.weights.grad, rtol=0, atol=0
         )
 
-    @pytest.mark.parametrize("cls", MODELS)
-    def test_classifier_default_is_noiseless(self, cls: type) -> None:
+    @pytest.mark.parametrize("cls", [*MODELS, MulticlassHybridClassifier])
+    def test_classifier_default_is_noiseless(self, cls: type[Model]) -> None:
         torch.manual_seed(0)
         model = cls(n_input_features=4, n_qubits=N_QUBITS, n_layers=1, **CPU)
         assert model.quantum_layer.noise_level == 0.0
@@ -107,7 +130,7 @@ class TestTrainingNoise:
     @pytest.mark.parametrize("cls", LAYERS)
     @pytest.mark.parametrize("p", [0.05, 0.3])
     def test_end_noise_damps_train_output_by_one_minus_four_thirds_p(
-        self, cls: type, p: float, x: torch.Tensor
+        self, cls: LayerFactory, p: float, x: torch.Tensor
     ) -> None:
         noisy, clean = _pair(cls, noise_level=p, noise_position="end")
         noisy.train()
@@ -115,7 +138,7 @@ class TestTrainingNoise:
             torch.testing.assert_close(noisy(x), (1 - 4 * p / 3) * clean(x), rtol=1e-5, atol=1e-6)
 
     @pytest.mark.parametrize("cls", LAYERS)
-    def test_eval_mode_is_noiseless(self, cls: type, x: torch.Tensor) -> None:
+    def test_eval_mode_is_noiseless(self, cls: LayerFactory, x: torch.Tensor) -> None:
         noisy, clean = _pair(cls, noise_level=0.3)
         noisy.eval()
         with torch.no_grad():
@@ -131,7 +154,7 @@ class TestTrainingNoise:
     @pytest.mark.parametrize("cls", LAYERS)
     @pytest.mark.parametrize("p", [0.05, 0.3])
     def test_gate_noise_train_output_matches_the_post_hoc_channel(
-        self, cls: type, p: float, x: torch.Tensor
+        self, cls: LayerFactory, p: float, x: torch.Tensor
     ) -> None:
         """
         The default position="all": train mode must equal the noiseless twin
@@ -153,11 +176,12 @@ class TestTrainingNoise:
         clean.train()
         noisy(x).sum().backward()
         clean(x).sum().backward()
-        assert noisy.qlayer.weights.grad is not None
+        noisy_grad, clean_grad = _weights(noisy).grad, _weights(clean).grad
+        assert noisy_grad is not None and clean_grad is not None
         # End-position noise scales every ⟨Z⟩ by a constant, hence the gradient too.
         torch.testing.assert_close(
-            noisy.qlayer.weights.grad,
-            (1 - 4 * 0.2 / 3) * clean.qlayer.weights.grad,
+            noisy_grad,
+            (1 - 4 * 0.2 / 3) * clean_grad,
             rtol=1e-4,
             atol=1e-6,
         )
@@ -180,16 +204,16 @@ class TestTrainingNoise:
         assert noisy.qlayer.qnode is original
 
     @pytest.mark.parametrize("cls", LAYERS)
-    def test_extra_repr_mentions_the_noise(self, cls: type) -> None:
+    def test_extra_repr_mentions_the_noise(self, cls: LayerFactory) -> None:
         assert "noise_level=0.1, noise_position='all'" in _layer(cls, noise_level=0.1).extra_repr()
         end = _layer(cls, noise_level=0.1, noise_position="end").extra_repr()
         assert "noise_position='end'" in end
         assert "noise_level" not in _layer(cls).extra_repr()
 
-    @requires_lightning
+    @pytest.mark.requires_lightning
     @pytest.mark.parametrize("cls", LAYERS)
     def test_default_lightning_adjoint_layer_damps_output_and_gradient(
-        self, cls: type, x: torch.Tensor
+        self, cls: LayerFactory, x: torch.Tensor
     ) -> None:
         """
         The library default: the noiseless QNode is lightning.qubit + adjoint,
@@ -281,8 +305,10 @@ class TestInteractions:
         torch.testing.assert_close(noisy(x), 0.6 * clean(x), rtol=1e-5, atol=1e-6)
         assert noisy.qlayer._hqnn_noise_depth == 0
 
-    @pytest.mark.parametrize("cls", LAYERS)
-    def test_gradient_variance_measures_the_noiseless_circuit(self, cls: type) -> None:
+    # gradient_variance measures one trainable tensor here, so not the layer
+    # with input_scaling.
+    @pytest.mark.parametrize("cls", [p for p in LAYERS if p.id != "reuploading-scaled"])
+    def test_gradient_variance_measures_the_noiseless_circuit(self, cls: LayerFactory) -> None:
         noisy, clean = _pair(cls, noise_level=0.3)
         noisy.train()
         a = gradient_variance(noisy, n_samples=4, generator=torch.Generator().manual_seed(0))
@@ -301,6 +327,7 @@ class TestInteractions:
             a.per_parameter, (1 - 4 * 0.3 / 3) ** 2 * b.per_parameter, rtol=1e-4, atol=1e-10
         )
 
+    @pytest.mark.slow
     def test_effective_dimension_measures_the_noiseless_circuit(self) -> None:
         """Agrees with gradient_variance: a train-mode noisy model is measured noiselessly."""
         torch.manual_seed(0)
@@ -310,17 +337,22 @@ class TestInteractions:
         clean.load_state_dict(noisy.state_dict())
         X = torch.randn(80, 4, generator=torch.Generator().manual_seed(2))
         assert noisy.training
-        kwargs = {"n_theta_samples": 2}
-        a = effective_dimension(noisy, X, generator=torch.Generator().manual_seed(0), **kwargs)
-        b = effective_dimension(clean, X, generator=torch.Generator().manual_seed(0), **kwargs)
+        a = effective_dimension(
+            noisy, X, n_theta_samples=2, generator=torch.Generator().manual_seed(0)
+        )
+        b = effective_dimension(
+            clean, X, n_theta_samples=2, generator=torch.Generator().manual_seed(0)
+        )
         assert a.effective_dimension == b.effective_dimension
         assert noisy.training
         with apply_depolarizing_noise(noisy, 0.3):
-            c = effective_dimension(noisy, X, generator=torch.Generator().manual_seed(0), **kwargs)
+            c = effective_dimension(
+                noisy, X, n_theta_samples=2, generator=torch.Generator().manual_seed(0)
+            )
         assert c.effective_dimension != b.effective_dimension
 
     @pytest.mark.parametrize("cls", MODELS)
-    def test_classifier_trains_and_sweeps(self, cls: type) -> None:
+    def test_classifier_trains_and_sweeps(self, cls: type[Model]) -> None:
         torch.manual_seed(0)
         model = cls(n_input_features=4, n_qubits=N_QUBITS, n_layers=1, noise_level=0.1, **CPU)
         assert model.quantum_layer.noise_level == 0.1
@@ -329,7 +361,7 @@ class TestInteractions:
         model.train()
         loss = torch.nn.functional.binary_cross_entropy_with_logits(model(X).squeeze(-1), y)
         loss.backward()
-        assert model.quantum_layer.qlayer.weights.grad is not None
+        assert _weights(model.quantum_layer).grad is not None
         # predict_proba runs in eval mode: noiseless, so the sweep's p = 0 point
         # equals the plain prediction and larger p change it.
         points = noise_sweep(model, X, [0.0, 0.3])
@@ -357,12 +389,14 @@ class TestValidation:
             HybridBinaryClassifier(n_input_features=4, n_qubits=N_QUBITS, noise_level=1.0, **CPU)
 
     @pytest.mark.parametrize("cls", LAYERS)
-    def test_warns_above_the_practical_qubit_count(self, cls: type) -> None:
-        with pytest.warns(RuntimeWarning, match="n_qubits=7"):
+    def test_warns_above_the_practical_qubit_count(self, cls: LayerFactory) -> None:
+        with pytest.warns(RuntimeWarning, match="n_qubits=7") as record:
             cls(n_qubits=7, n_layers=1, noise_level=0.1, **CPU)
+        # Attributed to the line that built the layer, not to library code.
+        assert record[0].filename == __file__
 
     @pytest.mark.parametrize("kwargs", [{"n_qubits": 6, "noise_level": 0.1}, {"n_qubits": 7}])
-    def test_no_warning_at_the_limit_or_without_noise(self, kwargs: dict[str, object]) -> None:
+    def test_no_warning_at_the_limit_or_without_noise(self, kwargs: dict[str, Any]) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             QuantumEncodingLayer(n_layers=1, **kwargs, **CPU)
@@ -370,4 +404,33 @@ class TestValidation:
     def test_training_noise_qnode_rejects_zero(self) -> None:
         layer = _layer()
         with pytest.raises(ValueError, match="p > 0"):
-            training_noise_qnode(layer.qlayer.qnode, N_QUBITS, 0.0)
+            training_noise_qnode(layer.qlayer.qnode, N_QUBITS, 0.0, channel="depolarizing")
+
+
+class TestOneImplementation:
+    """#227: construction and dispatch live in hqnn_forge.noise, once."""
+
+    @pytest.mark.parametrize(
+        "cls",
+        [QuantumEncodingLayer, IQPEncodingLayer, AmplitudeEncodingLayer, DataReuploadingLayer],
+    )
+    def test_layers_inherit_the_mixin_and_copy_nothing(self, cls: type[torch.nn.Module]) -> None:
+        assert issubclass(cls, TrainingNoiseMixin)
+        for name in ("_init_training_noise", "_run_circuit", "_noise_repr"):
+            assert name not in vars(cls)
+        # No hand-written train-mode branch left in any forward.
+        assert "_training_noise_qnode" not in inspect.getsource(cls.forward)
+
+    @pytest.mark.parametrize(
+        "cls",
+        [QuantumEncodingLayer, IQPEncodingLayer, AmplitudeEncodingLayer, DataReuploadingLayer],
+    )
+    def test_every_layer_takes_the_same_noise_arguments(self, cls: type) -> None:
+        parameters = inspect.signature(cls).parameters
+        for name, default in (
+            ("noise_level", 0.0),
+            ("noise_position", "all"),
+            ("noise_method", "density"),
+            ("noise_trajectories", 1),
+        ):
+            assert parameters[name].default == default

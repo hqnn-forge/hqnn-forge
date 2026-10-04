@@ -213,6 +213,7 @@ class TestBcaPieces:
 
 
 class TestCoverage:
+    @pytest.mark.slow  # 400 bootstraps of 1000 resamples each
     @pytest.mark.parametrize("method", ["bca", "percentile"])
     def test_close_to_nominal_for_a_known_mcc(self, method: bs.Method) -> None:
         n_pos, n_neg, tpr, fpr = 60, 540, 0.7, 0.05

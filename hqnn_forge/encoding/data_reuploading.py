@@ -84,20 +84,25 @@ import pennylane as qml
 import torch
 import torch.nn as nn
 
-from hqnn_forge.encoding.angle_embedding import (
+from hqnn_forge.encoding._common import (
     DeviceName,
     DiffMethod,
     Entangler,
     Readout,
     RotationAxis,
-    _expand_batch_dimension,
-    _resolve_device,
     apply_variational_layers,
     check_inputs,
+    expand_batch_dimension,
     measure_z,
     readout_wires,
+    resolve_device,
+    shots_repr,
     validate_circuit_options,
+    validate_device_shots,
+    validate_shots,
+    variational_weight_shape,
 )
+from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +145,8 @@ def _make_data_reuploading_circuit(
         circuit(inputs, weights, input_scaling)  # trainable_input_scaling=True
 
     with ``inputs`` of shape ``(n_qubits,)`` (or ``(batch, n_qubits)`` when
-    broadcasted), ``weights`` of shape ``(n_layers, n_qubits, 3)`` and
+    broadcasted), ``weights`` of shape ``(n_layers, n_qubits, 3)``
+    (``(n_layers, n_qubits)`` for ``entangler="hardware_efficient"``) and
     ``input_scaling`` of shape :func:`input_scaling_shape`.
 
     Circuit structure (per layer ℓ = 0 … L-1)
@@ -210,6 +216,7 @@ def build_data_reuploading_qnode(
     trainable_input_scaling: bool = False,
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    shots: int | None = None,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the data re-uploading circuit.
@@ -251,7 +258,9 @@ def build_data_reuploading_qnode(
             "global phase, so a single upload leaves the outputs independent of the inputs."
         )
 
-    device = _resolve_device(device_name, n_qubits)
+    validate_shots(shots, diff_method)
+    device = resolve_device(device_name, n_qubits)
+    validate_device_shots(device, shots)
     circuit_fn = _make_data_reuploading_circuit(
         n_qubits, n_layers, rotation, trainable_input_scaling, entangler, readout
     )
@@ -261,8 +270,9 @@ def build_data_reuploading_qnode(
         device=device,
         diff_method=diff_method,
         interface="torch",
+        shots=shots,
     )
-    qnode = _expand_batch_dimension(qnode, diff_method)
+    qnode = expand_batch_dimension(qnode, diff_method)
 
     logger.info(
         "Re-uploading QNode built | device=%s | qubits=%d | layers=%d | diff=%s | "
@@ -284,13 +294,13 @@ def build_data_reuploading_qnode(
 # ---------------------------------------------------------------------------
 
 
-class DataReuploadingLayer(nn.Module):
+class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
     """
     A PyTorch ``nn.Module`` wrapping the data re-uploading QNode.
 
     API-consistent with :class:`~hqnn_forge.encoding.QuantumEncodingLayer`:
     same constructor arguments (plus ``trainable_input_scaling``), same
-    ``qlayer.weights`` of shape ``(n_layers, n_qubits, 3)``, same
+    ``qlayer.weights`` shape for each ``entangler``, same
     ``(batch, n_qubits)`` input and ``(batch, n_outputs)`` output.
     The difference is inside the circuit: the features are embedded before
     every variational layer, not only before the first.
@@ -308,7 +318,8 @@ class DataReuploadingLayer(nn.Module):
 
     Weight Shapes
     -------------
-    ``qlayer.weights`` has shape ``(n_layers, n_qubits, 3)`` and, like the
+    ``qlayer.weights`` has shape ``(n_layers, n_qubits, 3)``
+    (``(n_layers, n_qubits)`` for ``entangler="hardware_efficient"``) and, like the
     other encoders, starts from ``TorchLayer``'s default Uniform(0, 2π).
     **Call** ``hqnn_forge.initializers.restricted_normal_init_`` **on it
     immediately after construction** for the library's small-angle initial
@@ -328,9 +339,12 @@ class DataReuploadingLayer(nn.Module):
         Pauli axis of the embedding rotations.  Default: ``"X"``.
         ``"Z"`` requires ``n_layers ≥ 2``.
     device_name:
-        PennyLane device, one of :data:`DeviceName`.  An unavailable backend
-        falls back along ``lightning.qubit → default.qubit`` with a warning
-        per step.
+        PennyLane device name.  The simulators in
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
+        ``lightning.qubit → default.qubit`` with a warning per step when
+        unavailable; any other name (a plugin or hardware) is constructed as
+        given, and PennyLane's error surfaces if it cannot be.  Hardware
+        needs ``shots`` and ``diff_method="parameter-shift"``.
     diff_method:
         Gradient method.  Default: ``"adjoint"``.
     trainable_input_scaling:
@@ -341,15 +355,30 @@ class DataReuploadingLayer(nn.Module):
         first upload, a global phase, unscaled.  Default: ``False``, so the
         parameter count matches the other encoders.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"`` or ``"brickwork"``;
-        see :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` or
+        ``"hardware_efficient"``; see
+        :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``.
+    noise_level, noise_position, noise_method, noise_trajectories, noise_channel:
+        Training-time noise, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: ``noise_level``
+        is the strength of ``noise_channel`` (default ``"depolarizing"``), in
+        ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping and flip
+        channels (default 0, noiseless), applied in train mode only, at
+        ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
+        or by Pauli trajectories (the Pauli channels only).  See
+        :mod:`hqnn_forge.noise`.
+    shots:
+        Finite-shot sampling, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
 
     Attributes
     ----------
     n_qubits, n_layers : int
+    n_features : int
+        Width of the input, one feature per qubit: ``n_qubits``.
     n_outputs : int
         Width of the output: ``n_qubits`` or 1.
     rotation : str
@@ -379,10 +408,17 @@ class DataReuploadingLayer(nn.Module):
         trainable_input_scaling: bool = False,
         entangler: Entangler = "ring",
         readout: Readout = "all",
+        noise_level: float = 0.0,
+        noise_position: Position = "all",
+        noise_method: NoiseMethod = "density",
+        noise_trajectories: int = 1,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
     ) -> None:
         super().__init__()
 
         self.n_qubits = n_qubits
+        self.n_features = n_qubits
         self.n_layers = n_layers
         self.rotation = rotation
         self.trainable_input_scaling = trainable_input_scaling
@@ -399,10 +435,11 @@ class DataReuploadingLayer(nn.Module):
             trainable_input_scaling=trainable_input_scaling,
             entangler=entangler,
             readout=readout,
+            shots=shots,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
-            "weights": (n_layers, n_qubits, 3),
+            "weights": variational_weight_shape(entangler, n_qubits, n_layers),
         }
         if trainable_input_scaling:
             weight_shapes["input_scaling"] = input_scaling_shape(n_qubits, n_layers, rotation)
@@ -413,6 +450,16 @@ class DataReuploadingLayer(nn.Module):
             # Start as the plain re-uploading circuit: every upload sees x.
             with torch.no_grad():
                 self.qlayer.input_scaling.fill_(1.0)
+        self._init_training_noise(
+            qnode,
+            n_qubits,
+            noise_level,
+            noise_position,
+            noise_method,
+            noise_trajectories,
+            shots=shots,
+            noise_channel=noise_channel,
+        )
 
     # ------------------------------------------------------------------
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
@@ -452,7 +499,7 @@ class DataReuploadingLayer(nn.Module):
             If the last dimension of ``x`` is not ``n_qubits``.
         """
         # Whole batch in one call; see QuantumEncodingLayer.forward.
-        return self.qlayer(self.prepare_inputs(x))
+        return self._run_circuit(self.prepare_inputs(x))
 
     # ------------------------------------------------------------------
     def extra_repr(self) -> str:
@@ -464,6 +511,7 @@ class DataReuploadingLayer(nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
+        options += self._noise_repr() + shots_repr(self.shots)
         return (
             f"n_qubits={self.n_qubits}, "
             f"n_layers={self.n_layers}, "

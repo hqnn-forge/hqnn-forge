@@ -1,0 +1,142 @@
+name: Docs
+
+# The API reference site (#322): mkdocs-material + mkdocstrings, built with
+# --strict so an unresolved cross-reference or a broken page fails the job,
+# then checked for exported names that have no entry.  Pushes to main deploy
+# it to GitHub Pages once Pages is enabled with Settings -> Pages -> Source:
+# GitHub Actions; until then the deploy job is skipped, not failed.
+
+on:
+  push:
+    branches: ["main"]
+  # Every pull request, whatever its base, and again when one is retargeted
+  # (`edited` with a base change; title/body edits are skipped), so a stacked
+  # PR is rebuilt against main after its parent merges, as in tests.yml.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels its superseded run. Title/body edits get their
+# own group, so the skipped run cannot cancel the real one. Pushes to main
+# group per commit, as in tests.yml, so merges in quick succession never
+# cancel a main commit's build; the deploy job serialises on its own group.
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && !github.event.changes.base && '-edit' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: github.event.action != 'edited' || github.event.changes.base
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        python-version: "3.12"
+    # Only the documentation tools: griffe reads hqnn_forge's source
+    # statically, so neither the package nor torch / PennyLane is installed.
+    # `uv sync --group docs` would install the project's dependencies too, so
+    # the `docs` group's requirements are read from pyproject.toml and pinned
+    # to their uv.lock versions through a constraints file instead.
+    - name: Install the docs tools
+      run: |
+        uv lock --check
+        uv export --frozen --all-extras --all-groups --no-emit-project --no-hashes -o "$RUNNER_TEMP/constraints.txt"
+        python3 -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['dependency-groups']['docs']))" > "$RUNNER_TEMP/docs.txt"
+        uv venv
+        uv pip install -c "$RUNNER_TEMP/constraints.txt" -r "$RUNNER_TEMP/docs.txt" pytest
+    - name: Test the griffe extension
+      run: uv run --no-sync pytest docs/ -q -p no:cacheprovider
+    - name: Build the site, strictly
+      run: uv run --no-sync mkdocs build --strict
+    - name: Check every exported name is documented
+      run: uv run --no-sync python .github/scripts/check_docs_inventory.py
+    - uses: actions/upload-pages-artifact@v5.0.0
+      if: github.event_name == 'push'
+      with:
+        path: site/
+
+  # actions/deploy-pages fails (HTTP 404) while Pages is disabled or deploys
+  # from a branch, which would leave a red check on every main commit. Ask the
+  # Pages API first and deploy only when the source is GitHub Actions. Pages
+  # disabled (404) or a branch source skips the deploy with a notice; any other
+  # answer fails this job rather than skipping silently.
+  pages-status:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: read
+    outputs:
+      deploy: ${{ steps.status.outputs.deploy }}
+    steps:
+    - id: status
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        code=$(curl -sS -o pages.json -w '%{http_code}' \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+        case "$code" in
+          200)
+            build_type=$(jq -r .build_type pages.json)
+            if [ "$build_type" = "workflow" ]; then
+              echo "deploy=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Pages deploys from a branch ($build_type); set Settings -> Pages -> Source to GitHub Actions. Skipping the deploy."
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
+          404)
+            echo "::notice::GitHub Pages is not enabled (Settings -> Pages -> Source: GitHub Actions). Skipping the deploy."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "::error::The Pages API answered HTTP $code"
+            cat pages.json
+            exit 1
+            ;;
+        esac
+
+  deploy:
+    needs: [build, pages-status]
+    if: github.event_name == 'push' && needs.pages-status.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    # One deploy at a time. The group runs deploys in the order they are
+    # queued, not in commit order, so that alone does not stop an older
+    # commit's site from replacing a newer one: its build can finish later, or
+    # its run be re-run. The first step checks for that.
+    concurrency:
+      group: docs-pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    # Deploy only main's current tip. A commit main has moved past is skipped;
+    # the newer commit's own run deploys its site. One gap remains: the group
+    # keeps a single pending job, so an older commit's deploy queued after the
+    # tip's replaces it and then skips, leaving the site one push behind until
+    # the next one. That takes three deploys inside one deploy's runtime,
+    # which merging one PR per green main run rules out in practice.
+    - id: tip
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+        if [ "$tip" = "$GITHUB_SHA" ]; then
+          echo "current=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::main is at $tip, past $GITHUB_SHA. Skipping the deploy."
+          echo "current=false" >> "$GITHUB_OUTPUT"
+        fi
+    - id: deployment
+      if: steps.tip.outputs.current == 'true'
+      uses: actions/deploy-pages@v5.0.1

@@ -103,3 +103,70 @@ class TestExplicitDecompositionMatchesTemplate:
                 got = torch.stack(ours(x, weights))
                 want = torch.stack(reference(x, weights))
             torch.testing.assert_close(got, want, rtol=0, atol=1e-12)
+
+
+class TestExplicitDecompositionUnderNoise:
+    """
+    Noiselessly the explicit CNOT·RZ·CNOT form and qml.IQPEmbedding agree
+    (above), but qml.noise.insert reads the gates as written: 5 channels per
+    ZZ term here, 2 for a template MultiRZ.  Pin the explicit form's noise
+    model, so a switch to the template cannot pass silently (#230).
+    """
+
+    @pytest.mark.parametrize(("n_qubits", "n_repeats"), [(2, 1), (3, 1), (3, 2), (4, 1)])
+    def test_channel_count_of_the_noisy_circuit(self, n_qubits: int, n_repeats: int) -> None:
+        import pennylane as qml
+
+        from hqnn_forge.noise import _noisy_qnode
+
+        layer = IQPEncodingLayer(
+            n_qubits=n_qubits,
+            n_layers=1,
+            n_repeats=n_repeats,
+            device_name="default.qubit",
+            diff_method="backprop",
+        )
+        noisy = _noisy_qnode(layer.qlayer.qnode, n_qubits, 0.05, "all", "depolarizing")
+        weights = torch.zeros(1, n_qubits, 3, dtype=torch.float64)
+        tape = qml.workflow.construct_tape(noisy, level="user")(
+            torch.rand(n_qubits, dtype=torch.float64), weights
+        )
+        channels = sum(op.name == "DepolarizingChannel" for op in tape.operations)
+        pairs = math.comb(n_qubits, 2)
+        # Embedding: H and RZ on each wire, then CNOT·RZ·CNOT (2 + 1 + 2) per
+        # pair, per repeat.  Ring ansatz: n two-wire CNOTs and n Rots.
+        embedding = (2 * n_qubits + 5 * pairs) * n_repeats
+        ansatz = 3 * n_qubits
+        assert channels == embedding + ansatz
+        assert not any(op.name == "MultiRZ" for op in tape.operations)
+
+    def test_noisy_outputs_differ_from_the_template(self) -> None:
+        import pennylane as qml
+
+        from hqnn_forge.encoding.angle_embedding import apply_variational_layers, measure_z
+        from hqnn_forge.noise import apply_depolarizing_noise
+
+        n = 3
+        x = torch.tensor([[0.3, -1.1, 0.7]], dtype=torch.float64)
+        torch.manual_seed(0)
+        layer = IQPEncodingLayer(
+            n_qubits=n, n_layers=1, device_name="default.qubit", diff_method="backprop"
+        )
+        weights = layer.qlayer.weights.detach().to(torch.float64)
+        dev = qml.device("default.mixed", wires=n)
+
+        @qml.qnode(dev, interface="torch")
+        def template(inputs: torch.Tensor) -> list:
+            qml.IQPEmbedding(inputs, wires=range(n))
+            apply_variational_layers(weights, n, 1)
+            return measure_z(n)
+
+        with apply_depolarizing_noise(layer, 0.05), torch.no_grad():
+            explicit = layer(x)[0].to(torch.float64)
+        noisy_template = qml.noise.insert(template, qml.DepolarizingChannel, 0.05, position="all")
+        with torch.no_grad():
+            reference = torch.stack(noisy_template(x[0]))
+            noiseless = torch.stack(template(x[0]))
+            torch.testing.assert_close(layer(x)[0].to(torch.float64), noiseless, rtol=0, atol=1e-6)
+        # Same unitary, different noise model: the extra channels matter.
+        assert (explicit - reference).abs().max() > 0.02

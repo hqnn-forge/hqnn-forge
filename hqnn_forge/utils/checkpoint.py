@@ -84,12 +84,7 @@ from hqnn_forge.initializers.restricted_variance import _not_restricting_ignored
 if TYPE_CHECKING:
     # Type-only: importing this at runtime would be circular, since
     # hqnn_forge.models imports hqnn_forge.utils.
-    from hqnn_forge.models.base import BinaryClassifierBase
-    from hqnn_forge.models.multiclass_hybrid_classifier import MulticlassHybridClassifier
-
-    #: Every class the registry can hold: each records its constructor
-    #: arguments and exposes them through ``get_config()``.
-    Classifier = BinaryClassifierBase | MulticlassHybridClassifier
+    from hqnn_forge.models.base import ClassifierBase
 
 #: Bumped whenever the dict layout above changes incompatibly.
 FORMAT_VERSION: int = 1
@@ -97,8 +92,8 @@ FORMAT_VERSION: int = 1
 #: Constructor arguments whose override cannot invalidate the stored weights:
 #: the two simulator knobs, plus the train-mode-only regularisers --
 #: ``dropout_p`` (``nn.Dropout`` has no parameters of its own) and the
-#: training-noise pair, which only replace the circuit in train mode.  All
-#: three are inert in the eval-mode model that comes back.
+#: training-noise options, which only replace the circuit in train mode, and
+#: ``shots``, which samples the same circuit.  None of them touches a weight.
 #: ``load_checkpoint`` takes these without an opt-in; every other argument
 #: describes the circuit the weights were trained in, so overriding it needs
 #: ``allow_architecture_override=True``.  That includes ``init_strategy`` and
@@ -106,7 +101,17 @@ FORMAT_VERSION: int = 1
 #: they record where the initial weights came from, and an override would
 #: falsify that.
 WEIGHT_SAFE_ARGS: frozenset[str] = frozenset(
-    {"device_name", "diff_method", "dropout_p", "noise_level", "noise_position"}
+    {
+        "device_name",
+        "diff_method",
+        "dropout_p",
+        "noise_level",
+        "noise_position",
+        "noise_method",
+        "noise_trajectories",
+        "shots",
+        "noise_channel",
+    }
 )
 
 #: Constructor arguments the classifiers have gained since checkpoints were
@@ -126,8 +131,13 @@ _LEGACY_DEFAULTS: dict[str, Any] = {
     "init_std": 0.1,  # inert unless init_strategy="normal"
     "noise_level": 0.0,  # training-time depolarizing noise: none
     "noise_position": "all",
+    "noise_method": "density",  # the only method before Pauli trajectories
+    "noise_trajectories": 1,
     "init_seed": None,  # weights drawn from the global RNG; inert once loaded
     "classical_encoder": None,  # the built-in Linear encoder
+    "trainable_input_scaling": False,  # added with encoding_type="reuploading"
+    "shots": None,  # exact expectation values
+    "noise_channel": "depolarizing",  # the only channel before #313
 }
 
 #: Constructor arguments added deliberately without a legacy default: no value
@@ -144,17 +154,21 @@ _FORCED_OVERRIDES_ATTR = "_forced_overrides"
 PathLike = str | os.PathLike[str]
 
 
-def _registry() -> dict[str, type[Classifier]]:
+def _registry() -> dict[str, type[ClassifierBase]]:
     # Imported lazily: hqnn_forge.models imports hqnn_forge.utils, so a
     # module-level import here would be circular.
     from hqnn_forge import models
 
+    # Every concrete classifier; each records its constructor arguments and
+    # exposes them through ClassifierBase.get_config().
     return {
-        name: getattr(models, name) for name in models.__all__ if name != "BinaryClassifierBase"
+        name: getattr(models, name)
+        for name in models.__all__
+        if name not in ("ClassifierBase", "BinaryClassifierBase")
     }
 
 
-def save_checkpoint(model: Classifier, path: PathLike) -> None:
+def save_checkpoint(model: ClassifierBase, path: PathLike) -> None:
     """
     Write ``model``'s class, constructor arguments and weights to ``path``.
 
@@ -224,7 +238,7 @@ def load_checkpoint(
     allow_version_mismatch: bool = False,
     allow_architecture_override: bool = False,
     **overrides: Any,
-) -> Classifier:
+) -> ClassifierBase:
     """
     Rebuild a classifier saved with :func:`save_checkpoint`.
 
@@ -256,14 +270,15 @@ def load_checkpoint(
     **overrides:
         Constructor arguments that replace the stored ones.  Without
         ``allow_architecture_override``, only :data:`WEIGHT_SAFE_ARGS`
-        (``device_name``, ``diff_method``, ``dropout_p``, ``noise_level``,
-        ``noise_position``) may be given -- typically to run a saved model on
-        a different simulator, or to fine-tune it at a different dropout rate
-        or training-noise level.
+        (``device_name``, ``diff_method``, ``dropout_p``, the five
+        ``noise_*`` training-noise options and ``shots``) may be given --
+        typically to run a saved model on a different simulator or with a
+        finite shot count, or to fine-tune it at a different dropout rate or
+        training-noise level.
 
     Returns
     -------
-    BinaryClassifierBase or MulticlassHybridClassifier
+    ClassifierBase
         The rebuilt model with the saved weights, in eval mode.
 
     Raises

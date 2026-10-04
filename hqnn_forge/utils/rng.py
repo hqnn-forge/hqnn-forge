@@ -8,7 +8,9 @@ take no generator.  :func:`seeded_rng` runs a block on that RNG seeded with a
 given seed and restores the caller's state on the way out -- also when the
 block raises -- so a seeded model or fit never reseeds, or advances, the
 stream the caller set up (#175).  Every seeded draw in the library goes
-through it, so what "restored" covers is decided in one place.
+through it, and SPSA's common random numbers go through the same
+:func:`rng_state` / :func:`set_rng_state` pair, so what "restored" covers is
+decided in one place.
 """
 
 from __future__ import annotations
@@ -33,6 +35,26 @@ def as_seed(seed: object, name: str = "init_seed") -> int | None:
     if isinstance(seed, bool) or not isinstance(seed, numbers.Integral):
         raise TypeError(f"{name} must be an int or None; got {type(seed).__name__}.")
     return int(seed)
+
+
+RngState = tuple[torch.Tensor, list[torch.Tensor] | None]
+
+
+def rng_state() -> RngState:
+    """
+    The global RNG state :func:`seeded_rng` saves: the CPU RNG's, and every
+    CUDA device's if CUDA is initialised.  Put back with :func:`set_rng_state`.
+    """
+    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    return torch.random.get_rng_state(), cuda
+
+
+def set_rng_state(state: RngState) -> None:
+    """Restore a state from :func:`rng_state`."""
+    cpu, cuda = state
+    torch.random.set_rng_state(cpu)
+    if cuda is not None:
+        torch.cuda.set_rng_state_all(cuda)
 
 
 def _reseed(seed: int) -> None:
@@ -68,12 +90,9 @@ def seeded_rng(seed: int | None) -> Iterator[Callable[[], None]]:
         yield lambda: None
         return
     fixed = int(seed)
-    cpu = torch.random.get_rng_state()
-    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    saved = rng_state()
     _reseed(fixed)
     try:
         yield lambda: _reseed(fixed)
     finally:
-        torch.random.set_rng_state(cpu)
-        if cuda is not None:
-            torch.cuda.set_rng_state_all(cuda)
+        set_rng_state(saved)

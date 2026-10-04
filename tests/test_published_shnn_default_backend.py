@@ -27,25 +27,13 @@ from __future__ import annotations
 
 import warnings
 
-import pennylane as qml
 import pytest
 import torch
 import torch.nn.functional as F
 
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 
-
-def _lightning_available() -> bool:
-    try:
-        qml.device("lightning.qubit", wires=1)
-    except Exception:  # noqa: BLE001 - any failure means "not installed"
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(
-    not _lightning_available(), reason="pennylane-lightning not installed"
-)
+pytestmark = pytest.mark.requires_lightning
 
 Model = HybridBinaryClassifier | ParallelHybridClassifier
 

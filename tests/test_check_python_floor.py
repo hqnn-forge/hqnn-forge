@@ -79,8 +79,8 @@ def test_raising_only_requires_python_reports_every_other_copy() -> None:
         ),
         (
             "workflow",
-            'python-version: "3.12"\n        enable-cache: true\n\n    - name: Install dependencies from the lockfile\n      run: uv sync --locked --all-extras\n\n    - name: Lint',
-            'python-version: "3.10"\n        enable-cache: true\n\n    - name: Install dependencies from the lockfile\n      run: uv sync --locked --all-extras\n\n    - name: Lint',
+            'python-version: "3.12"\n        enable-cache: true\n',
+            'python-version: "3.10"\n        enable-cache: true\n',
             "job 'lint' runs 3.10, below the floor 3.11",
         ),
     ],
