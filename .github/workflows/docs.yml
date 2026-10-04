@@ -9,55 +9,33 @@ name: Docs
 on:
   push:
     branches: ["main"]
-  # Every pull request, whatever its base, and again when one is retargeted
-  # (`edited` with a base change; title/body edits are skipped), so a stacked
-  # PR is rebuilt against main after its parent merges, as in tests.yml.
+  # Every pull request, whatever its base. Retargeting rebuilds the site
+  # through retarget.yml, which calls docs-build.yml only when the base
+  # changed, so a stacked PR is rebuilt against main after its parent merges.
+  # An `edited` trigger here would post a skipped check under the build's own
+  # name for every title or body edit, and the checks page would show that
+  # instead of the real result (#346).
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
-# A new push to a PR cancels its superseded run. Title/body edits get their
-# own group, so the skipped run cannot cancel the real one. Pushes to main
-# group per commit, as in tests.yml, so merges in quick succession never
-# cancel a main commit's build; the deploy job serialises on its own group.
+# A new push to a PR cancels its superseded run. Pushes to main group per
+# commit, as in tests.yml, so merges in quick succession never cancel a main
+# commit's build; the deploy job serialises on its own group. A retarget's
+# rebuild takes its group from the calling job in retarget.yml.
 concurrency:
-  group: docs-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && !github.event.changes.base && '-edit' || '' }}
+  group: docs-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The build lives in docs-build.yml so that retarget.yml can call it too. It
+  # is its own file, not a `workflow_call` on this one, because a caller must
+  # be granted every permission the called file's jobs ask for, and the deploy
+  # job below asks for pages and id-token write.
   build:
-    if: github.event.action != 'edited' || github.event.changes.base
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v7
-    - name: Install uv
-      uses: astral-sh/setup-uv@v10.2.0
-      with:
-        python-version: "3.12"
-    # Only the documentation tools: griffe reads hqnn_forge's source
-    # statically, so neither the package nor torch / PennyLane is installed.
-    # `uv sync --group docs` would install the project's dependencies too, so
-    # the `docs` group's requirements are read from pyproject.toml and pinned
-    # to their uv.lock versions through a constraints file instead.
-    - name: Install the docs tools
-      run: |
-        uv lock --check
-        uv export --frozen --all-extras --all-groups --no-emit-project --no-hashes -o "$RUNNER_TEMP/constraints.txt"
-        python3 -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['dependency-groups']['docs']))" > "$RUNNER_TEMP/docs.txt"
-        uv venv
-        uv pip install -c "$RUNNER_TEMP/constraints.txt" -r "$RUNNER_TEMP/docs.txt" pytest
-    - name: Test the griffe extension
-      run: uv run --no-sync pytest docs/ -q -p no:cacheprovider
-    - name: Build the site, strictly
-      run: uv run --no-sync mkdocs build --strict
-    - name: Check every exported name is documented
-      run: uv run --no-sync python .github/scripts/check_docs_inventory.py
-    - uses: actions/upload-pages-artifact@v5.0.0
-      if: github.event_name == 'push'
-      with:
-        path: site/
+    uses: ./.github/workflows/docs-build.yml
 
   # actions/deploy-pages fails (HTTP 404) while Pages is disabled or deploys
   # from a branch, which would leave a red check on every main commit. Ask the

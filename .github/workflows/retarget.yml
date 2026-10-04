@@ -1,10 +1,16 @@
 name: Retarget
 
-# Re-runs the test suite when a PR's base branch changes, e.g. when a stacked
-# PR moves to main after its parent is squash-merged: the PR's merge ref then
-# changes although no commit was pushed. A title or body edit leaves only a
-# skipped `tests` check here, under its own name, so it cannot hide the real
-# lint and test results the way a skipped run of tests.yml would (#346).
+# Re-runs the test suite and the docs build when a PR's base branch changes,
+# e.g. when a stacked PR moves to main after its parent is squash-merged: the
+# PR's merge ref then changes although no commit was pushed. A title or body
+# edit leaves only skipped `tests` and `docs` checks here, under their own
+# names, so it cannot hide the real results the way a skipped run of tests.yml
+# or docs.yml would (#346).
+#
+# The re-run's checks are named `tests / lint`, `tests / test (…)`,
+# `docs / build`, next to the unprefixed ones from the last push, which were
+# run against the old base and stay on the commit. After a retarget only the
+# prefixed checks describe the PR against its current base.
 on:
   pull_request:
     types: [edited]
@@ -16,3 +22,13 @@ jobs:
   tests:
     if: github.event.changes.base
     uses: ./.github/workflows/tests.yml
+
+  # Its own group, as tests.yml gives a retarget: sharing docs.yml's would
+  # cancel an in-flight build for the old base and leave it marked cancelled
+  # under the real check name.
+  docs:
+    if: github.event.changes.base
+    uses: ./.github/workflows/docs-build.yml
+    concurrency:
+      group: docs-${{ github.event.pull_request.number }}-retarget
+      cancel-in-progress: true

@@ -62,8 +62,10 @@ This keeps the history reviewable and associates every change with a PR number.
 *   **Stacked PRs.** A PR may use another feature branch as its base, when it builds on
     work not yet on `main`. CI runs on it when it is opened, when its own branch is pushed
     and when it is retargeted, but **not when its base branch is pushed**, so a review fix
-    on the parent can break a child whose check stays green. After pushing to a branch
-    other PRs are based on, re-run them by closing and reopening each:
+    on the parent can break a child whose check stays green. A retarget's re-run reports
+    as `tests / lint`, `tests / test (…)`, `docs / build`: read those, since the
+    unprefixed checks on the same commit still show the run against the old base. After
+    pushing to a branch other PRs are based on, re-run them by closing and reopening each:
 
     ```bash
     for n in $(gh pr list --base <branch> --json number --jq '.[].number'); do
