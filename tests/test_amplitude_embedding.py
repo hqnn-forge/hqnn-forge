@@ -504,11 +504,12 @@ class TestGradientFlow:
         self, diff_method: str, device_name: str, pair_scale: float, is_nan: bool
     ) -> None:
         """
-        What PennyLane 0.46 does not fix: two partner amplitudes that are
-        both small next to the rest, with no exact zero anywhere.  In float32
-        the gradient is finite and off by 5e-2 at 1e-4, and NaN in every
-        component at 1e-5, on 0.45 and on the 0.46 pre-releases alike.  This
-        is why the guard still refuses small amplitudes on every version.
+        What PennyLane 0.46 does not fix: two partner amplitudes, the first
+        pair of their group of four, that are both small next to the second
+        pair, with no exact zero anywhere.  In float32 the gradient is finite
+        and off by 5e-2 at 1e-4, and NaN in every component at 1e-5, on 0.45
+        and on the 0.46 pre-releases alike.  This is why the guard still
+        refuses small amplitudes on every version.
         """
         x = torch.tensor(
             [0.3, 0.1, 0.5, 0.2, pair_scale, 2 * pair_scale, 0.2, 0.1], dtype=torch.float32

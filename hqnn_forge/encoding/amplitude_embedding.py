@@ -58,16 +58,20 @@ Design Rationale
     component being discarded, but a feature that is exactly zero, such as
     a ReLU output of a classical encoder, silently gets no gradient, which
     is worse than a NaN.
-  - On both, a pair that is small as a whole next to the other amplitudes
-    breaks the gradient without any exact zero.  In float32 it is **finite
-    but wrong** (off by 5e-2) when the pair is about 1e-4 of the others and
-    **NaN** at 1e-5; in float64 it is off by 9e-5 at 1e-7 and NaN at 1e-10.
+  - On both, a pair that is small as a whole breaks the gradient without
+    any exact zero, if it is the first pair of its group of four (amplitudes
+    ``4k`` and ``4k + 1``) and small next to the second.  Measured on
+    amplitudes 4 and 5 under ``parameter-shift``: in float32 the gradient is
+    **finite but wrong** (off by 5e-2) when the pair is about 1e-4 of the
+    others and **NaN** at 1e-5; in float64 it is off by 9e-5 at 1e-7 and
+    NaN at 1e-10.  A small second pair leaves ``parameter-shift`` right.
   - On both, ``parameter-shift``, ``finite-diff`` and lightning's
-    ``adjoint`` agree with each other, except that on such a small pair in
-    float64 the latter two lose accuracy first (off by 2e-5 at 1e-5 of the
-    others, where ``parameter-shift`` is right to 2e-8).  ``adjoint`` on
-    ``default.qubit`` returns **zero** for every input they handle and NaN
-    wherever they return NaN.
+    ``adjoint`` agree with each other on single small and zero amplitudes.
+    Around a small pair, first or second and in either dtype, the latter
+    two lose accuracy where ``parameter-shift`` is still right: with the
+    pair at 1e-5 of the others they are off by between 1e-5 and 2e-3.
+    ``adjoint`` on ``default.qubit`` returns **zero** for every input they
+    handle and NaN wherever they return NaN.
 
   Which inputs are affected depends on the data, so no per-batch check can
   catch them reliably.
