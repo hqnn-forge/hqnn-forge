@@ -73,7 +73,7 @@ strategy:
 use_classical_encoder, dropout_p, device_name, diff_method, init_strategy,
 encoding_type, embedding_rotation, entangler, readout, encoder_activation,
 init_std, noise_level, noise_position, noise_method, noise_trajectories,
-trainable_input_scaling, init_seed, classical_encoder, shots, seed:
+trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel, seed:
     As for :class:`~hqnn_forge.models.HybridBinaryClassifier`.
 """
 
@@ -93,7 +93,7 @@ from hqnn_forge.encoding.angle_embedding import (
 )
 from hqnn_forge.models._trunk import DEFAULT_ENCODER_ACTIVATION, DEFAULT_INIT_STD, QuantumTrunk
 from hqnn_forge.models.base import ClassifierBase
-from hqnn_forge.noise import NoiseMethod, Position
+from hqnn_forge.noise import Channel, NoiseMethod, Position
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
 MulticlassStrategy = Literal["softmax", "one_vs_rest"]
@@ -120,7 +120,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     use_classical_encoder, dropout_p, device_name, diff_method,
     init_strategy, encoding_type, embedding_rotation, entangler, readout,
     encoder_activation, init_std, noise_level, noise_position, noise_method,
-    noise_trajectories, classical_encoder, trainable_input_scaling, shots, seed:
+    noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel, seed:
         The trunk's options, exactly as for
         :class:`~hqnn_forge.models.HybridBinaryClassifier`.  With
         ``readout="first"`` every class head reads ⟨Z_0⟩ alone.
@@ -179,6 +179,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
         classical_encoder: nn.Module | None = None,
         trainable_input_scaling: bool = False,
         shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
         seed: int | None = None,
     ) -> None:
         super().__init__()
@@ -214,6 +215,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 classical_encoder=classical_encoder,
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
+                noise_channel=noise_channel,
                 seed=seed,
             )
 
@@ -249,6 +251,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 classical_encoder=classical_encoder,
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
+                noise_channel=noise_channel,
                 seed=seed,
             )
 

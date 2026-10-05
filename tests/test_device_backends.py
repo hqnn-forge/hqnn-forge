@@ -10,6 +10,7 @@ the accelerated backends when they are installed, and the fallback chain
 from __future__ import annotations
 
 import warnings
+from typing import Any
 
 import pennylane as qml
 import pytest
@@ -118,11 +119,10 @@ class TestFallbackChain:
         assert "lightning.qubit" in messages[1] and "default.qubit" in messages[1]
         assert "Install pennylane-lightning" in messages[1]
 
+    @pytest.mark.requires_lightning
     def test_missing_gpu_backend_stops_at_lightning_when_it_works(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        if not _available("lightning.qubit"):
-            pytest.skip("pennylane-lightning not installed")
         monkeypatch.setattr(ae.qml, "device", _failing_device({"lightning.kokkos": RuntimeError}))
         with pytest.warns(
             RuntimeWarning, match="lightning.kokkos.*Falling back to 'lightning.qubit'"
@@ -198,9 +198,12 @@ class TestFallbackChain:
         monkeypatch.setattr(ae.qml, "device", device)
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
-            with pytest.raises(type(error), match=str(error).split()[-1]):
-                ae._resolve_device("lightning.gpu", 30)
-        assert tried == ["lightning.gpu"]
+            # Raised on every call, not remembered as a failed backend: the
+            # failure depends on the qubit count, not on the backend.
+            for _ in range(2):
+                with pytest.raises(type(error), match=str(error).split()[-1]):
+                    ae._resolve_device("lightning.gpu", 30)
+        assert tried == ["lightning.gpu", "lightning.gpu"]
 
     def test_no_warning_when_the_requested_device_works(self) -> None:
         with warnings.catch_warnings():
@@ -220,30 +223,125 @@ class TestFallbackChain:
                 n_qubits=2, n_layers=1, device_name="lightning.gpu", diff_method="backprop"
             )
         assert iqp.qlayer.qnode.device.name == "default.qubit"
-        with pytest.warns(RuntimeWarning):
+        # The same failures again: remembered, so no second warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
             model = HybridBinaryClassifier(
                 n_input_features=2,
                 n_qubits=2,
                 n_layers=1,
                 device_name="lightning.gpu",
                 diff_method="backprop",
+                init_strategy="normal",  # 2 x 1 is too small for the restricted init (#167)
             )
         assert model.quantum_layer.qlayer.qnode.device.name == "default.qubit"
         assert model(torch.rand(3, 2)).shape == (3, 1)
+
+
+def _counting_device(failing: set[str]) -> tuple[list[str], object]:
+    """A stand-in for ``qml.device`` that records every name and fails for ``failing``."""
+    real = qml.device
+    calls: list[str] = []
+
+    def device(name: str, *args, **kwargs):
+        calls.append(name)
+        if name in failing:
+            raise DeviceError(f"{name} unavailable in this test")
+        return real(name, *args, **kwargs)
+
+    return calls, device
+
+
+class TestFallbackIsRememberedAndAttributed:
+    """#225: one attempt and one warning per failed backend, pointed at the caller."""
+
+    def test_three_layers_probe_and_warn_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls, device = _counting_device({"lightning.gpu", "lightning.qubit"})
+        monkeypatch.setattr(ae.qml, "device", device)
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")  # no deduplication hiding repeats
+            layers = [
+                QuantumEncodingLayer(
+                    n_qubits=2, n_layers=1, device_name="lightning.gpu", diff_method="backprop"
+                )
+                for _ in range(3)
+            ]
+        assert calls.count("lightning.gpu") == 1 and calls.count("lightning.qubit") == 1
+        fallbacks = [str(w.message) for w in record if issubclass(w.category, RuntimeWarning)]
+        assert len(fallbacks) == 2
+        assert (
+            "'lightning.gpu'" in fallbacks[0]
+            and "Falling back to 'lightning.qubit'" in fallbacks[0]
+        )
+        assert (
+            "'lightning.qubit'" in fallbacks[1]
+            and "Falling back to 'default.qubit'" in fallbacks[1]
+        )
+        assert all(layer.qlayer.qnode.device.name == "default.qubit" for layer in layers)
+
+    def test_reset_tries_the_backend_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls, device = _counting_device({"lightning.gpu"})
+        monkeypatch.setattr(ae.qml, "device", device)
+        with pytest.warns(RuntimeWarning):
+            ae._resolve_device("lightning.gpu", 2)
+        ae.reset_device_fallback()
+        with pytest.warns(RuntimeWarning):
+            ae._resolve_device("lightning.gpu", 2)
+        assert calls.count("lightning.gpu") == 2
+
+    def test_a_warning_raised_as_an_error_is_not_remembered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls, device = _counting_device({"lightning.gpu"})
+        monkeypatch.setattr(ae.qml, "device", device)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            for _ in range(2):
+                with pytest.raises(RuntimeWarning, match="'lightning.gpu'"):
+                    ae._resolve_device("lightning.gpu", 2)
+        assert calls == ["lightning.gpu", "lightning.gpu"]
+        # Once the warning is let through, the backend is remembered as usual.
+        with pytest.warns(RuntimeWarning, match="'lightning.gpu'"):
+            ae._resolve_device("lightning.gpu", 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            ae._resolve_device("lightning.gpu", 2)
+        assert calls.count("lightning.gpu") == 3
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: QuantumEncodingLayer(n_qubits=2, n_layers=1, device_name="lightning.gpu"),
+            lambda: IQPEncodingLayer(n_qubits=2, n_layers=1, device_name="lightning.gpu"),
+            lambda: HybridBinaryClassifier(
+                2, 2, 1, device_name="lightning.gpu", init_strategy="normal"
+            ),
+            lambda: HybridBinaryClassifier.published_shnn(device_name="lightning.gpu"),
+        ],
+        ids=["layer", "iqp", "classifier", "published_shnn"],
+    )
+    def test_warning_points_at_the_callers_file(
+        self, build, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, device = _counting_device({"lightning.gpu", "lightning.qubit"})
+        monkeypatch.setattr(ae.qml, "device", device)
+        with pytest.warns(RuntimeWarning) as record:
+            build()
+        fallbacks = [w for w in record if issubclass(w.category, RuntimeWarning)]
+        messages = [str(w.message) for w in fallbacks]
+        assert len(messages) == 2 and "'lightning.gpu'" in messages[0]
+        assert "'lightning.qubit'" in messages[1]
+        assert [w.filename for w in fallbacks] == [__file__, __file__]
 
 
 # ---------------------------------------------------------------------------
 # device_name="auto" / diff_method="auto" (#349)
 # ---------------------------------------------------------------------------
 
-requires_lightning = pytest.mark.skipif(
-    not _available("lightning.qubit"), reason="pennylane-lightning is not installed"
-)
 
-
-def _backend(layer: torch.nn.Module) -> tuple[str, str]:
-    qnode = layer.qlayer.qnode  # type: ignore[union-attr]
-    return qnode.device.name, str(qnode.diff_method)
+def _backend(layer: Any) -> tuple[str, str]:
+    qnode = layer.qlayer.qnode
+    return str(qnode.device.name), str(qnode.diff_method)
 
 
 class TestAuto:
@@ -263,6 +361,9 @@ class TestAuto:
             ("default.mixed", "auto", 2, ("default.mixed", "backprop")),
             ("lightning.qubit", "auto", 2, ("lightning.qubit", "adjoint")),
             ("lightning.gpu", "auto", 2, ("lightning.gpu", "adjoint")),
+            ("lightning.kokkos", "auto", 2, ("lightning.kokkos", "adjoint")),
+            # lightning.tensor has no adjoint: the lightning prefix is not enough.
+            ("lightning.tensor", "auto", 2, ("lightning.tensor", "parameter-shift")),
             ("qiskit.aer", "auto", 2, ("qiskit.aer", "parameter-shift")),
             # Explicit on both sides is left alone, even when it is slow.
             ("default.qubit", "adjoint", 2, ("default.qubit", "adjoint")),
@@ -291,7 +392,7 @@ class TestAuto:
         layer = layer_cls(n_qubits=AUTO_BACKPROP_MAX_QUBITS, n_layers=1)
         assert _backend(layer) == ("default.qubit", "backprop")
 
-    @requires_lightning
+    @pytest.mark.requires_lightning
     def test_switch_point_above_the_threshold(self) -> None:
         layer = QuantumEncodingLayer(n_qubits=AUTO_BACKPROP_MAX_QUBITS + 1, n_layers=1)
         assert _backend(layer) == ("lightning.qubit", "adjoint")
@@ -317,6 +418,7 @@ class TestAuto:
         assert _backend(model.quantum_layer) == ("default.qubit", "backprop")
         save_checkpoint(model, tmp_path / "m.pt")
         loaded = load_checkpoint(tmp_path / "m.pt")
+        assert isinstance(loaded, HybridBinaryClassifier)
         assert loaded.get_config() == config
         x = torch.rand(4, 3)
         torch.testing.assert_close(loaded.predict_proba(x), model.predict_proba(x))
@@ -328,7 +430,7 @@ class TestAuto:
         )
         assert _backend(model.quantum_layer) == ("default.qubit", "backprop")
 
-    @requires_lightning
+    @pytest.mark.requires_lightning
     def test_amplitude_without_encoder_follows_the_size_rule(self) -> None:
         n = AUTO_BACKPROP_MAX_QUBITS + 1
         model = HybridBinaryClassifier(
@@ -380,7 +482,7 @@ class TestAuto:
         for a, e in zip(auto.parameters(), explicit.parameters(), strict=True):
             torch.testing.assert_close(a.grad, e.grad, rtol=0, atol=0)
 
-    @requires_lightning
+    @pytest.mark.requires_lightning
     @pytest.mark.parametrize("encoding_type", ["angle", "iqp", "reuploading"])
     def test_auto_default_matches_the_old_lightning_default(self, encoding_type: str) -> None:
         """

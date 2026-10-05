@@ -221,7 +221,11 @@ class TestParametersAndGradients:
         assert model.head.bias.grad is not None and torch.all(model.head.bias.grad != 0)
         q_grad = model.quantum_layer.qlayer.weights.grad
         assert q_grad is not None and q_grad.abs().sum().item() > 0.0
-        enc_grad = model.classical_encoder[0].weight.grad
+        encoder = model.classical_encoder
+        assert isinstance(encoder, nn.Sequential)
+        enc_linear = encoder[0]
+        assert isinstance(enc_linear, nn.Linear)
+        enc_grad = enc_linear.weight.grad
         assert enc_grad is not None and enc_grad.abs().sum().item() > 0.0
 
     def test_quantum_init_matches_documented_sigma(self) -> None:

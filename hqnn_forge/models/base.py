@@ -182,7 +182,21 @@ class BinaryClassifierBase(ClassifierBase):
         ``predict_proba(x) >= threshold`` as ``torch.long``.
     count_parameters(), get_config()
         From :class:`ClassifierBase`.
+
+    Attributes
+    ----------
+    head : nn.Linear
+        The output layer producing the single logit.  Every subclass assigns it
+        in ``__init__``, so code that only reads it can be typed against this
+        class.  ``classical_encoder`` and ``quantum_layer`` are deliberately not
+        declared here: the hybrid models have them, but ``ClassicalBaseline``
+        does not, so a declaration on the base would let mypy accept an access
+        that raises ``AttributeError`` at runtime.
     """
+
+    # Declaration only: nn.Module registers the submodule when a subclass
+    # assigns it, so this changes neither state_dict keys nor checkpoints.
+    head: nn.Linear
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
         raise NotImplementedError(
@@ -196,7 +210,8 @@ class BinaryClassifierBase(ClassifierBase):
         Compute positive-class probabilities (inference mode, no gradients).
 
         Runs in eval mode whatever mode the model is in, so dropout is off and
-        repeated calls on the same input agree.  Every submodule's ``training``
+        repeated calls on the same input agree (except under finite ``shots``,
+        whose readouts are sampled afresh on every call).  Every submodule's ``training``
         flag is restored afterwards, so calling this mid-training leaves the
         model exactly as it was.
 

@@ -1,0 +1,132 @@
+name: Upstream PennyLane
+
+# Runs the test suite against PennyLane and pennylane-lightning builds that
+# have not been released yet, so a break in the internals this library relies
+# on is found before users upgrade (#320).  Those internals include
+# qml.noise.insert as a transform, QNode.compile_pipeline, construct_tape
+# levels, swapping TorchLayer.qnode at run time, and the adjoint batching
+# workaround; 0.45 already broke the device fallback by removing
+# qml.DeviceError.
+#
+# Two sources:
+#   pre-release -- the newest (pre-)release of each on PyPI (pip --pre)
+#   nightly     -- the nightly dev builds PennyLane publishes to TestPyPI
+#
+# A failure never blocks a PR.  On the schedule or a manual run it opens one
+# tracking issue per source, or comments on the open one; the run on a PR that
+# edits this file only proves the workflow itself works, so there a test
+# failure is logged but leaves the check green.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"  # Mondays 04:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/upstream.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [pre-release, nightly]
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        python-version: "3.12"
+    - name: Install the package and its test dependencies
+      run: |
+        uv venv
+        uv pip install -e ".[dev,lightning,sklearn,examples]"
+    - name: Upgrade PennyLane to the ${{ matrix.source }} builds
+      run: |
+        if [ "${{ matrix.source }}" = "pre-release" ]; then
+          uv pip install --upgrade --prerelease allow pennylane pennylane-lightning
+        else
+          # --no-deps: only these two packages come from TestPyPI.  Anything
+          # else resolved there would be whatever someone uploaded under that
+          # name.
+          uv pip install --upgrade --prerelease allow --no-deps \
+            --index-url https://test.pypi.org/simple/ pennylane pennylane-lightning
+          # Their own requirements, which a nightly can add to (it gained jax),
+          # then come from PyPI: read from the installed metadata, without the
+          # two packages themselves, which PyPI would replace with a release.
+          uv run --no-sync python - > nightly-requirements.txt <<'PY'
+        from importlib.metadata import requires
+        from packaging.requirements import Requirement
+
+        own = {"pennylane", "pennylane-lightning"}
+        for dist in sorted(own):
+            for spec in requires(dist) or []:
+                req = Requirement(spec)
+                name = req.name.lower().replace("_", "-")
+                if name in own or (req.marker and not req.marker.evaluate({"extra": ""})):
+                    continue
+                print(req)
+        PY
+          cat nightly-requirements.txt
+          uv pip install --prerelease allow -r nightly-requirements.txt
+        fi
+    - name: Record the versions under test
+      id: versions
+      run: |
+        versions=$(uv run --no-sync python -c "from importlib.metadata import version as v; print(f\"pennylane {v('pennylane')}, pennylane-lightning {v('pennylane-lightning')}\")")
+        echo "$versions"
+        echo "versions=$versions" >> "$GITHUB_OUTPUT"
+        # Unsatisfied requirements of the new builds are reported, not fatal:
+        # the tests below show whether they matter.
+        uv pip check || true
+    # As in tests.yml, a skip not marked may_skip fails.  The lightning tests
+    # skip whenever lightning.qubit cannot be created, so without this a
+    # lightning build that breaks against PennyLane would pass as skips.
+    # On a PR that edits this file, a test failure is upstream's, not the PR's:
+    # it shows on the step but leaves the check green, so the job never fails a
+    # PR (#320).  The install steps above still fail the check if they break.
+    - name: Run pytest
+      continue-on-error: ${{ github.event_name == 'pull_request' }}
+      env:
+        HQNN_FORGE_FAIL_ON_SKIP: "1"
+      run: |
+        set -o pipefail
+        uv run --no-sync pytest tests/ -q -p no:cacheprovider 2>&1 | tee pytest.log
+    - name: Open or update the tracking issue
+      if: failure() && github.event_name != 'pull_request'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSIONS: ${{ steps.versions.outputs.versions }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        title="ci: test suite fails against PennyLane ${{ matrix.source }} builds"
+        {
+          echo "The scheduled upstream job failed against **${VERSIONS:-unknown versions}** (${{ matrix.source }})."
+          echo
+          echo "Run: $RUN_URL"
+          echo
+          echo '<details><summary>Last 80 lines of pytest output</summary>'
+          echo
+          echo '```'
+          tail -n 80 pytest.log 2>/dev/null || echo "pytest did not run; see the run log."
+          echo '```'
+          echo '</details>'
+        } > body.md
+        existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+          --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+        if [ -n "$existing" ]; then
+          gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
+        else
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+        fi

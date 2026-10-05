@@ -13,7 +13,9 @@ them; import them from here in new code.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 import warnings
 from typing import Literal, assert_never, get_args
 
@@ -34,6 +36,9 @@ DiffMethod = Literal["auto", "adjoint", "parameter-shift", "backprop", "finite-d
 #: (a plugin such as ``"qiskit.aer"``, or hardware) is accepted too, and
 #: constructed exactly as given: see :func:`resolve_device`.
 KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "default.qubit"]
+#: The simulators :func:`resolve_device` puts on the fallback chain when their
+#: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
+#: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
@@ -48,16 +53,19 @@ FALLBACK_CHAIN: tuple[str, ...] = ("lightning.qubit", "default.qubit")
 #: Largest circuit ``device_name="auto"`` simulates on ``default.qubit`` with
 #: backprop; larger ones go to ``lightning.qubit`` with adjoint.  Measured for
 #: one training step at batch 64 (``examples/benchmark_batching.py
-#: --crossover``, README): backprop is 15x faster at 8 qubits and still 2x at
-#: 12, while at 14 lightning is faster and backprop's memory, which grows
-#: fourfold per two qubits, has passed 1 GB against lightning's 22 MB.  At 13
+#: --crossover``, README): backprop is 12x faster at 8 qubits and still 2.6x
+#: at 12, while at 14 the two are about as fast and backprop's memory, which
+#: grows fourfold per two qubits, has passed 1 GB against lightning's 21 MB.  At 13
 #: backprop was still faster (0.5 s against 0.9 s) but took +526 MB against
 #: +18 MB, so the switch comes one qubit early, to bound memory rather than to
 #: win the last bit of speed.  Only batch 64 was measured: backprop's memory
-#: also grows with the batch (scaled linearly, the +299 MB at 12 qubits would
-#: be about 5 GB at batch 1024; not measured), so for large batches near the
-#: threshold pass
-#: ``device_name="lightning.qubit"`` explicitly.
+#: also grows with the batch (scaled linearly, the +283 MB at 12 qubits would
+#: be about 4.5 GB at batch 1024; not measured), so for large batches near the
+#: threshold pass ``device_name="lightning.qubit"`` explicitly.  The same holds
+#: for inference: ``predict_proba`` and the trainer's validation pass their
+#: whole input as one batch, so at 12 qubits a 57k-row split holds a
+#: (57k, 4096) complex state, about 3.7 GB per copy, until they evaluate in
+#: chunks (#469).
 AUTO_BACKPROP_MAX_QUBITS = 12
 
 
@@ -80,11 +88,12 @@ def resolve_backend(
       fast one.  Otherwise by size: ``"default.qubit"`` up to
       :data:`AUTO_BACKPROP_MAX_QUBITS` qubits, ``"lightning.qubit"`` above.
     * **Method.**  With ``shots``, ``"parameter-shift"``: the state-vector
-      methods cannot run on samples (see :func:`validate_shots`).  Otherwise by
+      methods cannot run on samples (see ``validate_shots``).  Otherwise by
       the device: ``"backprop"`` on ``default.qubit`` and ``default.mixed``,
-      which vectorise a batch; ``"adjoint"`` on the lightning devices;
-      ``"parameter-shift"`` on any other device, the method every device and
-      hardware supports.
+      which vectorise a batch; ``"adjoint"`` on the three lightning
+      simulators in :data:`KNOWN_DEVICES`; ``"parameter-shift"`` on any other
+      device (``lightning.tensor`` included, which has no adjoint), the method
+      every device and hardware supports.
 
     The rules look at names only.  If ``"lightning.qubit"`` is chosen but not
     installed, :func:`resolve_device` still falls back to ``default.qubit``
@@ -93,7 +102,7 @@ def resolve_backend(
 
     ``require_backprop`` is for amplitude encoding behind a classical encoder,
     which trains through the circuit's input gradient: only backprop gives it
-    correctly (:mod:`hqnn_forge.encoding.amplitude_embedding`).  It only steers
+    correctly (see ``hqnn_forge.encoding.amplitude_embedding``).  It only steers
     ``"auto"``; an explicit conflicting choice is the caller's to refuse.
     """
     if device_name == "auto":
@@ -110,7 +119,7 @@ def resolve_backend(
             diff_method = "parameter-shift"
         elif device_name in ("default.qubit", "default.mixed"):
             diff_method = "backprop"
-        elif device_name.startswith("lightning."):
+        elif device_name in KNOWN_DEVICES:
             diff_method = "adjoint"
         else:
             diff_method = "parameter-shift"
@@ -320,15 +329,55 @@ def is_out_of_memory(exc: BaseException) -> bool:
     Every backend in the chain allocates the same ``2**n_qubits`` amplitudes,
     so falling back cannot help and would only move the allocation from GPU
     memory to host memory, where it can get the process killed instead of
-    raising.  PennyLane raises :class:`AllocationError`; the lightning plugins
-    raise a bare ``RuntimeError`` naming memory.
+    raising.  The lightning plugins raise a bare ``RuntimeError`` naming
+    memory.  :class:`~pennylane.exceptions.AllocationError` is accepted too,
+    as a precaution: PennyLane raises it for dynamically allocated wires, not
+    for device creation.
     """
     return isinstance(exc, AllocationError) or (
         isinstance(exc, RuntimeError) and "memory" in str(exc).lower()
     )
 
 
-SHOT_FREE_METHODS = ("adjoint", "backprop")
+#: Backends that failed to initialise in this process, with the failure.  A
+#: failed plugin import is not cached by Python, and a CUDA library load or a
+#: GPU probe is slow, so every layer built with the same device_name would
+#: otherwise repeat them -- and warn again.  Out-of-memory failures are never
+#: recorded: they depend on n_qubits and are raised, not fallen back from.
+_FAILED_BACKENDS: dict[str, BaseException] = {}
+
+#: The hqnn_forge package directory, for attributing warnings to user code.
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def reset_device_fallback() -> None:
+    """
+    Forget the backends that failed to initialise, so the next layer tries
+    them again -- e.g. after installing a plugin in a running session.
+    """
+    _FAILED_BACKENDS.clear()
+
+
+def _stacklevel_outside_package() -> int:
+    """
+    ``stacklevel`` that attributes a warning issued by the caller of this
+    function to the first frame outside ``hqnn_forge``: the user's own call,
+    however deep the layer or classifier constructors that led here.
+    (``warnings.warn(skip_file_prefixes=...)`` does this from Python 3.12 on;
+    the floor is 3.11.)
+    """
+    frame = inspect.currentframe()
+    frame = frame.f_back if frame is not None else None  # the function that warns
+    level = 1
+    while frame is not None and os.path.abspath(frame.f_code.co_filename).startswith(
+        _PACKAGE_DIR + os.sep
+    ):
+        frame = frame.f_back
+        level += 1
+    return level
+
+
+SHOT_FREE_METHODS = ("adjoint", "backprop", "finite-diff")
 
 
 def validate_shots(shots: int | None, diff_method: str) -> None:
@@ -339,8 +388,13 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
     ``shots=None`` gives exact expectation values.  A finite shot count samples
     them, as hardware does, and rules out ``adjoint`` and ``backprop``: both
     differentiate the simulator's state vector, which sampling does not give
-    (PennyLane refuses even the forward pass).  ``parameter-shift`` is the
-    method that runs on hardware; ``finite-diff`` also works.
+    (PennyLane refuses even the forward pass).  It rules out ``finite-diff``
+    too: a difference quotient with a step ``h`` near 1e-7 divides the shot
+    noise of each expectation value by ``h``, so its gradients are noise of
+    order ``1 / (h·sqrt(shots))`` -- about 1e6 at 1000 shots against an exact
+    value of order 1 -- and training silently diverges.  ``parameter-shift``
+    shifts by π/2 and stays unbiased; it is also the method that runs on
+    hardware.
     """
     if shots is None:
         return
@@ -349,8 +403,32 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
     if diff_method in SHOT_FREE_METHODS:
         raise ValueError(
             f"shots={shots} samples the expectation values, and diff_method="
-            f"{diff_method!r} needs the exact state vector; use diff_method="
-            f"'parameter-shift', the method that also runs on hardware."
+            f"{diff_method!r} needs exact ones ("
+            + (
+                "its tiny step divides the shot noise into the gradient"
+                if diff_method == "finite-diff"
+                else "it differentiates the exact state vector"
+            )
+            + "); use diff_method='parameter-shift', the method that also runs on hardware."
+        )
+
+
+def validate_device_shots(device: qml.devices.Device, shots: int | None) -> None:
+    """
+    Raise ``ValueError`` if *device* has finite shots but *shots* is ``None``.
+
+    A real sampling device (hardware, ``"qiskit.remote"``, ...) fails at the
+    first forward pass when given ``shots=None``, whichever exact method it
+    runs under.  Raising at construction with an informative
+    message guides users to pass explicit ``shots`` and ``parameter-shift``.
+    """
+    dev_shots = getattr(device, "shots", None)
+    total_shots = getattr(dev_shots, "total_shots", dev_shots)
+    if total_shots is not None and shots is None:
+        raise ValueError(
+            f"Device {device.name!r} has finite shots ({total_shots}), but "
+            "shots=None was requested. This device samples, so pass shots= and "
+            "diff_method='parameter-shift'."
         )
 
 
@@ -390,15 +468,20 @@ def resolve_device(
 ) -> qml.devices.Device:
     """
     Create *device_name*, falling back along :data:`FALLBACK_CHAIN` when a
-    backend is not installed or has no usable hardware, with one
-    ``RuntimeWarning`` per failed step.
+    backend is not installed or has no usable hardware.
+
+    A backend that fails is remembered for the rest of the process: later
+    layers skip it without trying again, and its ``RuntimeWarning`` is issued
+    once, not once per layer (:func:`reset_device_fallback` forgets them).
+    The warning is attributed to the first frame outside ``hqnn_forge`` --
+    the user's call -- whichever layer or classifier constructor led here.
 
     The chain is ``requested → lightning.qubit → default.qubit``; entries at
     or before the requested device are skipped, so ``lightning.qubit`` falls
     straight to ``default.qubit`` and ``default.qubit`` has no fallback.
 
-    Only the four simulators in :data:`KNOWN_DEVICES` fall back.  Any other
-    name -- a PennyLane plugin device or hardware -- is constructed exactly as
+    Only the four simulators in :data:`KNOWN_DEVICES` enter the chain.  Any
+    other name -- a PennyLane plugin device or hardware -- is constructed exactly as
     given, and PennyLane's error surfaces if it cannot be: a typo such as
     ``"default.qbit"`` raises rather than quietly running on another
     simulator.
@@ -418,7 +501,7 @@ def resolve_device(
         global NumPy generator: ``torch.manual_seed`` does not reach it, so
         shot-based results then differ from run to run.  ``default.qubit``,
         ``default.mixed`` and the lightning devices honour it; a plugin device
-        is passed it as given.  See :func:`validate_seed`.
+        is passed it as given.  See ``validate_seed``.
 
     Returns
     -------
@@ -427,12 +510,22 @@ def resolve_device(
 
     Raises
     ------
-    The plugin's own exception for a name outside :data:`KNOWN_DEVICES` that
-    cannot be constructed (``DeviceError`` for an unknown name).
-    The backend's own exception if the state vector does not fit in memory
-    (see :func:`is_out_of_memory`), or if every step of the chain fails,
-    which can only happen if PennyLane itself is broken (``default.qubit``
-    has no dependencies).
+    DeviceError
+        If ``device_name`` is outside :data:`KNOWN_DEVICES` and no installed
+        plugin registers it, e.g. a typo.  A plugin that registers the name
+        but cannot construct the device raises its own exception.
+    RuntimeError
+        If the state vector does not fit in memory: the lightning plugins
+        raise one naming memory (see :func:`is_out_of_memory`), which is
+        raised rather than fallen back from.
+    RuntimeWarning
+        If a warnings-as-errors filter is active: the warning a fallback
+        issues is raised instead of falling back.
+    Exception
+        Any other error constructing a device in the chain, which is raised
+        at that step, and the last backend's own error if every step fails;
+        ``default.qubit`` has no dependencies, so the latter means PennyLane
+        itself is broken.
     """
     validate_seed(seed)
     kwargs: dict[str, object] = {} if seed is None else {"seed": seed}
@@ -442,11 +535,16 @@ def resolve_device(
         return dev
     start = FALLBACK_CHAIN.index(device_name) + 1 if device_name in FALLBACK_CHAIN else 0
     candidates = [device_name, *FALLBACK_CHAIN[start:]]
+    last = len(candidates) - 1
     for attempt, name in enumerate(candidates):
+        if attempt < last and name in _FAILED_BACKENDS:
+            # Already failed and warned about in this process: go straight on.
+            logger.debug("Skipping %s, which failed before: %r", name, _FAILED_BACKENDS[name])
+            continue
         try:
             dev = qml.device(name, wires=n_qubits, **kwargs)
         except DEVICE_FAILURES as exc:
-            if attempt == len(candidates) - 1 or is_out_of_memory(exc):
+            if attempt == last or is_out_of_memory(exc):
                 raise
             fallback = candidates[attempt + 1]
             hint = (
@@ -459,8 +557,12 @@ def resolve_device(
                 f"Could not initialise '{name}' ({type(exc).__name__}: {exc}).  "
                 f"Falling back to '{fallback}'.{hint}",
                 RuntimeWarning,
-                stacklevel=3,
+                stacklevel=_stacklevel_outside_package(),
             )
+            # Recorded only once warned: if a warnings-as-errors filter turns
+            # the warning into an exception, the next build must try (and
+            # raise) again rather than fall back silently.
+            _FAILED_BACKENDS[name] = exc
             continue
         if attempt:
             logger.info("Quantum device fell back from %s to %s", device_name, name)
@@ -499,9 +601,9 @@ def expand_batch_dimension(qnode: qml.QNode, diff_method: str) -> qml.QNode:
       0.45 it returns them correctly, but it has no vectorised path to gain:
       its own preprocessing applies ``broadcast_expand`` too, so a broadcast
       tape is split into one tape per sample on the device either way, and
-      measured no faster than splitting here (#312,
-      ``examples/benchmark_batching.py``).  So the split stays for every
-      method.
+      measured no faster than splitting here -- 1.1-1.3x the split's
+      training step at batch 1024 (#312, ``examples/benchmark_batching.py``).
+      So the split stays for every method.
 
     Either way the QNode's signature and results are unchanged: it returns
     ``n_qubits`` expectation values, each of shape ``(batch,)``.

@@ -78,7 +78,7 @@ def _x() -> torch.Tensor:
 
 def _density(layer: Any, x: torch.Tensor, position: Position) -> torch.Tensor:
     """The exact channel's output for ``layer``'s weights, one sample at a time."""
-    noisy = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position)
+    noisy = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position, channel="depolarizing")
     weights = dict(layer.qlayer.qnode_weights)
     prepared = layer.prepare_inputs(x)
     return torch.stack([torch.stack(noisy(xi, **weights)) for xi in prepared]).detach()
@@ -127,7 +127,7 @@ def _tapes(position: Position, batch: int) -> tuple[qml.tape.QuantumScript, ...]
     x = torch.randn(batch, N_QUBITS, generator=torch.Generator().manual_seed(7))
     tape = qml.tape.make_qscript(layer.qlayer.qnode.func)(x, layer.qlayer.weights)
     (density,), _ = qml.noise.insert(tape, qml.DepolarizingChannel, P, position=position)
-    (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position)
+    (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position, channel="depolarizing")
     return density, trajectory
 
 
@@ -204,7 +204,9 @@ class TestTheSampler:
         layer = _layer(IQPEncodingLayer)
         tape = qml.tape.make_qscript(layer.qlayer.qnode.func)(_x()[0], layer.qlayer.weights)
         (density,), _ = qml.noise.insert(tape, qml.DepolarizingChannel, P, position=position)
-        (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position)
+        (trajectory,), _ = _pauli_trajectories(
+            tape, p=P, position=position, channel="depolarizing"
+        )
         for rz, rx in _error_sites(density, trajectory):
             assert rz.data[0].shape == rx.data[0].shape == ()
 
@@ -225,7 +227,9 @@ class TestMatchesTheDensityMatrix:
         layer = _layer(cls, noise_level=P, noise_position=position, noise_method="trajectories")
         layer.train()
         x = _x()
-        density = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position)
+        density = training_noise_qnode(
+            layer.qlayer.qnode, N_QUBITS, P, position, channel="depolarizing"
+        )
         w = layer.qlayer.weights
         weights = dict(layer.qlayer.qnode_weights)
         prepared = layer.prepare_inputs(x)
@@ -326,7 +330,7 @@ class TestBehaviour:
     def test_trajectory_qnode_rejects_zero(self) -> None:
         layer = _layer()
         with pytest.raises(ValueError, match="needs p > 0"):
-            trajectory_noise_qnode(layer.qlayer.qnode, 0.0)
+            trajectory_noise_qnode(layer.qlayer.qnode, 0.0, channel="depolarizing")
 
 
 class TestValidation:
