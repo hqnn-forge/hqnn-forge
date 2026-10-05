@@ -160,12 +160,17 @@ That is what the default, `device_name="auto", diff_method="auto"`, does:
 | above 12 qubits | `lightning.qubit` / adjoint (falling back to `default.qubit` / adjoint without the `lightning` extra) |
 | `shots` set | the size rule's device / parameter-shift |
 | amplitude encoding behind the classical encoder | `default.qubit` / backprop at any size, the only method whose input gradient is correct |
-| an explicit `device_name` | backprop on `default.qubit`, adjoint on lightning, parameter-shift on anything else |
+| an explicit `device_name` | backprop on `default.qubit` and `default.mixed`, adjoint on `lightning.qubit`, `lightning.gpu` and `lightning.kokkos`, parameter-shift on anything else |
 | an explicit `diff_method` | `default.qubit` for backprop, `lightning.qubit` for adjoint, else the size rule |
 
 `hqnn_forge.encoding.resolve_backend` shows the choice for given arguments. The model config,
-and so a checkpoint, records `"auto"`, so a model reloaded elsewhere picks for that machine.
-Pass both names explicitly to pin a backend.
+and so a checkpoint, records `"auto"`, so a reloaded model resolves it again by these rules,
+from the qubit count and options alone; only the fallback when `lightning` is not installed
+depends on the machine. Pass both names explicitly to pin a backend.
+
+Backprop's memory also grows with the batch. `predict_proba` and the trainer's validation
+currently run their whole input as one batch (chunking is #469), so for large evaluation sets
+near 12 qubits pass `device_name="lightning.qubit"` explicitly.
 
 ---
 

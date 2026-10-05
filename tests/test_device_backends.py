@@ -361,6 +361,9 @@ class TestAuto:
             ("default.mixed", "auto", 2, ("default.mixed", "backprop")),
             ("lightning.qubit", "auto", 2, ("lightning.qubit", "adjoint")),
             ("lightning.gpu", "auto", 2, ("lightning.gpu", "adjoint")),
+            ("lightning.kokkos", "auto", 2, ("lightning.kokkos", "adjoint")),
+            # lightning.tensor has no adjoint: the lightning prefix is not enough.
+            ("lightning.tensor", "auto", 2, ("lightning.tensor", "parameter-shift")),
             ("qiskit.aer", "auto", 2, ("qiskit.aer", "parameter-shift")),
             # Explicit on both sides is left alone, even when it is slow.
             ("default.qubit", "adjoint", 2, ("default.qubit", "adjoint")),

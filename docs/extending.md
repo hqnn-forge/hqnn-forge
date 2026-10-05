@@ -127,6 +127,8 @@ does.
 Beyond the protocol:
 
 - **Build the QNode through the shared helpers** in `hqnn_forge/encoding/_common.py`:
+  - `resolve_backend(device_name, diff_method, n_qubits, shots=shots)` turns the default
+    `"auto"` into concrete names; call it first, since `"auto"` is not a PennyLane device.
   - `resolve_device(device_name, n_qubits)` provides the fallback chain to `default.qubit`.
   - `expand_batch_dimension(qnode, diff_method)` makes a batched `inputs` work under adjoint.
   - `apply_variational_layers` and `measure_z` provide the ansatz and the readout.

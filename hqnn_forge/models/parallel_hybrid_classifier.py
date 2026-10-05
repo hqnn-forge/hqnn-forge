@@ -179,9 +179,9 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
           classical encoder then maps to ``2**n_qubits`` features, and the
           ``·π`` scaling is irrelevant because the layer normalises.  Its
           input gradient is only correct under backprop, so with a classical
-          encoder it requires ``diff_method="backprop"`` (on
-          ``default.qubit``) and raises otherwise.  Without one, 1 to
-          ``2**n_qubits`` raw features are zero-padded.
+          encoder ``"auto"`` picks ``default.qubit``/backprop at any size, and
+          an explicit choice that resolves to another method raises.  Without
+          one, 1 to ``2**n_qubits`` raw features are zero-padded.
     embedding_rotation:
         Pauli axis of the angle embedding, ``"X"`` (default), ``"Y"`` or ``"Z"``.
         Angle and re-uploading encodings only.  ``"Z"`` raises under angle
@@ -249,11 +249,12 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
     shots:
         ``None`` (default): exact expectation values.  An ``int``: each circuit
         is sampled that many times, as on hardware, so predictions carry shot
-        noise.  Requires ``diff_method="parameter-shift"``: ``adjoint`` and
-        ``backprop`` need the exact state, and ``finite-diff``'s tiny step
-        turns the shot noise into gradients of order 1e6.  The samples come
-        from the device's own generator, which ``torch.manual_seed`` does not
-        reach, so a model with shots does not repeat run to run (#354).
+        noise.  ``diff_method="auto"`` then picks ``"parameter-shift"``, the
+        only method that works: ``adjoint`` and ``backprop`` need the exact
+        state, and ``finite-diff``'s tiny step turns the shot noise into
+        gradients of order 1e6.  The samples come from the device's own
+        generator, which ``torch.manual_seed`` does not reach, so a model with
+        shots does not repeat run to run (#354).
         :func:`hqnn_forge.noise.apply_shots` evaluates a model with a finite
         shot count without rebuilding it.
     noise_channel:

@@ -61,8 +61,11 @@ FALLBACK_CHAIN: tuple[str, ...] = ("lightning.qubit", "default.qubit")
 #: win the last bit of speed.  Only batch 64 was measured: backprop's memory
 #: also grows with the batch (scaled linearly, the +283 MB at 12 qubits would
 #: be about 4.5 GB at batch 1024; not measured), so for large batches near the
-#: threshold pass
-#: ``device_name="lightning.qubit"`` explicitly.
+#: threshold pass ``device_name="lightning.qubit"`` explicitly.  The same holds
+#: for inference: ``predict_proba`` and the trainer's validation pass their
+#: whole input as one batch, so at 12 qubits a 57k-row split holds a
+#: (57k, 4096) complex state, about 3.7 GB per copy, until they evaluate in
+#: chunks (#469).
 AUTO_BACKPROP_MAX_QUBITS = 12
 
 
@@ -87,9 +90,10 @@ def resolve_backend(
     * **Method.**  With ``shots``, ``"parameter-shift"``: the state-vector
       methods cannot run on samples (see :func:`validate_shots`).  Otherwise by
       the device: ``"backprop"`` on ``default.qubit`` and ``default.mixed``,
-      which vectorise a batch; ``"adjoint"`` on the lightning devices;
-      ``"parameter-shift"`` on any other device, the method every device and
-      hardware supports.
+      which vectorise a batch; ``"adjoint"`` on the three lightning
+      simulators in :data:`KNOWN_DEVICES`; ``"parameter-shift"`` on any other
+      device (``lightning.tensor`` included, which has no adjoint), the method
+      every device and hardware supports.
 
     The rules look at names only.  If ``"lightning.qubit"`` is chosen but not
     installed, :func:`resolve_device` still falls back to ``default.qubit``
@@ -115,7 +119,7 @@ def resolve_backend(
             diff_method = "parameter-shift"
         elif device_name in ("default.qubit", "default.mixed"):
             diff_method = "backprop"
-        elif device_name.startswith("lightning."):
+        elif device_name in KNOWN_DEVICES:
             diff_method = "adjoint"
         else:
             diff_method = "parameter-shift"
@@ -414,8 +418,8 @@ def validate_device_shots(device: qml.devices.Device, shots: int | None) -> None
     Raise ``ValueError`` if *device* has finite shots but *shots* is ``None``.
 
     A real sampling device (hardware, ``"qiskit.remote"``, ...) fails at the
-    first forward pass when given ``shots=None``, typically with the default
-    ``diff_method="adjoint"``.  Raising at construction with an informative
+    first forward pass when given ``shots=None``, whichever exact method it
+    runs under.  Raising at construction with an informative
     message guides users to pass explicit ``shots`` and ``parameter-shift``.
     """
     dev_shots = getattr(device, "shots", None)

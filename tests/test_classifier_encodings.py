@@ -205,6 +205,19 @@ class TestAmplitudeWithoutAnEncoder:
             "only correct under diff_method='backprop'",
         ),
         (
+            # "auto" on an explicit lightning device resolves to adjoint; the
+            # error names what the user passed and what to change.
+            {
+                "encoding_type": "amplitude",
+                "device_name": "lightning.qubit",
+                "diff_method": "auto",
+            },
+            (
+                "got diff_method='auto', which resolved to 'adjoint' on "
+                "device_name='lightning.qubit'.  Leave device_name='auto'"
+            ),
+        ),
+        (
             {"encoding_type": "amplitude", "use_classical_encoder": False, "n_input_features": 9},
             "takes 1 to 2\\*\\*n_qubits = 8 features",
         ),
