@@ -146,6 +146,8 @@ class ClassifierBase(nn.Module):
         initial weights are fresh draws only if ``init_seed`` is ``None``: a
         model built with ``init_seed`` rebuilds the *same* initial weights, so
         for restarts or ensemble members pass ``init_seed=None`` or a new seed.
+        The same holds for a sampling model's device ``seed``, which would
+        replay the same shot noise: pass ``seed=None`` or a new one as well.
         Used by ``hqnn_forge.utils.checkpoint``.
 
         A module argument (a custom ``classical_encoder``) is deep-copied, so

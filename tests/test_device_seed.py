@@ -2,8 +2,7 @@
 tests/test_device_seed.py
 =========================
 Reproducible shot sampling through a device seed (#354): the ``seed`` option on
-layers and classifiers, its path from the estimator's ``random_state``, and
-SPSA's common random numbers for shot noise.
+layers and classifiers, and SPSA's common random numbers for shot noise.
 """
 
 from __future__ import annotations
@@ -69,10 +68,22 @@ class TestSeed:
         assert ", shots=50, seed=5" in layer.extra_repr()
         assert "seed" not in QuantumEncodingLayer(n_qubits=2, n_layers=1).extra_repr()
 
-    @pytest.mark.parametrize("bad", [-1, 1.5, True, "0"])
-    def test_invalid_seed_is_refused(self, bad: object) -> None:
+    def test_negative_seed_is_refused(self) -> None:
         with pytest.raises(ValueError, match="seed must be None or a non-negative int"):
+            resolve_device("default.qubit", 2, seed=-1)
+
+    @pytest.mark.parametrize("bad", [1.5, True, "0"])
+    def test_non_integer_seed_is_refused(self, bad: object) -> None:
+        with pytest.raises(TypeError, match="seed must be an int or None"):
             resolve_device("default.qubit", 2, seed=bad)  # type: ignore[arg-type]
+
+    def test_numpy_integer_seed_is_converted(self) -> None:
+        # As init_seed: a NumPy integer, as scikit-learn tools pass around, is
+        # stored as the plain int a weights_only checkpoint load accepts.
+        model = _model(np.int64(3))  # type: ignore[arg-type]
+        assert type(model.get_config()["seed"]) is int
+        assert type(model.quantum_layer.seed) is int
+        assert _same(_samples(model), _samples(_model(3)))
 
     def test_seed_is_honoured_after_a_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import pennylane as qml
@@ -119,25 +130,6 @@ class TestSeed:
         assert _same(run(), run())
 
 
-class TestEstimator:
-    # A NumPy integer, as scikit-learn tools pass around, is converted to the
-    # plain int the layer's seed validation accepts.
-    @pytest.mark.parametrize("random_state", [13, np.int64(13)])
-    def test_random_state_seeds_the_model(self, random_state: int) -> None:
-        pytest.importorskip("sklearn")
-        from hqnn_forge.sklearn import HybridClassifierEstimator
-
-        rng = np.random.default_rng(0)
-        X = rng.normal(size=(24, 3))
-        y = (X[:, 0] > 0).astype(int)
-        est = HybridClassifierEstimator(
-            n_qubits=2, n_layers=1, max_epochs=1, random_state=random_state
-        ).fit(X, y)
-        seed = est.model_.get_config()["seed"]
-        assert seed == 13
-        assert type(seed) is int
-
-
 class TestSPSACommonShotNoise:
     def _estimates(self, model: HybridBinaryClassifier, sync: bool, n: int = 60) -> np.ndarray:
         x = torch.linspace(-1, 1, 24).reshape(8, 3)
@@ -155,6 +147,7 @@ class TestSPSACommonShotNoise:
             rows.append(torch.cat([g.flatten() for g in opt.gradient_estimate(closure)]).numpy())
         return np.stack(rows)
 
+    @pytest.mark.slow
     def test_synchronised_shots_cut_the_estimate_s_variance(self) -> None:
         model = _model(0, shots=200)
         independent = self._estimates(model, sync=False).var(axis=0).sum()
@@ -171,6 +164,18 @@ class TestSPSACommonShotNoise:
         before = rng.bit_generator.state
         self._estimates(model, sync=True, n=1)
         assert rng.bit_generator.state != before
+
+    def test_train_model_gives_spsa_the_model(self) -> None:
+        # Without model=, train_model passes the model it trains, so the
+        # documented train_model(model, loss, SPSA(model.parameters())) call
+        # gets the common shot noise too.
+        model = _model(0)
+        x = torch.linspace(-1, 1, 24).reshape(8, 3)
+        opt = SPSA(model.parameters(), lr=0.2)
+        train_model(
+            model, torch.nn.BCEWithLogitsLoss(), opt, x, (x[:, 0] > 0).float(), max_epochs=1
+        )
+        assert opt.model is model
 
     def test_two_seeded_spsa_fits_are_identical(self) -> None:
         def fit(seed: int | None) -> dict[str, torch.Tensor]:

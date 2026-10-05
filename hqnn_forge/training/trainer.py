@@ -48,6 +48,7 @@ from hqnn_forge.evaluation import (
     TemperatureScaler,
     find_optimal_threshold,
 )
+from hqnn_forge.training.spsa import SPSA
 from hqnn_forge.utils.modes import _modes, _restore, eval_mode, train_mode
 
 LossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -207,7 +208,8 @@ def train_model(
         :class:`~hqnn_forge.training.SPSA`) gets ``step(closure)`` with a
         closure that returns the batch loss tensor, and no ``backward`` pass
         of its own (SPSA's ``gradient_optimizer`` backpropagates that loss to
-        the classical head only).
+        the classical head only).  An SPSA built without ``model=`` is given
+        ``model``, so its two evaluations share the devices' shot noise.
     X_train, y_train:
         Training split.  For a multiclass model every label of ``y_train``
         and ``y_val`` must be a class index in ``[0, n_classes)`` (integer,
@@ -305,6 +307,11 @@ def train_model(
     bounds = [*range(0, n, batch_size), n]
     if batch_size > 1 and len(bounds) > 2 and bounds[-1] - bounds[-2] == 1:
         del bounds[-2]
+
+    # SPSA synchronises the two evaluations' shot noise only through the model
+    # (its model=); the model trained here is the one the closure evaluates.
+    if isinstance(optimizer, SPSA) and optimizer.model is None:
+        optimizer.model = model
 
     def train_loss(rows: torch.Tensor) -> torch.Tensor:
         """The loss on the training rows ``rows``, with its autograd graph."""

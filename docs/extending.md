@@ -129,7 +129,11 @@ Beyond the protocol:
 - **Build the QNode through the shared helpers** in `hqnn_forge/encoding/_common.py`:
   - `resolve_backend(device_name, diff_method, n_qubits, shots=shots)` turns the default
     `"auto"` into concrete names; call it first, since `"auto"` is not a PennyLane device.
-  - `resolve_device(device_name, n_qubits)` provides the fallback chain to `default.qubit`.
+  - `resolve_device(device_name, n_qubits, seed=seed)` provides the fallback chain to
+    `default.qubit` and seeds the device's shot sampling. Take a `seed=None` argument, pass it
+    through, set `self.seed = validate_seed(seed)`, and show it with
+    `shots_repr(self.shots, self.seed)` in `extra_repr`, as the built-in layers do; without it a
+    shot-based model built with `seed=` silently does not repeat.
   - `expand_batch_dimension(qnode, diff_method)` makes a batched `inputs` work under adjoint.
   - `apply_variational_layers` and `measure_z` provide the ansatz and the readout.
   - `validate_circuit_options` rejects a bad option at construction, not at the first forward.

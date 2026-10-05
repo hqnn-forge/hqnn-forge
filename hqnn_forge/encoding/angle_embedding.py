@@ -76,6 +76,7 @@ from hqnn_forge.encoding._common import (
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
+    validate_seed,
     validate_shots,
     variational_weight_shape,
 )
@@ -336,6 +337,9 @@ def build_encoding_qnode(
         ``"hardware_efficient"``; see :func:`apply_variational_layers`.
     readout:
         ``"all"`` (default): ⟨Z_i⟩ on every qubit.  ``"first"``: ⟨Z_0⟩ only.
+    shots, seed:
+        Finite-shot sampling and the device seed, as for
+        :class:`QuantumEncodingLayer`.
 
     Returns
     -------
@@ -504,9 +508,15 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         readout is estimated from that many samples, as on hardware.  Needs
         ``diff_method="parameter-shift"``; with training noise, only
         ``noise_method="trajectories"``.  The samples come from the device's
-        own generator, which ``torch.manual_seed`` does not reach (#354).
-        The ``shots`` attribute reads the QNode the layer runs, so it follows
+        own generator, which ``torch.manual_seed`` does not reach: pass
+        ``seed`` for samples that repeat run to run.  The ``shots`` attribute
+        reads the QNode the layer runs, so it follows
         :func:`hqnn_forge.noise.apply_shots`.
+    seed:
+        Seed of the device's generator, which draws the shot samples; a
+        non-negative ``int`` (NumPy integers are converted) or ``None``
+        (default: unseeded).  Inert for exact simulation.  Shown in the repr;
+        see :func:`~hqnn_forge.encoding.angle_embedding.resolve_device`.
 
     Attributes
     ----------
@@ -604,7 +614,7 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
             shots=shots,
             noise_channel=noise_channel,
         )
-        self.seed = seed
+        self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
     # Forward pass

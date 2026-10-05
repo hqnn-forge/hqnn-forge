@@ -445,6 +445,23 @@ class TestSeveralSeeds:
             {"a": _data()}, build, n_splits=2, max_epochs=1, smote_kwargs={"k_neighbors": 3}
         )
 
+    def test_a_seeded_sampling_device_is_refused(self) -> None:
+        # A device seed replays the same shot noise in every repeat.  The
+        # check runs before training, so the slow shot-based fit never starts.
+        def build(n_input_features: int) -> nn.Module:
+            return HybridBinaryClassifier(
+                n_input_features,
+                2,
+                1,
+                device_name="default.qubit",
+                diff_method="parameter-shift",
+                shots=50,
+                seed=7,
+            )
+
+        with pytest.raises(ValueError, match="seed=None; got seed=7"):
+            run_benchmark({"a": _data()}, build, n_splits=2, max_epochs=1, n_seeds=2)
+
     def test_one_seed_is_the_default_run(self) -> None:
         default, explicit = _run({"a": _data()}), _run({"a": _data()}, n_seeds=1)
         strip = lambda r: {k: v for k, v in r.items() if k != "train_seconds"}

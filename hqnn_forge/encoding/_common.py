@@ -24,6 +24,7 @@ import torch
 from pennylane.exceptions import AllocationError, DeviceError
 
 from hqnn_forge.circuits import hardware_efficient_layer, strongly_entangling_layer
+from hqnn_forge.utils.rng import as_seed
 
 logger = logging.getLogger(__name__)
 
@@ -439,17 +440,20 @@ def shots_repr(shots: int | None, seed: int | None = None) -> str:
     )
 
 
-def validate_seed(seed: int | None) -> None:
+def validate_seed(seed: int | None) -> int | None:
     """
-    Raise ``ValueError`` unless ``seed`` is ``None`` or a non-negative ``int``.
+    ``seed`` as a plain ``int`` (or ``None``), for a device's ``seed`` argument.
 
-    NumPy's generators, which PennyLane's simulators use, take no negative
-    seed; ``bool`` is refused as it is for ``shots``.
+    NumPy integers are accepted and converted, as for ``init_seed`` (see
+    :func:`~hqnn_forge.utils.rng.as_seed`, which raises ``TypeError`` for
+    any other type, ``bool`` included).  NumPy's generators, which
+    PennyLane's simulators use, take no negative seed, so a negative one
+    raises ``ValueError``.
     """
-    if seed is None:
-        return
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+    seed = as_seed(seed, "seed")
+    if seed is not None and seed < 0:
         raise ValueError(f"seed must be None or a non-negative int; got {seed!r}.")
+    return seed
 
 
 def backend_repr(qlayer: qml.qnn.TorchLayer) -> str:
@@ -527,7 +531,7 @@ def resolve_device(
         ``default.qubit`` has no dependencies, so the latter means PennyLane
         itself is broken.
     """
-    validate_seed(seed)
+    seed = validate_seed(seed)
     kwargs: dict[str, object] = {} if seed is None else {"seed": seed}
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits, **kwargs)

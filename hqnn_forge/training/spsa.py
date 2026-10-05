@@ -67,7 +67,7 @@ The loss is evaluated by a closure, without ``backward``::
 The closure should return the loss tensor, not a float, so that a
 ``gradient_optimizer`` (below) can backpropagate through it.
 :func:`~hqnn_forge.training.train_model` recognises the optimiser and builds the
-closure itself.
+closure itself, and passes the model it trains as ``model=`` if none was given.
 
 The classical head: exact gradients at no extra circuit cost
 ------------------------------------------------------------
@@ -198,7 +198,7 @@ class SPSA(torch.optim.Optimizer):
         The model the parameters belong to.  When given, the shot sampling of
         its devices is synchronised between the two evaluations of a step
         (see *Common random numbers*).  Default ``None``: only the torch RNG
-        is.  Seed the devices (``seed=`` on the model) as well for runs that
+        is, unless :func:`~hqnn_forge.training.train_model` sets it.  Seed the devices (``seed=`` on the model) as well for runs that
         repeat exactly.
 
     Attributes

@@ -258,10 +258,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module's `__all__` with no entry, fails CI, and deployed to GitHub Pages from `main` once
   Pages is enabled; a `docs` dependency group installs the tools (#342)
 - `seed` on the encoding layers and classifiers seeds the device's shot sampling, which
-  `torch.manual_seed` does not reach, so seeded shot-based runs repeat exactly; the
-  estimator passes its `random_state`, and `seed` is a weight-safe checkpoint argument.
-  `SPSA(..., model=model)` starts both evaluations of a step from the same device generator
-  state, which cut the shot-noise variance of its gradient estimate about fourfold (#354, #369)
+  `torch.manual_seed` does not reach, so seeded shot-based runs repeat exactly; `seed` is a
+  weight-safe checkpoint argument. `SPSA(..., model=model)` starts both evaluations of a step
+  from the same device generator state, which cut the shot-noise variance of its gradient
+  estimate about fourfold; `train_model` passes the model it trains when `model=` is not
+  given (#354, #369)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

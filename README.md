@@ -121,8 +121,9 @@ of falling back.
 `shots=N` (default `None`, exact) samples every readout from `N` measurements, as hardware
 does, and needs `diff_method="parameter-shift"`; hardware devices need both.
 `hqnn_forge.noise.apply_shots` evaluates an exactly trained model under sampling, and
-`shot_sweep` repeats that across shot counts. Sampling is not yet seeded by
-`torch.manual_seed` (#354).
+`shot_sweep` repeats that across shot counts. The samples come from the device's own
+generator, which `torch.manual_seed` does not reach; pass `seed=` to the model or layer for
+shot-based runs that repeat.
 
 | `device_name` | What it is | Prerequisites |
 |---|---|---|

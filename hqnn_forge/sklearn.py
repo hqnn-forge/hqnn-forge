@@ -135,14 +135,12 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         falls back to 0.5 both without a validation split and under
         ``monitor="val_loss"``.
     random_state:
-        Seeds weight initialisation, dropout, the validation split, batch
-        order and the device's shot sampling.  The initial weights are the
-        model's ``init_seed=random_state`` draws and the devices are seeded
-        with the model's ``seed=random_state``; dropout and batch order use
-        seeds spawned from it, so they are independent of the init.  A seeded
-        ``fit`` is reproducible and leaves the global torch RNG exactly as it
-        was; ``None`` draws everything from the global RNG and leaves the
-        devices unseeded.  The draws of ``noise_method="trajectories"`` share
+        Seeds weight initialisation, dropout, the validation split and batch
+        order.  The initial weights are the model's ``init_seed=random_state``
+        draws; dropout and batch order use seeds spawned from it, so they are
+        independent of the init.  A seeded ``fit`` is reproducible and leaves
+        the global torch RNG exactly as it was; ``None`` draws everything from
+        the global RNG.  The draws of ``noise_method="trajectories"`` share
         the dropout stream, so a seeded noisy ``fit`` is reproducible too.
     noise_level, noise_position, noise_method, noise_trajectories:
         Noise-aware training, passed to the model: depolarizing noise of
@@ -240,9 +238,6 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
             noise_method=self.noise_method,
             noise_trajectories=self.noise_trajectories,
             init_seed=init_seed,
-            # Seeds the devices' shot sampling too, which torch's RNG does not
-            # reach; inert for exact simulation.
-            seed=init_seed,
         )
         if self.model not in ("serial", "parallel"):
             raise ValueError(f"model must be 'serial' or 'parallel'; got {self.model!r}.")

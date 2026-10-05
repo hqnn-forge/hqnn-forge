@@ -184,6 +184,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
+        seed = as_seed(seed, "seed")
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the

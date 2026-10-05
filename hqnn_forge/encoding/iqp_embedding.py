@@ -50,6 +50,7 @@ from hqnn_forge.encoding._common import (
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
+    validate_seed,
     validate_shots,
     variational_weight_shape,
 )
@@ -179,7 +180,7 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
     ``noise_trajectories`` / ``noise_channel`` add training-time noise
     (depolarizing by default; ``noise_level``'s range depends on the
     channel), and
-    ``shots`` finite-shot sampling, exactly as in
+    ``shots`` and ``seed`` finite-shot sampling and its device seed, exactly as in
     :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
     """
 
@@ -238,7 +239,7 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
             shots=shots,
             noise_channel=noise_channel,
         )
-        self.seed = seed
+        self.seed = validate_seed(seed)
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """

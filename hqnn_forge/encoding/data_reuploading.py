@@ -101,6 +101,7 @@ from hqnn_forge.encoding._common import (
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
+    validate_seed,
     validate_shots,
     variational_weight_shape,
 )
@@ -379,8 +380,8 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
         or by Pauli trajectories (the Pauli channels only).  See
         :mod:`hqnn_forge.noise`.
-    shots:
-        Finite-shot sampling, exactly as for
+    shots, seed:
+        Finite-shot sampling and the device seed, exactly as for
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
 
     Attributes
@@ -471,7 +472,7 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
             shots=shots,
             noise_channel=noise_channel,
         )
-        self.seed = seed
+        self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:

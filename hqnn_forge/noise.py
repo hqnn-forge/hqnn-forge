@@ -98,7 +98,7 @@ Two methods, chosen with ``noise_method``:
     draws use torch's global RNG, like dropout, so ``torch.manual_seed``
     makes them reproducible -- on an exact layer.  With ``shots`` the
     readouts are also sampled by the device's own generator, which torch does
-    not seed, so such a layer does not repeat until #354.
+    not seed, so such a layer repeats only when built with ``seed``.
 
 Shot noise
 ----------
