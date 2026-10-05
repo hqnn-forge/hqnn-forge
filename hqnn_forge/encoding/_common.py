@@ -88,7 +88,7 @@ def resolve_backend(
       fast one.  Otherwise by size: ``"default.qubit"`` up to
       :data:`AUTO_BACKPROP_MAX_QUBITS` qubits, ``"lightning.qubit"`` above.
     * **Method.**  With ``shots``, ``"parameter-shift"``: the state-vector
-      methods cannot run on samples (see :func:`validate_shots`).  Otherwise by
+      methods cannot run on samples (see ``validate_shots``).  Otherwise by
       the device: ``"backprop"`` on ``default.qubit`` and ``default.mixed``,
       which vectorise a batch; ``"adjoint"`` on the three lightning
       simulators in :data:`KNOWN_DEVICES`; ``"parameter-shift"`` on any other
@@ -102,7 +102,7 @@ def resolve_backend(
 
     ``require_backprop`` is for amplitude encoding behind a classical encoder,
     which trains through the circuit's input gradient: only backprop gives it
-    correctly (:mod:`hqnn_forge.encoding.amplitude_embedding`).  It only steers
+    correctly (see ``hqnn_forge.encoding.amplitude_embedding``).  It only steers
     ``"auto"``; an explicit conflicting choice is the caller's to refuse.
     """
     if device_name == "auto":
