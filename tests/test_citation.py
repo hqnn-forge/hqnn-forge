@@ -33,7 +33,7 @@ def test_version_matches_pyproject() -> None:
 
 
 def test_licence_matches_pyproject() -> None:
-    assert _cff_field("license") == _project()["license"]["text"]
+    assert _cff_field("license") == _project()["license"]
 
 
 def test_format_version() -> None:

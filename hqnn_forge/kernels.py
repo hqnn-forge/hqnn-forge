@@ -26,7 +26,7 @@ this makes no difference: the ansatz is a data-independent unitary ``V`` and
 ``|⟨Φ(x)|V†V|Φ(x')⟩|² = |⟨Φ(x)|Φ(x')⟩|²``, so the kernel is that of the
 embedding alone whatever the weights are.
 
-For :class:`DataReuploadingLayer` the blocks ``weights[0]`` to
+For :class:`~hqnn_forge.encoding.DataReuploadingLayer` the blocks ``weights[0]`` to
 ``weights[-2]`` sit between uploads and do shape the kernel; they are then
 part of the kernel's definition (a "trainable kernel" in the sense of
 Hubregtsen et al. 2022), and the matrix is that of the layer as currently
@@ -562,7 +562,7 @@ def train_kernel_alignment(
     one Adam step on ``-alignment``.
 
     Only the weights that sit *between* uploads and the ``input_scaling`` of a
-    :class:`DataReuploadingLayer` change the kernel.  For the single-upload
+    :class:`~hqnn_forge.encoding.DataReuploadingLayer` change the kernel.  For the single-upload
     encoders the ansatz cancels in the kernel, so their gradient is zero and
     this does nothing useful: see the module docstring.
 

@@ -40,6 +40,7 @@ import torch
 from torch import nn
 
 from hqnn_forge.diagnostics import LOGICAL_GATE_SET, CircuitSummary, circuit_summary
+from hqnn_forge.diagnostics.circuit import _tape_resources
 from hqnn_forge.models import HybridBinaryClassifier
 
 pytestmark = pytest.mark.reproducibility
@@ -91,15 +92,15 @@ def _published_summary(
     circuit: qml.QNode, n_quantum_params: int
 ) -> tuple[CircuitSummary, qml.tape.QuantumScript]:
     tape = _logical_tape(circuit, weights=torch.zeros(N_LAYERS, N_QUBITS, 3))
-    res = tape.specs["resources"]
+    res = _tape_resources(tape)
     summary = CircuitSummary(
         layer_type="published",
         n_qubits=N_QUBITS,
         n_trainable_params=n_quantum_params,
-        depth=int(res.depth),
-        n_gates=int(res.num_gates),
-        n_two_qubit_gates=sum(c for size, c in res.gate_sizes.items() if size >= 2),
-        gate_counts=dict(sorted(res.gate_types.items())),
+        depth=res.depth,
+        n_gates=res.n_gates,
+        n_two_qubit_gates=res.n_two_qubit_gates,
+        gate_counts=res.gate_counts,
     )
     return summary, tape
 

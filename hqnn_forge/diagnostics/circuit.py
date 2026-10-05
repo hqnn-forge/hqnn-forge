@@ -6,7 +6,7 @@ Depth, gate counts and parameter counts for the library's quantum circuits.
 The encoding layers build their QNodes internally, so answering "how many
 CNOTs does this configuration use?" otherwise means reading the source.
 ``circuit_summary`` asks PennyLane instead: it constructs the tape the layer
-would execute and reads the resources off it.
+would execute and counts the resources on it.
 
 Counting convention
 -------------------
@@ -35,9 +35,10 @@ between the two modes.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pennylane as qml
@@ -292,13 +293,49 @@ def _is_two_wire_multirz(op: qml.operation.Operator) -> bool:
     return op.name == "MultiRZ" and len(op.wires) <= 2
 
 
-def _n_two_qubit_gates(gate_sizes: Mapping[int, int]) -> int:
+class _TapeResources(NamedTuple):
+    """Depth and gate counts of a tape's operations (measurements excluded)."""
+
+    depth: int
+    n_gates: int
+    n_two_qubit_gates: int
+    gate_counts: dict[str, int]
+
+
+def _tape_resources(tape: qml.tape.QuantumScript) -> _TapeResources:
     """
-    Gates on two or more wires.  After _decompose_logical only a gate that has
-    no decomposition can still act on more than two; it counts once rather
-    than dropping out of the count.
+    Depth and gate counts of a tape from _decompose_logical, computed from
+    its operations.
+
+    Counted here rather than read from ``tape.specs["resources"]``, whose
+    layout PennyLane changes between releases: 0.46 drops ``num_gates``,
+    ``gate_types`` and ``gate_sizes`` (#344).  The depth is the usual one, the
+    number of layers when every gate starts as soon as all its wires are free.
+    A gate on two or more wires counts once towards ``n_two_qubit_gates``:
+    after _decompose_logical only a gate with no decomposition can still act
+    on more than two, and it counts once rather than dropping out of the count.
+
+    On a tape from _decompose_logical these are the numbers ``specs`` reports
+    in both 0.45 and 0.46.  On other tapes they can differ: ``specs`` prefixes
+    a gate with several control wires with their number (``2C(RX)``, here
+    ``C(RX)``), expands a ``ResourcesOperation`` into its declared resources,
+    and gives an operation without wires (``Barrier()``, ``Snapshot``) or one
+    conditioned on a mid-circuit measurement a different layer.
     """
-    return sum(count for size, count in gate_sizes.items() if size >= 2)
+    free_at: dict[object, int] = {}
+    depth = 0
+    for op in tape.operations:
+        layer = 1 + max((free_at.get(w, 0) for w in op.wires), default=0)
+        for w in op.wires:
+            free_at[w] = layer
+        depth = max(depth, layer)
+    names = Counter(op.name for op in tape.operations)
+    return _TapeResources(
+        depth=depth,
+        n_gates=len(tape.operations),
+        n_two_qubit_gates=sum(1 for op in tape.operations if len(op.wires) >= 2),
+        gate_counts=dict(sorted(names.items())),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +668,7 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
     layer, qlayer, n_qubits = resolve_encoding_layer(target, "circuit_summary")
     written = _written_tape(layer)
     tape = _decompose_logical(written)
-    resources = tape.specs["resources"]
+    resources = _tape_resources(tape)
     qnode = qlayer.qnode
     # Counted on the tape as written, which count_inert_parameters decomposes
     # to LOGICAL_GATE_SET itself: a wide MultiRZ stays one diagonal gate there.
@@ -655,10 +692,10 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
         n_trainable_params=sum(
             p.numel() for p in qlayer.qnode_weights.values() if p.requires_grad
         ),
-        depth=int(resources.depth),
-        n_gates=int(resources.num_gates),
-        n_two_qubit_gates=_n_two_qubit_gates(resources.gate_sizes),
-        gate_counts=dict(sorted(resources.gate_types.items())),
+        depth=resources.depth,
+        n_gates=resources.n_gates,
+        n_two_qubit_gates=resources.n_two_qubit_gates,
+        gate_counts=resources.gate_counts,
         device_name=str(qnode.device.name),
         diff_method=str(qnode.diff_method),
         n_inert_params=n_inert,

@@ -36,7 +36,7 @@ jobs:
         # Full history, so the tagged commit can be checked against main.
         fetch-depth: 0
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.1.0
+      uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: "3.12"
     - name: Check a dry run is of main
@@ -81,7 +81,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.1.0
+      uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: "3.12"
     - name: Install dependencies from the lockfile

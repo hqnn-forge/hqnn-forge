@@ -12,11 +12,17 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
+import pennylane as qml
 import pytest
 import torch
 
-from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding import (
+    AmplitudeEncodingLayer,
+    DataReuploadingLayer,
+    QuantumEncodingLayer,
+)
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.initializers import restricted_normal_init_
 
@@ -247,3 +253,137 @@ def test_lightning_runs_broadcast_tapes_correctly(
     for name, grad in split_grads.items():
         assert grad.abs().sum() > 0, name
         torch.testing.assert_close(native_grads[name], grad, atol=1e-5, rtol=1e-5, msg=name)
+
+
+@pytest.mark.parametrize(
+    "build_layer",
+    [
+        pytest.param(
+            lambda dev: QuantumEncodingLayer(
+                n_qubits=N_QUBITS, n_layers=1, device_name=dev, diff_method="adjoint"
+            ),
+            id="angle",
+        ),
+        pytest.param(
+            lambda dev: IQPEncodingLayer(
+                n_qubits=N_QUBITS, n_layers=1, device_name=dev, diff_method="adjoint"
+            ),
+            id="iqp",
+        ),
+        pytest.param(
+            lambda dev: DataReuploadingLayer(
+                n_qubits=N_QUBITS, n_layers=1, device_name=dev, diff_method="adjoint"
+            ),
+            id="reuploading",
+        ),
+        pytest.param(
+            lambda dev: AmplitudeEncodingLayer(
+                n_features=N_QUBITS, n_qubits=2, n_layers=1, device_name=dev, diff_method="adjoint"
+            ),
+            id="amplitude",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "device_name",
+    [
+        "default.qubit",
+        pytest.param("lightning.qubit", marks=pytest.mark.requires_lightning),
+    ],
+)
+def test_no_grad_forward_computes_zero_derivatives(
+    build_layer: Callable[[str], Any], device_name: str
+) -> None:
+    """
+    Under torch.no_grad(), an adjoint forward pass records 0 derivatives in
+    qml.Tracker (#426), while a gradient pass records them.
+    """
+    torch.manual_seed(0)
+    layer = build_layer(device_name)
+    dev = layer.qlayer.qnode.device
+    x = torch.randn(BATCH, N_QUBITS)
+
+    with torch.no_grad(), qml.Tracker(dev) as tracker:
+        no_grad_out = layer(x)
+    assert not no_grad_out.requires_grad
+    assert tracker.totals.get("derivatives", 0) == 0
+
+    with qml.Tracker(dev) as tracker:
+        grad_out = layer(x)
+        grad_out.sum().backward()
+    assert tracker.totals.get("derivatives", 0) > 0
+
+    torch.testing.assert_close(no_grad_out, grad_out.detach())
+
+
+def test_no_grad_forward_preserves_transforms() -> None:
+    """
+    Transforms applied to a QNode after a no_grad pass invalidate the layer's
+    eval-QNode cache and are preserved under torch.no_grad() (#426, #439).
+    """
+
+    @qml.transform
+    def prepend_x(
+        tape: qml.tape.QuantumTape,
+    ) -> tuple[list[qml.tape.QuantumTape], Callable[[Any], Any]]:
+        new_ops = [qml.PauliX(0)] + list(tape.operations)
+        new_tape = tape.copy(operations=new_ops)
+        return [new_tape], lambda res: res[0]
+
+    torch.manual_seed(0)
+    layer = QuantumEncodingLayer(n_qubits=N_QUBITS, n_layers=1, diff_method="adjoint")
+    dev = layer.qlayer.qnode.device
+    x = torch.randn(BATCH, N_QUBITS)
+
+    # 1. Warm cache with a no_grad pass before the transform
+    with torch.no_grad():
+        pre_transform_out = layer(x)
+
+    # 2. Apply transform to the QNode (creates a shallow copy)
+    layer.qlayer.qnode = prepend_x(layer.qlayer.qnode)
+
+    # 3. Post-transform no_grad pass: invalidates stale cache and computes 0 derivatives
+    with torch.no_grad(), qml.Tracker(dev) as tracker:
+        no_grad_out = layer(x)
+    assert not no_grad_out.requires_grad
+    assert tracker.totals.get("derivatives", 0) == 0
+
+    # 4. Compare with grad-enabled pass
+    with qml.Tracker(dev) as tracker:
+        grad_out = layer(x)
+        grad_out.sum().backward()
+    assert tracker.totals.get("derivatives", 0) > 0
+
+    torch.testing.assert_close(no_grad_out, grad_out.detach())
+    assert not torch.allclose(no_grad_out, pre_transform_out)
+
+
+def test_no_grad_trajectory_noise_train_mode() -> None:
+    """
+    Under torch.no_grad() in train mode, a layer with trajectory noise evaluates
+    an undifferentiated QNode with zero derivatives while applying noise (#426, #439).
+    """
+    torch.manual_seed(42)
+    layer = QuantumEncodingLayer(
+        n_qubits=2,
+        n_layers=1,
+        diff_method="adjoint",
+        noise_method="trajectories",
+        noise_level=0.2,
+        noise_trajectories=1,
+    )
+    layer.train()
+    dev = layer.qlayer.qnode.device
+    x = torch.randn(BATCH, 2)
+
+    with torch.no_grad(), qml.Tracker(dev) as tracker:
+        noisy_no_grad = layer(x)
+
+    assert not noisy_no_grad.requires_grad
+    assert tracker.totals.get("derivatives", 0) == 0
+
+    # In eval mode without noise, the output must differ from the noisy output
+    layer.eval()
+    with torch.no_grad():
+        noiseless = layer(x)
+    assert not torch.allclose(noisy_no_grad, noiseless)

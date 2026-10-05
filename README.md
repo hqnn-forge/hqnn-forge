@@ -1,7 +1,8 @@
-<h1><img src="https://raw.githubusercontent.com/g8rdier/hqnn-forge/main/assets/social-preview.png" alt="hqnn-forge" width="640"></h1>
+<h1><img src="https://raw.githubusercontent.com/hqnn-forge/hqnn-forge/main/assets/social-preview.png" alt="hqnn-forge" width="640"></h1>
 
-[![Tests](https://github.com/g8rdier/hqnn-forge/actions/workflows/tests.yml/badge.svg)](https://github.com/g8rdier/hqnn-forge/actions/workflows/tests.yml)
-[![License](https://img.shields.io/github/license/g8rdier/hqnn-forge)](https://github.com/g8rdier/hqnn-forge/blob/main/LICENSE)
+[![Tests](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/tests.yml/badge.svg)](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/tests.yml)
+[![License](https://img.shields.io/github/license/hqnn-forge/hqnn-forge)](https://github.com/hqnn-forge/hqnn-forge/blob/main/LICENSE)
+[![Docs](https://github.com/hqnn-forge/hqnn-forge/actions/workflows/docs.yml/badge.svg)](https://hqnn-forge.github.io/hqnn-forge/)
 
 > **Test whether a small quantum layer earns its parameters on imbalanced binary tabular data.**
 
@@ -15,10 +16,60 @@ layer, and circuit diagnostics.
 
 **Scope.** Binary classification on imbalanced tabular data, or data made tabular by a
 pretrained embedding (see
-[Non-tabular data](https://github.com/g8rdier/hqnn-forge#non-tabular-data-precomputed-embeddings)).
+[Non-tabular data](https://github.com/hqnn-forge/hqnn-forge#non-tabular-data-precomputed-embeddings)).
 The estimator, losses, thresholds and metrics are built for binary targets;
 `MulticlassHybridClassifier` covers multiclass targets at the model level only. End-to-end
 image, text or time-series pipelines are out of scope.
+
+**Documentation.** The API reference, rendered from the docstrings, is at
+**<https://hqnn-forge.github.io/hqnn-forge/>**, together with the
+[methodology](https://hqnn-forge.github.io/hqnn-forge/methodology/) the comparisons follow.
+
+---
+
+## How a benchmark works
+
+`run_benchmark` trains the hybrid model and a classical control side by side on each dataset.
+The control is an MLP matched to the hybrid's live parameter count (see *Classical control*
+below), and in every fold both models get the same data and the same treatment. A difference in
+their scores is therefore down to the quantum layer, not to extra capacity.
+
+```mermaid
+flowchart TD
+    data[("Your binary, imbalanced<br/>tabular dataset")] --> folds["Stratified outer folds"]
+
+    subgraph fold ["Every fold"]
+        hybrid["<b>Hybrid model</b><br/>classical layers<br/>+ quantum circuit"]
+        control["<b>Classical control</b><br/>MLP matched to the<br/>hybrid's live<br/>parameter count"]
+        rules["<b>Identical for both</b><br/>scaling · validation split<br/>SMOTE if enabled · seeds<br/>training budget<br/>threshold rule"]
+        hybrid -.- rules
+        control -.- rules
+    end
+
+    folds --> hybrid
+    folds --> control
+    hybrid --> permodel["<b>Per model</b><br/>MCC per fold, mcc_mean<br/>MCC per 1,000 parameters"]
+    control --> permodel
+    permodel --> perdataset["<b>Per dataset</b><br/>paired Wilcoxon test<br/>over the folds<br/>(same on both rows)"]
+    perdataset -.-> record[("Experiment record (JSON)<br/>seeds · fold indices · versions<br/>→ the same per-fold scores<br/>on CPU with the same data")]
+
+    perdataset --> tied{"Every fold tied?<br/>(wilcoxon_p is NaN)"}
+    tied -->|yes| identical["<b>Identical scores</b><br/>the data cannot<br/>tell them apart"]
+    tied -->|no| reach{"Can the test<br/>reach α with this<br/>many untied folds?<br/>(wilcoxon_min_p < α)"}
+    reach -->|no| inconclusive["<b>Inconclusive</b><br/>add folds,<br/>not a looser α"]
+    reach -->|yes| significant{"wilcoxon_p < α?"}
+    significant -->|no| nodiff["<b>No difference shown</b>"]
+    significant -->|"yes, hybrid's<br/>mcc_mean higher"| earns["<b>The quantum layer<br/>earns its parameters</b>"]
+    significant -->|"yes, control's<br/>mcc_mean higher"| loses["<b>The classical control<br/>does better</b>"]
+```
+
+`run_benchmark` stops at the scores and the test columns (`wilcoxon_p`, `wilcoxon_min_p`,
+`rank_biserial`); the outcomes at the bottom are how to read those columns at the α you choose.
+Its own `alpha` argument only sets the significance level of the noise sweep's summary. Folds
+where both models score the same MCC drop out of the test, so they do not count towards reaching
+α. Two further steps are separate calls, not part of `run_benchmark`: ablation of a trained
+model's quantum layer (`disable_quantum_layer`, `permute_quantum_layer`), and the comparison
+across datasets.
 
 ---
 
@@ -53,10 +104,10 @@ The extras add optional parts; combine them as needed, e.g. `".[lightning,sklear
 | `lightning` | `pennylane-lightning` | the `lightning.qubit` backend and adjoint differentiation, which the default `"auto"` picks above 12 qubits |
 | `sklearn` | `scikit-learn` | the scikit-learn estimator in `hqnn_forge.sklearn` |
 | `examples` | `scikit-learn`, `matplotlib` | the scripts in `examples/` and the plots in `hqnn_forge.evaluation` |
-| `dev` | test and lint tools | development; see [Development Setup](https://github.com/g8rdier/hqnn-forge#development-setup) |
+| `dev` | test and lint tools | development; see [Development Setup](https://github.com/hqnn-forge/hqnn-forge#development-setup) |
 
 pip installs the newest versions that `pyproject.toml` allows. To work on the project in the
-environment CI tests against, use the uv setup under [Development Setup](https://github.com/g8rdier/hqnn-forge#development-setup).
+environment CI tests against, use the uv setup under [Development Setup](https://github.com/hqnn-forge/hqnn-forge#development-setup).
 
 ### Device backends
 
@@ -221,7 +272,15 @@ loss = loss_fn(logits.squeeze(), y)
 loss.backward()
 ```
 
-See `examples/quick_start.py` for a full training loop on a synthetic imbalanced dataset.
+See `examples/quick_start.py` for a full training loop on a synthetic imbalanced dataset, and
+the API reference for every argument:
+[scikit-learn estimator](https://hqnn-forge.github.io/hqnn-forge/api/sklearn/),
+[preprocessing](https://hqnn-forge.github.io/hqnn-forge/api/preprocessing/),
+[data](https://hqnn-forge.github.io/hqnn-forge/api/data/),
+[evaluation](https://hqnn-forge.github.io/hqnn-forge/api/evaluation/),
+[models](https://hqnn-forge.github.io/hqnn-forge/api/models/),
+[losses and utilities](https://hqnn-forge.github.io/hqnn-forge/api/utils/),
+[training](https://hqnn-forge.github.io/hqnn-forge/api/training/).
 
 ---
 
@@ -233,45 +292,33 @@ logit of shape `(batch, 1)`: apply `torch.sigmoid` for a probability, or pass it
 
 ### `HybridBinaryClassifier` (serial)
 
+```mermaid
+flowchart TD
+    input["Input<br/>(batch, n_input_features)"]
+    encoder["<b>Classical encoder</b><br/>Linear(n_input_features<br/>→ n_qubits) + Tanh<br/>scaled by π into (−π, π)"]
+    circuit["<b>Quantum layer</b><br/>AngleEmbedding:<br/>RX(x_i) on qubit i<br/>(or IQP embedding)<br/>n_layers × [CNOT ring<br/>→ per-qubit Rot(φ, θ, ω)]<br/>⟨Z_i⟩ for every qubit<br/>→ (batch, n_qubits)"]
+    head["<b>Classical head</b><br/>Dropout(dropout_p)<br/>→ Linear(n_qubits → 1)"]
+    logit["Raw logit<br/>(batch, 1)"]
+    input --> encoder --> circuit --> head --> logit
 ```
-Input (batch, n_input_features)
-     │
-     ▼
-Classical encoder   Linear(n_input_features → n_qubits) + Tanh, scaled by π into (-π, π)
-     │
-     ▼
-Quantum layer       AngleEmbedding RX(x_i) on qubit i   (or IQP embedding)
-     │              n_layers × [ CNOT ring → per-qubit Rot(φ, θ, ω) ]
-     │              → ⟨Z_i⟩ for every qubit, shape (batch, n_qubits)
-     │              (the defaults; see the options below for the axis,
-     │               the entangler and the ⟨Z_0⟩-only readout)
-     ▼
-Classical head      Linear(n_qubits → 1)
-     │
-     ▼
-Raw logit (batch, 1)
-```
+
+The quantum layer shows the defaults; see the options below for the axis, the entangler and the
+⟨Z_0⟩-only readout. `dropout_p` is 0 by default.
 
 ### `ParallelHybridClassifier` (parallel)
 
-```
-Input (batch, n_input_features)
-     ├───────────────────────────────────┐
-     ▼                                   ▼
-Classical branch                    Classical encoder   Linear(→ n_qubits) + Tanh, × π
-Linear → ReLU → Linear → ReLU            │
-→ (batch, classical_hidden_dim)          ▼
-     │                              Quantum layer       same circuit as the serial model
-     │                                   │              → ⟨Z_i⟩, shape (batch, n_qubits)
-     └────────────────┬──────────────────┘
-                      ▼
-                Concatenate   (batch, classical_hidden_dim + n_qubits)
-                      │
-                      ▼
-                Classical head   Linear(→ 1)
-                      │
-                      ▼
-                Raw logit (batch, 1)
+```mermaid
+flowchart TD
+    input["Input<br/>(batch, n_input_features)"]
+    branch["<b>Classical branch</b><br/>Linear → ReLU<br/>→ Linear → ReLU<br/>→ (batch,<br/>classical_hidden_dim)"]
+    encoder["<b>Classical encoder</b><br/>Linear(→ n_qubits)<br/>+ Tanh, × π"]
+    circuit["<b>Quantum layer</b><br/>same circuit as<br/>the serial model<br/>⟨Z_i⟩ → (batch, n_qubits)"]
+    concat["<b>Concatenate</b><br/>(batch,<br/>classical_hidden_dim<br/>+ n_qubits)"]
+    head["<b>Classical head</b><br/>Dropout(dropout_p)<br/>→ Linear(→ 1)"]
+    logit["Raw logit<br/>(batch, 1)"]
+    input --> branch --> concat
+    input --> encoder --> circuit --> concat
+    concat --> head --> logit
 ```
 
 The parallel model asks whether added classical capacity can substitute for, or extend, what
@@ -348,6 +395,14 @@ smaller than an exact live match would make it. Efficiency figures (MCC/kParam) 
 total. A seeded hybrid (`init_seed`) gets a control seeded with the same seed.
 Switching a trained model's circuit off with `disable_quantum_layer` measures something
 else, how much that model depends on the circuit.
+
+The API reference documents each architecture's constructor and the pieces behind it:
+[models](https://hqnn-forge.github.io/hqnn-forge/api/models/),
+[encoding layers](https://hqnn-forge.github.io/hqnn-forge/api/encoding/),
+[circuit primitives](https://hqnn-forge.github.io/hqnn-forge/api/circuits/),
+[initialisers](https://hqnn-forge.github.io/hqnn-forge/api/initializers/),
+[diagnostics](https://hqnn-forge.github.io/hqnn-forge/api/diagnostics/),
+[utilities](https://hqnn-forge.github.io/hqnn-forge/api/utils/).
 
 ---
 
@@ -435,12 +490,12 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     --exclude long hqnn_forge tests examples .github/scripts
 ```
 
-[`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md#linting) lists every command the lint job runs.
+[`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md#linting) lists every command the lint job runs.
 
 The full test suite takes a few minutes. For the edit–test loop, leave out the tests marked
 `slow` (end-to-end training, the gradient-variance physics checks, parameter-shift batching,
 repeated fits and bootstraps), which account for most of that time; CI always runs everything
-(see [`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md#testing)):
+(see [`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md#testing)):
 
 ```bash
 pytest -m "not slow"   # about a minute
@@ -451,19 +506,31 @@ pytest                 # the full suite, as CI runs it
 
 ## Methodology
 
-[`docs/methodology.md`](https://github.com/g8rdier/hqnn-forge/blob/main/docs/methodology.md)
+The [methodology page](https://hqnn-forge.github.io/hqnn-forge/methodology/)
+([source](https://github.com/hqnn-forge/hqnn-forge/blob/main/docs/methodology.md))
 states the rules the comparisons follow: how the classical control is matched, how folds,
 oversampling and thresholds are handled, which statistical test applies when, the equal tuning
 budget, what the noise sweep models, and what an experiment record captures.
 
 ---
 
+## Documentation
+
+The API reference, generated from the docstrings, is at
+**<https://hqnn-forge.github.io/hqnn-forge/>**. To build it locally:
+
+```bash
+uv run --frozen --group docs mkdocs serve   # or: mkdocs build --strict, as CI does
+```
+
+---
+
 ## Contributing
 
-See [`CONTRIBUTING.md`](https://github.com/g8rdier/hqnn-forge/blob/main/CONTRIBUTING.md) for the
+See [`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md) for the
 issue/branch/PR workflow, commit conventions, and versioning policy this project follows. To add
 a dataset loader, an encoding layer or a variational block, see
-[`docs/extending.md`](https://github.com/g8rdier/hqnn-forge/blob/main/docs/extending.md) for the
+[`docs/extending.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/docs/extending.md) for the
 conventions each must keep and the tests each must pass.
 
 ---
@@ -471,7 +538,7 @@ conventions each must keep and the tests each must pass.
 ## Citing
 
 If you use hqnn-forge in research, please cite it.
-[`CITATION.cff`](https://github.com/g8rdier/hqnn-forge/blob/main/CITATION.cff) holds the citation
+[`CITATION.cff`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CITATION.cff) holds the citation
 metadata, and GitHub's **Cite this repository** button in the sidebar turns it into BibTeX or
 APA.
 

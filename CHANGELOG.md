@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Packaging (`pyproject.toml`, setuptools), a PEP 561 `py.typed` marker and the Apache-2.0
+- Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the
   components to (−π, π) for angle encoding (#4). It warns when degenerate eigenvalues make
@@ -253,10 +253,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native broadcasting, `batch_obs` and `default.qubit`/backprop for every encoder, with a
   correctness check, plus a crossover by qubit count with peak memory; the README now says
   when to train with backprop instead of `lightning.qubit` (#341)
+- A rendered API reference (mkdocs-material + mkdocstrings, one page per public module), built
+  with `mkdocs build --strict` on every PR so a broken cross-reference, or a name in a documented
+  module's `__all__` with no entry, fails CI, and deployed to GitHub Pages from `main` once
+  Pages is enabled; a `docs` dependency group installs the tools (#342)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
   image and file links are absolute, so both work on PyPI (#327)
+- The README links the API reference site near the top and from Quick Start, Architecture and
+  Methodology, and the package metadata gains a `Documentation` URL (#453)
 - The quantum layers run a whole batch in one QNode call instead of looping over samples
   (#104)
 - `predict_proba` and `predict` run in eval mode whatever mode the model is in, restoring every
@@ -363,8 +369,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate-parameter slots, so `n_effective_params` can no longer go negative; the new
   `count_inert_weights` gives the per-entry count for any tape. The built-in layers report the
   same numbers as before (#292)
+- Forward passes under `torch.no_grad()` skip computing unused adjoint Jacobians in
+  quantum encoding layers, cutting evaluation runtime by up to 2.68× (measured on
+  lightning.qubit with 8 qubits and batch size 256) (#439)
+- The README shows how a benchmark runs as a Mermaid diagram (matched control, shared per-fold
+  rules, the reading of the Wilcoxon result), and its architecture diagrams are Mermaid
+  instead of ASCII (#451)
+- Switched the package build backend from setuptools to `uv_build` and updated the
+  package metadata for PEP 639-compatible license handling (#458)
 
 ### Fixed
+- Encoding layers raise a construction-time `ValueError` when a resolved device has finite
+  shots but `shots=None` was requested, guiding users to pass explicit `shots` and
+  `diff_method="parameter-shift"` (#431)
 - The classifiers applied the `·π` angle scaling to input that bypasses the classical encoder,
   so `PCANormalizer(scale_to_pi=True)` output was scaled twice (#63)
 - `PCANormalizer`: `transform` centred with the batch's mean instead of the training mean (#65);
@@ -374,7 +391,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LAPACK build (#81)
 - The initialiser tests had too little power to reject a flat σ, and one failed at random
   (#22, #105)
-- `setuptools>=61` is required, the first version that reads `pyproject.toml` metadata (#135)
 - Device fallback raised `AttributeError` on PennyLane 0.45, where `qml.DeviceError` no longer
   exists; the chain now catches `pennylane.exceptions.DeviceError` and is exercised by a test
   (#155)
@@ -407,6 +423,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AmplitudeEncodingLayer`, because they built their sample input with `n_qubits` features;
   they now use the layer's input width and `prepare_inputs`, and the default amplitude sample
   shows the full state preparation, an upper bound on the gate count for any input (#279)
+- `circuit_summary` raised `AttributeError` on PennyLane 0.46, whose `specs` resources drop
+  `num_gates`, `gate_types` and `gate_sizes`; it now counts depth and gates on the decomposed
+  tape itself and gives the same summary on 0.45 and 0.46 (#364)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

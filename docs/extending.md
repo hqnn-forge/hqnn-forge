@@ -9,7 +9,7 @@ conventions the rest of the library relies on. Each section covers:
 - what else has to change alongside it.
 
 The workflow itself (issue first, branch naming, commit style, PR checklist) is in
-[`CONTRIBUTING.md`](../CONTRIBUTING.md).
+[`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md).
 
 ---
 

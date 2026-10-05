@@ -57,6 +57,7 @@ import torch.nn as nn
 from hqnn_forge.encoding._common import (
     DEVICE_FAILURES,
     FALLBACK_CHAIN,
+    KNOWN_DEVICES,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -74,6 +75,7 @@ from hqnn_forge.encoding._common import (
     resolve_device,
     shots_repr,
     validate_circuit_options,
+    validate_device_shots,
     validate_shots,
     variational_weight_shape,
 )
@@ -83,8 +85,11 @@ logger = logging.getLogger(__name__)
 
 # QuantumEncodingLayer and build_encoding_qnode are defined here; the rest are
 # re-exported from hqnn_forge.encoding._common, where they live since #306.
+# KNOWN_DEVICES was always there; it is re-exported only so the API reference
+# can render it at a public path (docs/api/encoding.md).
 __all__ = [
     "FALLBACK_CHAIN",
+    "KNOWN_DEVICES",
     "AngleEmbeddingQNode",
     "DeviceName",
     "DiffMethod",
@@ -311,7 +316,7 @@ def build_encoding_qnode(
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see
         :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
-        :data:`~hqnn_forge.encoding._common.KNOWN_DEVICES` fall back along
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
         ``lightning.qubit → default.qubit`` with a warning per step when
         unavailable; any other name (a plugin or hardware) is constructed as
         given, and PennyLane's error surfaces if it cannot be.  Hardware
@@ -371,6 +376,7 @@ def build_encoding_qnode(
     device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits)
+    validate_device_shots(device, shots)
     circuit_fn = _make_angle_embedding_circuit(n_qubits, n_layers, rotation, entangler, readout)
 
     qnode = qml.QNode(
@@ -445,7 +451,7 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see
         :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
-        :data:`~hqnn_forge.encoding._common.KNOWN_DEVICES` fall back along
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
         ``lightning.qubit → default.qubit`` with a warning per step when
         unavailable; any other name (a plugin or hardware) is constructed as
         given, and PennyLane's error surfaces if it cannot be.  Hardware

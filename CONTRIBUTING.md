@@ -3,6 +3,9 @@
 Thanks for your interest in contributing. This document summarizes the workflow we follow so
 changes stay easy to review and the history stays easy to read.
 
+Participation in issues, pull requests, and reviews is covered by
+our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Language
 
 All project communication must be in **English** — README, docs, commit messages, PR
@@ -59,8 +62,10 @@ This keeps the history reviewable and associates every change with a PR number.
 *   **Stacked PRs.** A PR may use another feature branch as its base, when it builds on
     work not yet on `main`. CI runs on it when it is opened, when its own branch is pushed
     and when it is retargeted, but **not when its base branch is pushed**, so a review fix
-    on the parent can break a child whose check stays green. After pushing to a branch
-    other PRs are based on, re-run them by closing and reopening each:
+    on the parent can break a child whose check stays green. A retarget's re-run reports
+    as `tests / lint`, `tests / test (…)`, `docs / build`: read those, since the
+    unprefixed checks on the same commit still show the run against the old base. After
+    pushing to a branch other PRs are based on, re-run them by closing and reopening each:
 
     ```bash
     for n in $(gh pr list --base <branch> --json number --jq '.[].number'); do
@@ -217,6 +222,17 @@ it.
     the library relies on PennyLane internals, and this is how a break shows up before users
     upgrade. Trigger it by hand with `gh workflow run upstream.yml`.
 
+## Documentation
+
+The API reference site is built from the docstrings by `mkdocs build --strict`
+(`mkdocs.yml`, `docs/`), which the Docs workflow runs on every PR. Docstrings are NumPy style
+and cross-reference with Sphinx roles (`` :func:`gradient_variance` ``,
+`` :class:`~hqnn_forge.models.HybridBinaryClassifier` ``); `docs/griffe_sphinx_roles.py` turns
+them into links, so a reference to something that does not exist fails the build. Constants are
+documented with `#:` comments above the assignment. A new public module needs a page under
+`docs/api/` and an entry in the `nav` of `mkdocs.yml`; the workflow fails if a top-level
+module has no page or a name in a documented `__all__` has no entry.
+
 ## Versioning
 
 Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`), tagged (e.g.
@@ -233,6 +249,8 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     above it, and adds the compare link at the bottom. It also bumps `version` in
     `CITATION.cff` to the new version (`tests/test_citation.py` fails until it does) and can
     add a `date-released`.
+*   **When uv moves to a new minor release, raise the `<0.13` cap by hand in `[build-system]` in
+    `pyproject.toml`.**
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 

@@ -100,6 +100,7 @@ from hqnn_forge.encoding._common import (
     resolve_device,
     shots_repr,
     validate_circuit_options,
+    validate_device_shots,
     validate_shots,
     variational_weight_shape,
 )
@@ -262,6 +263,7 @@ def build_data_reuploading_qnode(
     device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits)
+    validate_device_shots(device, shots)
     circuit_fn = _make_data_reuploading_circuit(
         n_qubits, n_layers, rotation, trainable_input_scaling, entangler, readout
     )
@@ -343,7 +345,7 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see
         :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
-        :data:`~hqnn_forge.encoding._common.KNOWN_DEVICES` fall back along
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
         ``lightning.qubit → default.qubit`` with a warning per step when
         unavailable; any other name (a plugin or hardware) is constructed as
         given, and PennyLane's error surfaces if it cannot be.  Hardware

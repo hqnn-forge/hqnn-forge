@@ -36,6 +36,9 @@ DiffMethod = Literal["auto", "adjoint", "parameter-shift", "backprop", "finite-d
 #: (a plugin such as ``"qiskit.aer"``, or hardware) is accepted too, and
 #: constructed exactly as given: see :func:`resolve_device`.
 KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "default.qubit"]
+#: The simulators :func:`resolve_device` puts on the fallback chain when their
+#: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
+#: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
@@ -322,8 +325,10 @@ def is_out_of_memory(exc: BaseException) -> bool:
     Every backend in the chain allocates the same ``2**n_qubits`` amplitudes,
     so falling back cannot help and would only move the allocation from GPU
     memory to host memory, where it can get the process killed instead of
-    raising.  PennyLane raises :class:`AllocationError`; the lightning plugins
-    raise a bare ``RuntimeError`` naming memory.
+    raising.  The lightning plugins raise a bare ``RuntimeError`` naming
+    memory.  :class:`~pennylane.exceptions.AllocationError` is accepted too,
+    as a precaution: PennyLane raises it for dynamically allocated wires, not
+    for device creation.
     """
     return isinstance(exc, AllocationError) or (
         isinstance(exc, RuntimeError) and "memory" in str(exc).lower()
@@ -404,6 +409,25 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
         )
 
 
+def validate_device_shots(device: qml.devices.Device, shots: int | None) -> None:
+    """
+    Raise ``ValueError`` if *device* has finite shots but *shots* is ``None``.
+
+    A real sampling device (hardware, ``"qiskit.remote"``, ...) fails at the
+    first forward pass when given ``shots=None``, typically with the default
+    ``diff_method="adjoint"``.  Raising at construction with an informative
+    message guides users to pass explicit ``shots`` and ``parameter-shift``.
+    """
+    dev_shots = getattr(device, "shots", None)
+    total_shots = getattr(dev_shots, "total_shots", dev_shots)
+    if total_shots is not None and shots is None:
+        raise ValueError(
+            f"Device {device.name!r} has finite shots ({total_shots}), but "
+            "shots=None was requested. This device samples, so pass shots= and "
+            "diff_method='parameter-shift'."
+        )
+
+
 def shots_repr(shots: int | None) -> str:
     """The ``extra_repr`` fragment for a finite shot count; empty for exact values."""
     return "" if shots is None else f", shots={shots}"
@@ -435,8 +459,8 @@ def resolve_device(device_name: DeviceName, n_qubits: int) -> qml.devices.Device
     or before the requested device are skipped, so ``lightning.qubit`` falls
     straight to ``default.qubit`` and ``default.qubit`` has no fallback.
 
-    Only the four simulators in :data:`KNOWN_DEVICES` fall back.  Any other
-    name -- a PennyLane plugin device or hardware -- is constructed exactly as
+    Only the four simulators in :data:`KNOWN_DEVICES` enter the chain.  Any
+    other name -- a PennyLane plugin device or hardware -- is constructed exactly as
     given, and PennyLane's error surfaces if it cannot be: a typo such as
     ``"default.qbit"`` raises rather than quietly running on another
     simulator.
@@ -458,12 +482,22 @@ def resolve_device(device_name: DeviceName, n_qubits: int) -> qml.devices.Device
 
     Raises
     ------
-    The plugin's own exception for a name outside :data:`KNOWN_DEVICES` that
-    cannot be constructed (``DeviceError`` for an unknown name).
-    The backend's own exception if the state vector does not fit in memory
-    (see :func:`is_out_of_memory`), or if every step of the chain fails,
-    which can only happen if PennyLane itself is broken (``default.qubit``
-    has no dependencies).
+    DeviceError
+        If ``device_name`` is outside :data:`KNOWN_DEVICES` and no installed
+        plugin registers it, e.g. a typo.  A plugin that registers the name
+        but cannot construct the device raises its own exception.
+    RuntimeError
+        If the state vector does not fit in memory: the lightning plugins
+        raise one naming memory (see :func:`is_out_of_memory`), which is
+        raised rather than fallen back from.
+    RuntimeWarning
+        If a warnings-as-errors filter is active: the warning a fallback
+        issues is raised instead of falling back.
+    Exception
+        Any other error constructing a device in the chain, which is raised
+        at that step, and the last backend's own error if every step fails;
+        ``default.qubit`` has no dependencies, so the latter means PennyLane
+        itself is broken.
     """
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits)

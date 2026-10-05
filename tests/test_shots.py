@@ -15,10 +15,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pennylane as qml
 import pytest
 import torch
 
 from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding._common import resolve_device
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import (
     HybridBinaryClassifier,
@@ -340,3 +342,65 @@ def test_any_pennylane_device_runs_a_layer() -> None:
     x = torch.rand(3, 2)
     with torch.no_grad():
         torch.testing.assert_close(mixed(x), exact(x), atol=1e-6, rtol=0)
+
+
+@pytest.mark.filterwarnings("ignore:Setting shots on device is deprecated")
+@pytest.mark.parametrize(
+    "layer_cls, module_name, kwargs, in_features",
+    [
+        (
+            QuantumEncodingLayer,
+            "hqnn_forge.encoding.angle_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            IQPEncodingLayer,
+            "hqnn_forge.encoding.iqp_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            AmplitudeEncodingLayer,
+            "hqnn_forge.encoding.amplitude_embedding",
+            {"n_features": 4, "n_qubits": 2, "n_layers": 1},
+            4,
+        ),
+        (
+            DataReuploadingLayer,
+            "hqnn_forge.encoding.data_reuploading",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+    ],
+)
+def test_finite_shot_device_rejection_and_sampled_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_cls: Any,
+    module_name: str,
+    kwargs: dict[str, Any],
+    in_features: int,
+) -> None:
+    def fake_resolve(device_name: str, n_qubits: int) -> qml.devices.Device:
+        if device_name == "custom.sampling.device":
+            return qml.device("default.qubit", wires=n_qubits, shots=10_000)
+        return resolve_device(device_name, n_qubits)
+
+    monkeypatch.setattr(f"{module_name}.resolve_device", fake_resolve)
+
+    with pytest.raises(ValueError, match="device samples"):
+        layer_cls(**kwargs, device_name="custom.sampling.device")
+
+    torch.manual_seed(0)
+    exact = layer_cls(**kwargs)
+    sampled = layer_cls(
+        **kwargs,
+        device_name="custom.sampling.device",
+        shots=10_000,
+        diff_method="parameter-shift",
+    )
+    sampled.load_state_dict(exact.state_dict())
+    x = torch.rand(2, in_features)
+    with torch.no_grad():
+        # each <Z> estimate has standard deviation <= 1/sqrt(10 000) = 0.01; allow 5 sigma
+        torch.testing.assert_close(sampled(x), exact(x), atol=0.05, rtol=0)
