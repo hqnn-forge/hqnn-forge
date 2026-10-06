@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `noise_method="trajectories"` for amplitude and phase damping: phase damping is sampled as the
   phase flip it equals, amplitude damping by weighted Kraus branches whose mean is the density
-  channel exactly; the latter needs backprop or parameter-shift and exact expectation values
-  (#357)
+  channel exactly; the latter needs backprop, parameter-shift or finite-diff, `default.qubit` or
+  `lightning.qubit`, and exact expectation values (#357)
 - Project scaffold and packaging setup
 - PCANormalizer (pure-NumPy) for quantum angle encoding
 - Small-angle restricted-variance initialiser (the σ formulas are this library's own

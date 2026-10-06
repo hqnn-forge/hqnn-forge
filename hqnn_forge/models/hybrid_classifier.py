@@ -223,7 +223,8 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         (default), ``"amplitude_damping"``, ``"phase_damping"``,
         ``"bit_flip"`` or ``"phase_flip"``; see :mod:`hqnn_forge.noise`.  With
         ``noise_method="trajectories"``, amplitude damping needs
-        ``diff_method="backprop"`` or ``"parameter-shift"`` and no ``shots``.
+        ``diff_method="backprop"``, ``"parameter-shift"`` or ``"finite-diff"``,
+        ``default.qubit`` or ``lightning.qubit``, and no ``shots``.
 
     Attributes
     ----------

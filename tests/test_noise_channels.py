@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import pennylane as qml
 import pytest
 import torch
 
@@ -27,6 +28,7 @@ from hqnn_forge.models import (
 from hqnn_forge.noise import (
     CHANNELS,
     Channel,
+    Position,
     apply_depolarizing_noise,
     noise_sweep,
     training_noise_qnode,
@@ -56,6 +58,18 @@ CHANNEL_NAMES: list[Channel] = [
 def _layer(**kwargs: Any) -> Any:
     torch.manual_seed(0)
     return QuantumEncodingLayer(n_qubits=3, n_layers=2, **{**CPU, **kwargs})
+
+
+def _qnode(device_name: str, diff_method: str | None, shots: int | None = None) -> qml.QNode:
+    """A one-qubit QNode built directly, as a caller outside the layers would."""
+    device = qml.device(device_name, wires=1)
+
+    def circuit(theta: torch.Tensor) -> Any:
+        qml.RY(theta, wires=0)
+        return qml.expval(qml.PauliZ(0))
+
+    qnode = qml.QNode(circuit, device, diff_method=diff_method, interface="torch")
+    return qnode if shots is None else qml.set_shots(qnode, shots=shots)
 
 
 def _x() -> torch.Tensor:
@@ -185,9 +199,10 @@ class TestDampingTrajectories:
         assert CHANNELS["phase_damping"].paulis is not None
         assert CHANNELS["phase_damping"].paulis(gamma) == (1 - flip, 0.0, 0.0, flip)
 
-    @pytest.mark.parametrize("diff_method", ["backprop", "parameter-shift"])
+    @pytest.mark.parametrize("position", ["all", "end"])
+    @pytest.mark.parametrize("diff_method", ["backprop", "parameter-shift", "finite-diff"])
     def test_every_branch_weighted_is_the_density_channel_exactly(
-        self, diff_method: str, monkeypatch: pytest.MonkeyPatch
+        self, diff_method: str, position: Position, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Force every combination of branches at once, one per batch row, and
         # weight each by its probability: the sum must be the channel's output
@@ -203,7 +218,7 @@ class TestDampingTrajectories:
         layer.double()
         x = torch.tensor([0.4, -1.1], dtype=torch.float64)
         weights = layer.qlayer.weights
-        noisy = trajectory_noise_qnode(layer.qlayer.qnode, gamma, "all", "amplitude_damping")
+        noisy = trajectory_noise_qnode(layer.qlayer.qnode, gamma, position, "amplitude_damping")
 
         real_rand = torch.rand
         calls: list[int] = []
@@ -215,7 +230,8 @@ class TestDampingTrajectories:
         monkeypatch.setattr(torch, "rand", count)
         noisy(x, weights)
         n_sites = len(calls)
-        assert n_sites >= 6
+        # At the end there is one site per qubit; after every gate, more.
+        assert n_sites == 2 if position == "end" else n_sites >= 6
 
         combos = torch.tensor(list(itertools.product([0, 1], repeat=n_sites)))
         q = gamma / 2
@@ -241,17 +257,19 @@ class TestDampingTrajectories:
         grad = weights.grad.clone()
         monkeypatch.setattr(torch, "rand", real_rand)
 
-        density = training_noise_qnode(layer.qlayer.qnode, 2, gamma, "all", "amplitude_damping")
+        density = training_noise_qnode(layer.qlayer.qnode, 2, gamma, position, "amplitude_damping")
         weights.grad = None
         exact = torch.stack(density(x, weights))
         exact.sum().backward()
         torch.testing.assert_close(estimate, exact.to(estimate.dtype), atol=1e-12, rtol=0)
-        torch.testing.assert_close(grad, weights.grad, atol=1e-12, rtol=0)
+        # A finite difference is exact only to its step's truncation error.
+        grad_atol = 1e-5 if diff_method == "finite-diff" else 1e-12
+        torch.testing.assert_close(grad, weights.grad, atol=grad_atol, rtol=0)
 
     @pytest.mark.parametrize("noise_level", [0.0, 0.1])
     def test_amplitude_damping_refuses_adjoint(self, noise_level: float) -> None:
         # Refused whatever noise_level is, like every other bad option.
-        with pytest.raises(ValueError, match="differentiates wrongly"):
+        with pytest.raises(ValueError, match="not known to differentiate correctly"):
             _layer(
                 noise_level=noise_level,
                 noise_channel="amplitude_damping",
@@ -268,6 +286,79 @@ class TestDampingTrajectories:
                 diff_method="parameter-shift",
                 shots=100,
             )
+
+    # The same refusals where trajectory_noise_qnode makes them itself, on a
+    # QNode no layer constructor has looked at first.
+    @pytest.mark.parametrize(
+        ("device_name", "diff_method"),
+        [
+            ("default.qubit", "adjoint"),
+            ("lightning.qubit", "adjoint"),
+            # PennyLane resolves "best" to adjoint on lightning.
+            ("lightning.qubit", "best"),
+            ("default.qubit", "spsa"),
+        ],
+    )
+    def test_trajectory_qnode_refuses_other_diff_methods(
+        self, device_name: str, diff_method: str
+    ) -> None:
+        with pytest.raises(ValueError, match="not known to differentiate correctly"):
+            trajectory_noise_qnode(
+                _qnode(device_name, diff_method), 0.1, "all", "amplitude_damping"
+            )
+
+    def test_trajectory_qnode_refuses_shots(self) -> None:
+        sampled = _qnode("default.qubit", "parameter-shift", shots=100)
+        with pytest.raises(ValueError, match="unnormalised"):
+            trajectory_noise_qnode(sampled, 0.1, "all", "amplitude_damping")
+
+    def test_trajectory_qnode_refuses_an_unchecked_device(self) -> None:
+        mixed = _qnode("default.mixed", "backprop")
+        with pytest.raises(ValueError, match="decomposes QubitUnitary"):
+            trajectory_noise_qnode(mixed, 0.1, "all", "amplitude_damping")
+
+    @pytest.mark.parametrize(
+        ("device_name", "diff_method", "shots"),
+        [
+            ("default.qubit", "adjoint", None),
+            ("default.qubit", "parameter-shift", 100),
+            ("default.mixed", "backprop", None),
+        ],
+    )
+    def test_pauli_channels_have_no_such_restriction(
+        self, device_name: str, diff_method: str, shots: int | None
+    ) -> None:
+        qnode = _qnode(device_name, diff_method, shots=shots)
+        for channel in ("depolarizing", "phase_damping"):
+            noisy = trajectory_noise_qnode(qnode, 0.1, "all", channel)  # type: ignore[arg-type]
+            assert torch.isfinite(noisy(torch.tensor(0.3, dtype=torch.float64)))
+
+    def test_trajectory_qnode_runs_without_a_diff_method(self) -> None:
+        # diff_method=None computes no gradient, so there is none to get wrong.
+        noisy = trajectory_noise_qnode(
+            _qnode("default.qubit", None), 0.1, "all", "amplitude_damping"
+        )
+        assert torch.isfinite(noisy(torch.tensor(0.3, dtype=torch.float64)))
+
+    def test_a_channel_without_a_sampler_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Neither Pauli probabilities nor Kraus branches: refused by name when
+        # the layer is built, whatever noise_level is, not by an assertion in
+        # the first training step.
+        bare = CHANNELS["amplitude_damping"]._replace(kraus=None)
+        monkeypatch.setitem(CHANNELS, "amplitude_damping", bare)
+        for noise_level in (0.0, 0.1):
+            with pytest.raises(ValueError, match="no trajectory sampler"):
+                _layer(
+                    noise_level=noise_level,
+                    noise_channel="amplitude_damping",
+                    noise_method="trajectories",
+                )
+        with pytest.raises(ValueError, match="no trajectory sampler"):
+            trajectory_noise_qnode(
+                _qnode("default.qubit", "backprop"), 0.1, "all", "amplitude_damping"
+            )
+        # The density method does not need one.
+        _layer(noise_level=0.1, noise_channel="amplitude_damping")
 
     def test_phase_damping_runs_under_adjoint(self) -> None:
         # A Pauli channel in disguise: unitary draws, so adjoint is fine.

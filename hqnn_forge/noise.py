@@ -122,10 +122,14 @@ Two methods, chosen with ``noise_method``:
     0.88 at ``γ`` = 0.01, 0.05 and 0.2, against 0.13, 0.22 and 0.26 for
     depolarizing trajectories at the same strength, so use more draws
     (``noise_trajectories``) at larger ``γ``.  Second, it needs
-    ``backprop`` or ``parameter-shift``: ``adjoint`` inverts every operation
-    by its adjoint, which is wrong for a non-unitary one (its gradient was
-    off by 0.17 on the test circuit), and shot sampling draws from
-    normalised probabilities.  Both are refused when the layer is built.
+    ``backprop``, ``parameter-shift`` or ``finite-diff``: ``adjoint`` inverts
+    every operation by its adjoint, which is wrong for a non-unitary one (its
+    gradient was off by 0.17 on the test circuit), and shot sampling draws
+    from normalised probabilities.  Third, the device must apply the given
+    matrix as it is: one that decomposes ``QubitUnitary`` into rotations
+    would run a unitary in its place and drop the weight.  That was checked
+    on ``default.qubit`` and ``lightning.qubit`` only (#477).  Any other
+    method or device, and shots, are refused when the layer is built.
 
     The Pauli at a site is applied as ``RZ(π·z)`` then ``RX(π·x)`` with bits
     ``(x, z)``: ``(0, 0)`` is ``I``, ``(1, 0)`` is ``X``, ``(0, 1)`` is ``Z``
@@ -320,7 +324,7 @@ def _kraus_trajectories(
     """
     shape = () if tape.batch_size is None else (tape.batch_size,)
     kraus = CHANNELS[channel].kraus
-    assert kraus is not None  # trajectory_noise_qnode dispatches the others
+    assert kraus is not None  # check_kraus_trajectories refuses a channel without
     matrices, q = kraus(p)
 
     def kraus_branch(wires: object) -> None:
@@ -330,30 +334,55 @@ def _kraus_trajectories(
     return qml.noise.insert(tape, kraus_branch, (), position=position)
 
 
-#: Differentiation methods that assume every operation is unitary, and so
-#: return a wrong gradient through the weighted Kraus branches: adjoint
-#: reverses the circuit with each operation's adjoint as its inverse.
-UNITARY_ONLY_METHODS = ("adjoint",)
+#: Differentiation methods whose gradient through the weighted Kraus branches
+#: equals the density channel's (enumerated in the tests).  A list of the
+#: methods allowed, not of those refused: ``adjoint`` reverses the circuit
+#: with each operation's adjoint as its inverse and is wrong, and a name such
+#: as ``"best"`` resolves to it on lightning without saying so.
+KRAUS_DIFF_METHODS = ("backprop", "parameter-shift", "finite-diff")
+
+#: Devices checked to apply a non-unitary ``QubitUnitary`` matrix as given.
+#: One that decomposes the operation runs a unitary in its place (#477).
+KRAUS_DEVICES = ("default.qubit", "lightning.qubit")
 
 
-def check_kraus_trajectories(channel: str, diff_method: object, shots: object) -> None:
+def check_kraus_trajectories(channel: str, qnode: qml.QNode) -> None:
     """
-    Raise ``ValueError`` if ``channel``'s trajectories cannot run as asked.
+    Raise ``ValueError`` if ``channel``'s trajectories cannot run on ``qnode``.
 
-    Only channels sampled by weighted Kraus branches are affected (amplitude
-    damping).  Their states are unnormalised, which ``adjoint`` differentiates
-    wrongly (by 0.17 on a two-qubit test circuit, #357) and which shot
-    sampling, drawing from normalised probabilities, cannot represent.
+    Only channels that are not drawn as Pauli errors are affected: amplitude
+    damping, sampled by weighted Kraus branches.  Their states are
+    unnormalised, so the gradient is right only for the methods in
+    :data:`KRAUS_DIFF_METHODS` (``adjoint`` was off by 0.17 on a two-qubit
+    test circuit, #357; ``diff_method=None`` computes none and is allowed),
+    the matrices reach the simulator unchanged only on the devices in
+    :data:`KRAUS_DEVICES`, and shot sampling, drawing from normalised
+    probabilities, cannot represent them.  A channel with neither sampler is
+    refused as well.
     """
-    if CHANNELS[channel].kraus is None:
+    spec = CHANNELS[channel]
+    if spec.paulis is not None:
         return
-    if diff_method in UNITARY_ONLY_METHODS:
+    if spec.kraus is None:
+        raise ValueError(f"{channel!r} has no trajectory sampler; use noise_method='density'.")
+    diff_method = getattr(qnode, "diff_method", None)
+    if diff_method is not None and diff_method not in KRAUS_DIFF_METHODS:
         raise ValueError(
             f"{channel!r} trajectories apply non-unitary Kraus branches, which "
-            f"diff_method={diff_method!r} differentiates wrongly: it inverts every "
-            f"operation by its adjoint.  Use diff_method='backprop' or "
-            f"'parameter-shift', or noise_method='density'."
+            f"diff_method={diff_method!r} is not known to differentiate correctly "
+            f"('adjoint' inverts every operation by its adjoint, and 'best' can "
+            f"resolve to it).  Use diff_method='backprop', 'parameter-shift' or "
+            f"'finite-diff', or noise_method='density'."
         )
+    device = _qnode_device_name(qnode)
+    if device not in KRAUS_DEVICES:
+        raise ValueError(
+            f"{channel!r} trajectories apply non-unitary matrices, which a device "
+            f"that decomposes QubitUnitary would replace by unitaries without an "
+            f"error; only {' and '.join(KRAUS_DEVICES)} are checked to apply them "
+            f"as given, not {device!r}.  Use one of those, or noise_method='density'."
+        )
+    shots = _qnode_shots(qnode)
     if shots is not None:
         raise ValueError(
             f"{channel!r} trajectories leave the state unnormalised, which sampling "
@@ -373,14 +402,16 @@ def trajectory_noise_qnode(
     over draws equals :func:`training_noise_qnode`'s output.  The Pauli
     channels -- depolarizing, bit flip, phase flip, and phase damping, which
     is a phase flip -- are drawn as Pauli errors; amplitude damping as
-    weighted Kraus branches, which rules out ``adjoint`` and shots (see
+    weighted Kraus branches, which rules out ``adjoint``, shots and devices
+    other than ``default.qubit`` and ``lightning.qubit`` (see
     :func:`check_kraus_trajectories`).
 
     Raises
     ------
     ValueError
         If ``p`` is 0 or out of range, ``position`` is unknown, or amplitude
-        damping is asked for on an ``adjoint`` or shot-based ``qnode``.
+        damping is asked for on a ``qnode`` whose differentiation method,
+        device or shots :func:`check_kraus_trajectories` refuses.
     """
     validate_noise(p, position, channel=channel)
     if p == 0.0:
@@ -389,7 +420,7 @@ def trajectory_noise_qnode(
         )
     if CHANNELS[channel].paulis is not None:
         return _pauli_trajectories(qnode, p=p, position=position, channel=channel)
-    check_kraus_trajectories(channel, getattr(qnode, "diff_method", None), _qnode_shots(qnode))
+    check_kraus_trajectories(channel, qnode)
     return _kraus_trajectories(qnode, p=p, position=position, channel=channel)
 
 
@@ -398,6 +429,13 @@ def _qnode_shots(qnode: qml.QNode) -> int | None:
     shots = getattr(qnode, "shots", None)
     total = getattr(shots, "total_shots", None)
     return total if isinstance(total, int) else None
+
+
+def _qnode_device_name(qnode: qml.QNode) -> str:
+    """The name the QNode's device was created by, such as ``"default.qubit"``."""
+    device = qnode.device
+    # A legacy device keeps that name in short_name, and a description in name.
+    return str(getattr(device, "short_name", None) or device.name)
 
 
 def run_with_training_noise(
@@ -504,8 +542,9 @@ class TrainingNoiseMixin:
 
         ``noise_channel`` is the channel ``noise_level`` is the strength of.
         The trajectory method samples amplitude damping by weighted Kraus
-        branches, which ``adjoint`` and shots cannot run
-        (:func:`check_kraus_trajectories`); that is refused here too.
+        branches, which only some differentiation methods and devices run
+        correctly, and shots cannot (:func:`check_kraus_trajectories`); the
+        rest is refused here too.
 
         With ``shots``, only ``noise_method="trajectories"`` is accepted: it runs
         the layer's own sampled QNode, while the density method runs the exact
@@ -527,7 +566,7 @@ class TrainingNoiseMixin:
         )
         validate_noise_method(noise_method, noise_trajectories)
         if noise_method == "trajectories":
-            check_kraus_trajectories(noise_channel, getattr(qnode, "diff_method", None), shots)
+            check_kraus_trajectories(noise_channel, qnode)
         self.noise_channel = noise_channel
         self.noise_level = noise_level
         self.noise_position = noise_position
