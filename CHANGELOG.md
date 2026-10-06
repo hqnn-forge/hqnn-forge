@@ -266,6 +266,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/hardware_workflow.py` and a README section: shots, parameter-shift checked against
   backprop, SPSA, per-step circuit counts with `qml.Tracker`, and shot and noise sweeps, with
   how to point it at a real device (#356)
+- A results page, `docs/results/trajectory-noise-study.md`, with its script
+  `examples/study_trajectory_noise.py` and raw data: trajectory against density noise training
+  on a breast-cancer proxy at 4 and 6 qubits. The `noise_method` documentation carries its
+  recommendation: `"density"` where it fits, otherwise `"trajectories"` with
+  `noise_trajectories ≥ 4` and a longer training budget (#311, #343)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
