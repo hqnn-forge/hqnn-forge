@@ -172,10 +172,11 @@ class SPSA(torch.optim.Optimizer):
     lr:
         ``a``, the numerator of the step-size sequence.  Default: 0.1.  Unlike
         Adam's, it multiplies the raw gradient estimate, so the right value
-        scales with the loss's gradient: for the BCE-trained 4-qubit model of
-        ``examples/hardware_workflow.py`` (gradients of about 0.05), with SPSA on
-        every parameter, lr 0.1 to 0.4 barely moved it in 30 epochs and lr 1
-        to 8 all trained it.
+        scales with the loss's gradient.  On the BCE-trained 4-qubit,
+        2-layer model of ``examples/hardware_workflow.py`` (gradients of about
+        0.05), SPSA on every parameter, head included, barely moved it in 30
+        epochs at lr 0.1 to 0.4 and trained it at lr 1 to 8; the example itself
+        trains the head with Adam (``gradient_optimizer``), at lr 1.
     perturbation:
         ``c``, the numerator of the perturbation-size sequence.  A value near
         the standard deviation of the loss's noise is Spall's guideline.

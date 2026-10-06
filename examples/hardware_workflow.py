@@ -42,10 +42,10 @@ An option that has to be a Python object rather than a string cannot be
 given this way, so a device that needs one, such as ``pennylane-qiskit``'s
 ``"qiskit.remote"`` (its ``backend``), cannot be used here as it stands.
 The library passes ``seed`` to any device it does not know as given, so
-``build`` seeds only the simulators in ``KNOWN_DEVICES``.  The
-execution counts printed in step 2 are what a run costs there, and they are
-the reason to prefer SPSA: its cost per step does not grow with the number of
-parameters.
+``build`` seeds only the simulators in ``KNOWN_DEVICES``.  The execution
+counts printed in step 2, counted on a simulator, are what a run costs
+there, and they are the reason to prefer SPSA: its cost per step does not
+grow with the number of parameters.
 
 Usage::
 
@@ -151,11 +151,16 @@ def check_gradients(x: torch.Tensor, y: torch.Tensor) -> None:
 
 
 def count_step(x: torch.Tensor, y: torch.Tensor) -> None:
-    """Circuits and shots of one training step, per optimiser."""
+    """Circuits and shots of one training step, per optimiser.
+
+    Counted on ``default.qubit`` with shots, whatever ``DEVICE`` is: the counts
+    are the same, and on hardware a parameter-shift step just to count it
+    would be billed.
+    """
     loss_fn = torch.nn.BCEWithLogitsLoss()
     print(f"2. cost of one training step on a batch of {len(x)}, {SHOTS} shots per circuit:")
     for name in ("parameter-shift + Adam", "SPSA"):
-        model = build(SHOTS, "parameter-shift")
+        model = build(SHOTS, "parameter-shift", "default.qubit")
         device = model.quantum_layer.qlayer.qnode.device
         with qml.Tracker(device) as tracker:
             if name == "SPSA":
@@ -211,7 +216,7 @@ def main() -> None:
     print(
         f"3. SPSA with {SHOTS} shots: {history.n_epochs} epochs in "
         f"{time.perf_counter() - start:.0f} s, best validation MCC "
-        f"{max(r.val_score or 0.0 for r in history.epochs):.3f}"
+        f"{history.best_value:.3f} (under shot noise)"
     )
 
     # 4. Evaluate: the same weights in an exact copy, swept over shot counts
@@ -226,7 +231,7 @@ def main() -> None:
     # For reference: the same model trained exactly (backprop, Adam), which a
     # device cannot do.
     reference = build(None, "backprop", "default.qubit")
-    train_model(
+    ref_history = train_model(
         reference,
         torch.nn.BCEWithLogitsLoss(),
         torch.optim.Adam(reference.parameters(), lr=0.05),
@@ -240,7 +245,8 @@ def main() -> None:
         patience=None,
         generator=torch.Generator().manual_seed(SEED),
     )
-    t_ref = find_optimal_threshold(y_va.long(), reference.predict_proba(x_va)).threshold
+    t_ref = ref_history.best_threshold
+    assert t_ref is not None
     ref_mcc = matthews_corrcoef(y_te.long(), (reference.predict_proba(x_te) >= t_ref).long())
 
     print(f"4. test MCC (exact backprop + Adam reference: {ref_mcc:.3f})")
