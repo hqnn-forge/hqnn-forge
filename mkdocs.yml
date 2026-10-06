@@ -69,6 +69,7 @@ nav:
   - Methodology: methodology.md
   - Results:
       - Trajectory against density noise: results/trajectory-noise-study.md
+      - Trajectory training collapse: results/trajectory-collapse-study.md
   - API reference:
       - Encoding layers: api/encoding.md
       - Models: api/models.md
