@@ -88,6 +88,8 @@ class TestContents:
             "datasets",
             "folds",
             "metrics",
+            "noise",
+            "noise_summary",
         }
         assert record["format_version"] == RECORD_FORMAT_VERSION
 
@@ -145,7 +147,11 @@ class TestContents:
             return real(X, y, train_idx, val_idx, **kwargs)
 
         monkeypatch.setattr(benchmark, "oversample_fold", spy)
-        monkeypatch.setattr(benchmark, "_fit_and_score", lambda *a, **k: (0.3, 0.5, 0.01, 1))
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(0.3, 0.5, 0.01, 1, 0.2, 0.1),
+        )
         path = tmp_path / "run.json"
         run_benchmark(_datasets(), _hybrid, record_path=path, **SETTINGS)
         record, _ = load_record(path)
@@ -264,7 +270,11 @@ class TestWriting:
     def test_undefined_p_value_is_written_as_null(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(benchmark, "_fit_and_score", lambda *a, **k: (0.3, 0.5, 0.01, 1))
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(0.3, 0.5, 0.01, 1, 0.2, 0.1),
+        )
         path = tmp_path / "tied.json"
         run_benchmark({"first": _data(0)}, _hybrid, record_path=path, **SETTINGS)
         record, _ = load_record(path)
@@ -280,3 +290,63 @@ class TestWriting:
         with pytest.raises(TypeError, match="cannot record a Linear"):
             save_record(broken, path)
         assert not path.exists()
+
+
+class TestSeveralSeedsInTheRecord:
+    def test_seed_indices_are_recorded_and_rerun(self, tmp_path: Path) -> None:
+        path = tmp_path / "seeds.json"
+        data = {"first": _data(0)}
+        run_benchmark(data, _hybrid, record_path=path, n_seeds=2, **SETTINGS)
+        record, _ = load_record(path)
+        assert record["config"]["settings"]["n_seeds"] == 2
+        assert [f["seed_index"] for f in record["folds"]][:4] == [0, 1, 0, 1]
+        assert len({f["init_seed"] for f in record["seeds"]["folds"]}) > 1
+        again = rerun_benchmark(record, data)
+        assert [f.mcc for f in again.folds] == [f["mcc"] for f in record["folds"]]
+
+
+class TestTuningInTheRecord:
+    def test_budget_and_choices_are_recorded_and_rerun(self, tmp_path: Path) -> None:
+        from hqnn_forge.benchmark import Tuning
+
+        spaces = {"hybrid": {"lr": [0.01, 0.05]}, "control": {"lr": [0.01, 0.05]}}
+        tuning = Tuning(n_trials=2, search_spaces=spaces, inner_folds=2)
+        path = tmp_path / "tuned.json"
+        data = {"first": _data(0)}
+        run_benchmark(data, _hybrid, record_path=path, tuning=tuning, **SETTINGS)
+        record, _ = load_record(path)
+        assert record["config"]["settings"]["tuning"] == {
+            "n_trials": 2,
+            "inner_folds": 2,
+            "search_spaces": spaces,
+        }
+        assert all(f["hyperparameters"]["lr"] in (0.01, 0.05) for f in record["folds"])
+        again = rerun_benchmark(record, data)
+        assert [f.mcc for f in again.folds] == [f["mcc"] for f in record["folds"]]
+        assert [f.hyperparameters for f in again.folds] == [
+            f["hyperparameters"] for f in record["folds"]
+        ]
+
+
+class TestNoiseInTheRecord:
+    def test_noise_results_are_recorded_and_rerun(self, tmp_path: Path) -> None:
+        path = tmp_path / "noise.json"
+        data = {"first": _data(0)}
+        run_benchmark(
+            data,
+            _hybrid,
+            record_path=path,
+            noise_levels=[0.0, 0.3],
+            noise_position="end",
+            **SETTINGS,
+        )
+        record, _ = load_record(path)
+        assert record["config"]["settings"]["noise_levels"] == [0.0, 0.3]
+        assert [row["noise_level"] for row in record["noise"]] == [0.0, 0.3]
+        assert set(record["noise_summary"]) == {"first"}
+        hybrid = [f for f in record["folds"] if f["model"] == "hybrid"]
+        assert all(set(f["noise_mcc"]) == {"0.0", "0.3"} for f in hybrid)
+        again = rerun_benchmark(record, data)
+        assert [row["hybrid_mcc_mean"] for row in again.noise] == [
+            row["hybrid_mcc_mean"] for row in record["noise"]
+        ]

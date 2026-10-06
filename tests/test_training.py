@@ -32,9 +32,15 @@ def data() -> tuple[torch.Tensor, ...]:
     return (*_separable(200, 0), *_separable(80, 1))
 
 
-def _logreg(seed: int = 0) -> nn.Module:
+def _logreg(seed: int = 0) -> nn.Linear:
     torch.manual_seed(seed)
     return nn.Linear(N_FEATURES, 1)
+
+
+def _running_stats(bn: nn.BatchNorm1d) -> tuple[torch.Tensor, torch.Tensor]:
+    """``bn``'s running mean and variance, narrowed from ``Tensor | None``."""
+    assert bn.running_mean is not None and bn.running_var is not None
+    return bn.running_mean, bn.running_var
 
 
 class TestTraining:
@@ -435,8 +441,10 @@ class TestValidation:
         assert history.n_epochs == 3 and history.best_epoch is not None
 
     def test_bad_output_shape(self, data: tuple[torch.Tensor, ...]) -> None:
+        # (batch, n_classes) is a multiclass output now (#309); a 3-D one is
+        # neither kind.
         X, y, _, _ = data
-        model = nn.Linear(N_FEATURES, 2)
+        model = nn.Sequential(nn.Linear(N_FEATURES, 4), nn.Unflatten(1, (2, 2)))
         with pytest.raises(ValueError, match=r"shape \(batch,\) or \(batch, 1\)"):
             train_model(
                 model, nn.BCEWithLogitsLoss(), torch.optim.SGD(model.parameters(), lr=0.1), X, y
@@ -471,10 +479,11 @@ class TestModes:
         """#174: the caller froze the statistics; training must not move them."""
         X, y, Xv, yv = data
         torch.manual_seed(0)
-        model = nn.Sequential(nn.Linear(N_FEATURES, 8), nn.BatchNorm1d(8), nn.Linear(8, 1))
-        model[1].eval()
-        mean, var = model[1].running_mean.clone(), model[1].running_var.clone()
-        weight = model[0].weight.clone()
+        first, bn = nn.Linear(N_FEATURES, 8), nn.BatchNorm1d(8)
+        model = nn.Sequential(first, bn, nn.Linear(8, 1))
+        bn.eval()
+        mean, var = (t.clone() for t in _running_stats(bn))
+        weight = first.weight.clone()
         train_model(
             model,
             nn.BCEWithLogitsLoss(),
@@ -487,10 +496,10 @@ class TestModes:
             batch_size=32,
             patience=None,
         )
-        assert model.training and not model[1].training
-        assert torch.equal(model[1].running_mean, mean)
-        assert torch.equal(model[1].running_var, var)
-        assert not torch.equal(model[0].weight, weight), "the rest of the model did train"
+        assert model.training and not bn.training
+        assert torch.equal(_running_stats(bn)[0], mean)
+        assert torch.equal(_running_stats(bn)[1], var)
+        assert not torch.equal(first.weight, weight), "the rest of the model did train"
 
     def test_a_frozen_body_under_an_eval_root_stays_frozen(
         self, data: tuple[torch.Tensor, ...]
@@ -498,10 +507,11 @@ class TestModes:
         """model.eval() then the head back to train: only the head may train."""
         X, y, _, _ = data
         torch.manual_seed(0)
-        model = nn.Sequential(nn.Linear(N_FEATURES, 8), nn.BatchNorm1d(8), nn.Linear(8, 1))
+        bn = nn.BatchNorm1d(8)
+        model = nn.Sequential(nn.Linear(N_FEATURES, 8), bn, nn.Linear(8, 1))
         model.eval()
         model[2].train()
-        mean, var = model[1].running_mean.clone(), model[1].running_var.clone()
+        mean, var = (t.clone() for t in _running_stats(bn))
         train_model(
             model,
             nn.BCEWithLogitsLoss(),
@@ -511,8 +521,8 @@ class TestModes:
             max_epochs=2,
             batch_size=32,
         )
-        assert torch.equal(model[1].running_mean, mean)
-        assert torch.equal(model[1].running_var, var)
+        assert torch.equal(_running_stats(bn)[0], mean)
+        assert torch.equal(_running_stats(bn)[1], var)
         assert [m.training for m in model] == [False, False, True]
 
     def test_every_epoch_trains_in_the_entry_modes_after_a_callback_calls_eval(

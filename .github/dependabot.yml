@@ -15,9 +15,10 @@ updates:
           - "mypy"
           - "vermin"
 
-  # Keeps the actions in tests.yml current; without this entry checkout,
-  # setup-python and setup-uv would never be updated. The three arrive in one
-  # grouped PR rather than three: they are reviewed identically and each
+  # Keeps the actions in every workflow current (checkout, setup-python,
+  # setup-uv, the artifact actions, and the commit-pinned PyPI publish action in
+  # release.yml); without this entry none would ever be updated. They arrive in
+  # one grouped PR rather than one each: they are reviewed identically and each
   # ungrouped PR would spend a full matrix run to say the same thing.
   - package-ecosystem: "github-actions"
     directory: "/"

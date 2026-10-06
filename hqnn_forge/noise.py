@@ -54,8 +54,8 @@ replaced QNode: a ``p > 0`` block may be opened inside it.
 
 Training-time noise
 -------------------
-The encoding layers and hybrid classifiers also take ``noise_level`` and
-``noise_position`` at construction.  With ``noise_level > 0`` the layer runs
+The encoding layers and hybrid classifiers also take ``noise_level``,
+``noise_position`` and ``noise_channel`` at construction.  With ``noise_level > 0`` the layer runs
 the same noisy QNode (built by :func:`training_noise_qnode`) whenever it is
 in **train mode**, so gradients are computed through the noisy circuit, and
 the noiseless QNode in eval mode, like dropout.  Evaluation under noise is
@@ -75,10 +75,13 @@ Two methods, chosen with ``noise_method``:
 ``"trajectories"``
     Pauli-trajectory (Monte Carlo) sampling on the layer's own device and
     differentiation method.  At every channel site each sample independently
-    gets ``I`` with probability ``1 − p``, or ``X``, ``Y`` or ``Z`` with ``p/3``
-    each.  That mixture *is* the depolarizing channel, so the output
-    averaged over draws equals the ``"density"`` output, and so does the
-    gradient: each step's loss gradient is an unbiased estimate of the one
+    gets one Pauli, drawn with the channel's weights: for depolarizing ``I``
+    with probability ``1 − p`` and ``X``, ``Y`` or ``Z`` with ``p/3`` each;
+    for bit flip ``I`` with ``1 − p`` and ``X`` with ``p``; for phase flip
+    ``I`` with ``1 − p`` and ``Z`` with ``p`` (the ``paulis`` weights in
+    :data:`CHANNELS`).  Each mixture *is* its channel, so the output averaged
+    over draws equals the ``"density"`` output, and so does the gradient:
+    each step's loss gradient is an unbiased estimate of the one
     ``"density"`` computes, at pure-state cost.  The same step measured
     +34 MB and 0.8 s on ``lightning.qubit`` with adjoint (+18 MB and 0.3 s
     noiseless).  The price is gradient variance, as with dropout, which a
@@ -103,7 +106,9 @@ Two methods, chosen with ``noise_method``:
     unchanged.  The sites are placed by ``qml.noise.insert`` itself, so they
     are exactly the sites the ``"density"`` path puts channels on.  The
     draws use torch's global RNG, like dropout, so ``torch.manual_seed``
-    makes them reproducible.
+    makes them reproducible -- on an exact layer.  With ``shots`` the
+    readouts are also sampled by the device's own generator, which torch does
+    not seed, so such a layer repeats only when built with ``seed``.
 
 Shot noise
 ----------
@@ -118,6 +123,7 @@ values with ``N`` shots for the duration of a ``with`` block, and
 
 from __future__ import annotations
 
+import functools
 import warnings
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -156,6 +162,12 @@ CHANNELS: dict[str, _ChannelSpec] = {
 }
 
 
+def qnode_shots(qnode: object) -> int | None:
+    """The shot count ``qnode`` samples with, or ``None`` for exact values."""
+    shots = getattr(getattr(qnode, "shots", None), "total_shots", None)
+    return shots if isinstance(shots, int) else None
+
+
 def validate_noise(
     p: float,
     position: str,
@@ -183,8 +195,17 @@ def validate_noise(
         raise ValueError(f"{position_name} must be 'all' or 'end'; got {position!r}.")
 
 
+def _require_pauli_channel(channel: Channel, label: str) -> None:
+    """Raise ``ValueError`` unless ``channel`` can be sampled as Pauli trajectories."""
+    if CHANNELS[channel].paulis is None:
+        raise ValueError(
+            f"{label} is not a mixture of Pauli errors, so it cannot be sampled as "
+            f"Pauli trajectories; use noise_method='density'."
+        )
+
+
 def _noisy_qnode(
-    qnode: qml.QNode, n_qubits: int, p: float, position: Position, channel: str = "depolarizing"
+    qnode: qml.QNode, n_qubits: int, p: float, position: Position, channel: Channel
 ) -> qml.QNode:
     device = qml.device("default.mixed", wires=n_qubits)
     base = qml.QNode(qnode.func, device, diff_method="backprop", interface="torch")
@@ -196,7 +217,8 @@ def training_noise_qnode(
     n_qubits: int,
     p: float,
     position: Position = "all",
-    channel: Channel = "depolarizing",
+    *,
+    channel: Channel,
 ) -> qml.QNode:
     """
     The noisy counterpart of ``qnode`` an encoding layer runs in train mode.
@@ -223,7 +245,7 @@ def training_noise_qnode(
 
 @qml.transform
 def _pauli_trajectories(
-    tape: qml.tape.QuantumScript, p: float, position: Position, channel: str = "depolarizing"
+    tape: qml.tape.QuantumScript, p: float, position: Position, channel: Channel
 ) -> tuple[qml.tape.QuantumScriptBatch, Callable[..., object]]:
     """
     ``tape`` with one randomly drawn Pauli per sample at every channel site.
@@ -247,7 +269,7 @@ def _pauli_trajectories(
 
 
 def trajectory_noise_qnode(
-    qnode: qml.QNode, p: float, position: Position = "all", channel: Channel = "depolarizing"
+    qnode: qml.QNode, p: float, position: Position = "all", *, channel: Channel
 ) -> qml.QNode:
     """
     ``qnode`` with a Pauli ``channel`` sampled as Pauli trajectories.
@@ -265,16 +287,23 @@ def trajectory_noise_qnode(
         is not a Pauli channel.
     """
     validate_noise(p, position, channel=channel)
-    if CHANNELS[channel].paulis is None:
-        raise ValueError(
-            f"{channel!r} is not a mixture of Pauli errors, so it cannot be sampled as "
-            f"Pauli trajectories; use noise_method='density'."
-        )
+    _require_pauli_channel(channel, repr(channel))
     if p == 0.0:
         raise ValueError(
             "trajectory_noise_qnode needs p > 0; p = 0 is the noiseless QNode itself."
         )
     return _pauli_trajectories(qnode, p=p, position=position, channel=channel)
+
+
+@contextmanager
+def _swapped_qnode(qlayer: qml.qnn.TorchLayer, target: qml.QNode) -> Iterator[None]:
+    """Temporarily replace ``qlayer.qnode`` with ``target`` for execution."""
+    original = qlayer.qnode
+    qlayer.qnode = target
+    try:
+        yield
+    finally:
+        qlayer.qnode = original
 
 
 def run_with_training_noise(
@@ -296,9 +325,7 @@ def run_with_training_noise(
     """
     if getattr(qlayer, "_hqnn_noise_depth", 0) > 0:
         return qlayer(x)
-    original = qlayer.qnode
-    qlayer.qnode = noisy_qnode
-    try:
+    with _swapped_qnode(qlayer, noisy_qnode):
         if n_trajectories == 1:
             return qlayer(x)
         # Sample-major repeat: rows k·i … k·i + k − 1 are sample i's draws.
@@ -311,8 +338,6 @@ def run_with_training_noise(
         out = qlayer(repeated)
         out = out.reshape(-1, n_trajectories, *out.shape[1:]).mean(dim=1)
         return out if batched else out[0]
-    finally:
-        qlayer.qnode = original
 
 
 def validate_noise_method(method: str, n_trajectories: object) -> None:
@@ -349,7 +374,9 @@ class TrainingNoiseMixin:
     ``noise_position``, ``noise_method`` and ``noise_trajectories``.  A layer
     calls :meth:`_init_training_noise` once its QNode exists, runs its circuit
     through :meth:`_run_circuit` (train mode with noise: the noisy QNode, else
-    ``qlayer`` itself) and appends :meth:`_noise_repr` to ``extra_repr``.
+    ``qlayer`` itself; eval passes under ``torch.no_grad()`` dispatch to an
+    undifferentiated QNode when ``diff_method="adjoint"``) and appends
+    :meth:`_noise_repr` to ``extra_repr``.
     Everything else -- validation at construction, the memory warning, the
     QNode swap and its restore, the precedence of
     :func:`apply_depolarizing_noise` -- happens here.
@@ -363,6 +390,7 @@ class TrainingNoiseMixin:
     noise_method: NoiseMethod
     noise_trajectories: int
     _training_noise_qnode: qml.QNode | None
+    _eval_qnode_cache: tuple[qml.QNode, qml.QNode] | None
 
     def _init_training_noise(
         self,
@@ -401,11 +429,8 @@ class TrainingNoiseMixin:
             channel_name="noise_channel",
         )
         validate_noise_method(noise_method, noise_trajectories)
-        if noise_method == "trajectories" and CHANNELS[noise_channel].paulis is None:
-            raise ValueError(
-                f"noise_channel={noise_channel!r} is not a mixture of Pauli errors, so it "
-                f"cannot be sampled as trajectories; use noise_method='density'."
-            )
+        if noise_method == "trajectories":
+            _require_pauli_channel(noise_channel, f"noise_channel={noise_channel!r}")
         self.noise_channel = noise_channel
         self.noise_level = noise_level
         self.noise_position = noise_position
@@ -422,7 +447,7 @@ class TrainingNoiseMixin:
             )
         if noise_method == "trajectories":
             self._training_noise_qnode = trajectory_noise_qnode(
-                qnode, noise_level, noise_position, noise_channel
+                qnode, noise_level, noise_position, channel=noise_channel
             )
             return
         if n_qubits > MAX_TRAINING_NOISE_QUBITS:
@@ -436,15 +461,69 @@ class TrainingNoiseMixin:
                 stacklevel=3,
             )
         self._training_noise_qnode = training_noise_qnode(
-            qnode, n_qubits, noise_level, noise_position, noise_channel
+            qnode, n_qubits, noise_level, noise_position, channel=noise_channel
         )
 
+    @property
+    def shots(self) -> int | None:
+        """
+        The shot count the layer samples with now; ``None`` for exact values.
+
+        Read from the QNode the layer runs, so it follows
+        :func:`apply_shots` (and is ``None`` inside a ``p > 0``
+        :func:`apply_depolarizing_noise` block, which simulates the exact
+        channel) instead of repeating the construction argument.
+        """
+        return qnode_shots(self.qlayer.qnode)
+
+    def _eval_qnode_for(self, qnode: qml.QNode) -> qml.QNode:
+        """
+        Return an undifferentiated (``diff_method=None``) clone of *qnode* for
+        adjoint passes under ``torch.no_grad()`` (#426, #439).
+
+        Preserves the execution configuration and transforms pipeline (including
+        ``broadcast_expand``) while skipping unused adjoint Jacobian evaluations.
+        Caches ``(source_qnode, eval_qnode)`` on the layer instance so that QNode
+        copies produced by transforms invalidate the cache.
+        """
+        if getattr(qnode, "diff_method", None) != "adjoint":
+            return qnode
+        cached = getattr(self, "_eval_qnode_cache", None)
+        if cached is not None and cached[0] is qnode:
+            return cached[1]
+        eval_qnode = qnode.update(diff_method=None)
+        self._eval_qnode_cache = (qnode, eval_qnode)
+        return eval_qnode
+
     def _run_circuit(self, x: torch.Tensor) -> torch.Tensor:
-        """``qlayer(x)``, through the noisy QNode in train mode when there is one."""
+        """
+        ``qlayer(x)``, through the noisy QNode in train mode when there is one;
+        dispatches to an undifferentiated QNode under ``torch.no_grad()`` when
+        ``diff_method='adjoint'``.
+        """
         if self.training and self._training_noise_qnode is not None:
-            return run_with_training_noise(
-                self.qlayer, self._training_noise_qnode, x, self.noise_trajectories
-            )
+            if (
+                self.noise_method == "density"
+                and getattr(self.qlayer, "_hqnn_shots_original", None) is not None
+                and getattr(self.qlayer, "_hqnn_noise_depth", 0) == 0
+            ):
+                # The density QNode simulates the exact channel and would
+                # train on exact values inside the shot block.
+                raise RuntimeError(
+                    "noise_method='density' training noise simulates the exact channel and "
+                    "would ignore apply_shots; evaluate in eval mode inside apply_shots, or "
+                    "build the layer with noise_method='trajectories', which samples."
+                )
+            target = self._training_noise_qnode
+            if not torch.is_grad_enabled():
+                target = self._eval_qnode_for(target)
+            return run_with_training_noise(self.qlayer, target, x, self.noise_trajectories)
+        target = self.qlayer.qnode
+        if not torch.is_grad_enabled():
+            target = self._eval_qnode_for(target)
+        if target is not self.qlayer.qnode:
+            with _swapped_qnode(self.qlayer, target):
+                return self.qlayer(x)  # type: ignore[no-any-return]
         return self.qlayer(x)  # type: ignore[no-any-return]
 
     def _noise_repr(self) -> str:
@@ -524,7 +603,7 @@ def apply_depolarizing_noise(
     # sampled layer (built with shots, or inside apply_shots) would silently
     # return exact values here -- the reason density training noise refuses
     # shots too.
-    shots = getattr(getattr(original, "shots", None), "total_shots", None)
+    shots = qnode_shots(original)
     if p > 0.0 and shots is not None:
         raise RuntimeError(
             f"apply_depolarizing_noise simulates the exact channel and would ignore the "
@@ -640,9 +719,13 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
     weights; ``shots=None`` gives exact values again, for a reference point.
 
     The layer's circuit runs on its own device through a ``parameter-shift``
-    QNode, the one differentiation method that supports shots, so gradients
-    inside the block are sampled too.  The original QNode is restored on exit,
-    including when the block raises.
+    QNode, the one differentiation method that samples unbiased gradients, so
+    gradients inside the block are sampled too.  A layer with
+    ``noise_method="trajectories"`` training noise samples its train-mode
+    trajectories with the block's shots as well; one with ``"density"``
+    training noise, which simulates the exact channel, raises in train mode
+    (eval mode, where training noise is off, is unaffected).  The original
+    QNodes are restored on exit, including when the block raises.
 
     Raises
     ------
@@ -659,7 +742,7 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
     from hqnn_forge.encoding._common import expand_batch_dimension, validate_shots
 
     validate_shots(shots, "parameter-shift")
-    _, qlayer, _ = resolve_encoding_layer(model, "apply_shots")
+    layer, qlayer, _ = resolve_encoding_layer(model, "apply_shots")
     if getattr(qlayer, "_hqnn_shots_original", None) is not None:
         raise RuntimeError("apply_shots cannot be nested on the same layer.")
     if getattr(qlayer, "_hqnn_noise_original", None) is not None:
@@ -668,27 +751,62 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
             "simulates the exact channel on default.mixed."
         )
     original = qlayer.qnode
-    sampled = qml.QNode(
-        original.func,
-        original.device,
-        interface="torch",
-        diff_method="parameter-shift",
-        shots=shots,
+    func = original.func
+    # A circuit function that checks its own input gradients (amplitude
+    # embedding) holds the construction-time diff_method; under backprop its
+    # check would let parameter-shift differentiate the inputs here.
+    check = getattr(layer, "_input_gradient_check", None)
+    if check is not None:
+        circuit = func
+
+        @functools.wraps(circuit)
+        def func(inputs: torch.Tensor, *args: object, **kwargs: object) -> object:
+            check(inputs, "parameter-shift")
+            return circuit(inputs, *args, **kwargs)
+
+    sampled = expand_batch_dimension(
+        qml.QNode(
+            func,
+            original.device,
+            interface="torch",
+            diff_method="parameter-shift",
+            shots=shots,
+        ),
+        "parameter-shift",
+    )
+    # Train-mode trajectory noise runs its own copy of the QNode; it is
+    # rebuilt on the sampled one, so it samples with the block's shots.
+    noise_original = getattr(layer, "_training_noise_qnode", None)
+    noise_sampled = (
+        trajectory_noise_qnode(
+            sampled,
+            layer.noise_level,  # type: ignore[attr-defined]
+            layer.noise_position,  # type: ignore[attr-defined]
+            channel=layer.noise_channel,  # type: ignore[attr-defined]
+        )
+        if noise_original is not None and getattr(layer, "noise_method", None) == "trajectories"
+        else noise_original
     )
     qlayer._hqnn_shots_original = original
-    qlayer.qnode = expand_batch_dimension(sampled, "parameter-shift")
+    qlayer.qnode = sampled
+    if noise_sampled is not noise_original:
+        layer._training_noise_qnode = noise_sampled  # type: ignore[attr-defined]
     try:
         yield model
     finally:
         qlayer.qnode = original
         qlayer._hqnn_shots_original = None
+        if noise_sampled is not noise_original:
+            layer._training_noise_qnode = noise_original  # type: ignore[attr-defined]
 
 
 class ShotSweepPoint(NamedTuple):
     """One shot count of a sweep."""
 
     shots: int | None
-    #: ``(n_repeats, n_samples)``: one row per repeated evaluation.
+    #: ``(n_repeats, *predict_proba(X).shape)``: ``(n_repeats, n_samples)``
+    #: for a binary classifier, ``(n_repeats, n_samples, n_classes)`` for
+    #: :class:`~hqnn_forge.models.MulticlassHybridClassifier`.
     probabilities: torch.Tensor
     #: Scores of the repeated evaluations, or None without ``score_fn``.
     scores: list[float] | None

@@ -79,7 +79,7 @@ class TestOtherEncoders:
         """The state preparation has CNOTs of its own; the ansatz is the last n·L."""
         layer = AmplitudeEncodingLayer(n_qubits=3, n_layers=2, **CPU)
         x = torch.rand(8, dtype=torch.float64)
-        tape = _logical_tape(layer.qlayer, 3, inputs=x / x.norm())
+        tape = _logical_tape(layer, inputs=x)
         assert cnot_pairs(tape)[-6:] == _ring(3) * 2
 
 

@@ -4,23 +4,30 @@ on:
   push:
     branches: [ "main" ]
   # Every pull request, whatever its base, so stacked PRs (base = another
-  # feature branch) get CI before their parent merges. `edited` is there for
-  # retargeting: each job skips title/body edits, but a base change re-runs
-  # the PR against its new base, e.g. main after the parent is squash-merged.
+  # feature branch) get CI before their parent merges. A push to a PR's *base*
+  # branch fires nothing here; CONTRIBUTING.md ("Stacked PRs") says how to
+  # re-run the PRs stacked on it (#231).
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
+  # Retargeting re-runs the suite through retarget.yml, which calls this
+  # workflow only when the base changed. An `edited` trigger here would post
+  # skipped check runs under these job names for every title or body edit,
+  # and the checks page would show those instead of the real results (#346).
+  workflow_call:
 
 permissions:
   contents: read
 
-# A new push to a PR cancels its still-running, now superseded runs. Title/body
-# edits get their own group: concurrency applies before the jobs' `if`, so the
-# skipped run would otherwise cancel the PR's real one. Pushes to main group per
-# commit: a group holds one running and one pending run, and a third arrival
-# cancels the pending one even without cancel-in-progress, so merges in quick
-# succession would leave main commits without a completed run.
+# A new push to a PR cancels its still-running, now superseded runs. A retarget
+# (called from retarget.yml, with the caller's `edited` event context) gets its
+# own group: cancelling the run for the old base would leave its jobs marked
+# cancelled under the real check names, which is the shadowing #346 removed.
+# Pushes to main group per commit: a group holds one running and one pending
+# run, and a third arrival cancels the pending one even without
+# cancel-in-progress, so merges in quick succession would leave main commits
+# without a completed run.
 concurrency:
-  group: tests-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && !github.event.changes.base && '-edit' || '' }}
+  group: tests-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && '-retarget' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -32,23 +39,26 @@ jobs:
   # --all-extras so mypy sees matplotlib, scikit-learn and pennylane-lightning:
   # with ignore_missing_imports, a missing extra silently types its imports as Any.
   # ruff covers the whole tree (it respects .gitignore). mypy covers the package,
-  # tests/ and examples/; modules still failing are listed under
-  # [[tool.mypy.overrides]] in pyproject.toml until #232 clears them.
+  # tests/ and examples/ in full: since #232 no module is exempted.
   lint:
-    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.1.0
+      uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: "3.12"
         enable-cache: true
 
     - name: Install dependencies from the lockfile
       run: uv sync --locked --all-extras
+
+    # The pre-commit hook refuses large files at commit time, but hooks are
+    # opt-in per clone; this applies the same limit to every tracked file.
+    - name: Refuse large files
+      run: uv run --frozen python .github/scripts/check_large_files.py
 
     - name: Lint
       run: uv run --frozen ruff check .
@@ -58,7 +68,8 @@ jobs:
 
     # warn_unused_configs reports an override entry that matches no module (a
     # renamed or deleted file) only as a note and still exits 0, so the grep
-    # turns that note into a failure.
+    # turns that note into a failure, should [[tool.mypy.overrides]] entries
+    # be added again.
     - name: Type-check
       run: |
         out=$(uv run --frozen mypy hqnn_forge tests examples 2>&1) || { echo "$out"; exit 1; }
@@ -67,6 +78,14 @@ jobs:
           echo "::error::a [[tool.mypy.overrides]] entry in pyproject.toml matches no module"
           exit 1
         fi
+
+    # The floor is repeated by hand in pyproject.toml and in this file (ruff's
+    # target-version, the classifiers, vermin's -t and each job's lowest
+    # python-version), and in the local vermin commands in README.md and
+    # CONTRIBUTING.md; each tool only sees its own copy, so a missed one would
+    # fail nothing. The script compares them all with requires-python.
+    - name: Check every copy of the Python floor
+      run: uv run --frozen python .github/scripts/check_python_floor.py
 
     # Neither ruff nor mypy checks stdlib API usage against the 3.11 floor:
     # ruff's target-version covers syntax only, and mypy has to target 3.12
@@ -87,7 +106,6 @@ jobs:
         fi
 
   test:
-    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -136,7 +154,6 @@ jobs:
   # the newest can install different pins from the same lockfile. A job on one
   # interpreter only would go green without installing the other half of a bump.
   test-locked:
-    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -146,7 +163,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.1.0
+      uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
@@ -179,7 +196,6 @@ jobs:
   # installed afterwards at its normal resolution, using the spec from the dev
   # extra, which leaves the runtime pins untouched.
   test-lowest:
-    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
     # One leg per set of floors: pyproject.toml gives torch, numpy and
     # scikit-learn a higher floor on 3.13 and on 3.14, where the older
@@ -192,7 +208,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.1.0
+      uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
