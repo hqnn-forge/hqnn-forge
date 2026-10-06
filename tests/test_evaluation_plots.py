@@ -14,10 +14,12 @@ import numpy as np
 import pytest
 
 matplotlib = pytest.importorskip("matplotlib")
+from matplotlib.text import Annotation
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from matplotlib.figure import Figure
+from matplotlib.figure import Figure, SubFigure
 
 from hqnn_forge.evaluation import plots
 
@@ -105,10 +107,14 @@ class TestFoldBoxplot:
         # Tie each median to the box it belongs to: a median line spans the
         # full box width (0.5) centred on the box position, while the whisker
         # caps span half that, so the span picks out one line per box.
-        medians = {
-            round(float(np.mean(line.get_xdata())), 6): float(line.get_ydata()[0])
+        segments = [
+            (np.asarray(line.get_xdata(), dtype=float), np.asarray(line.get_ydata(), dtype=float))
             for line in ax.lines
-            if len(line.get_xdata()) == 2 and abs(float(np.ptp(line.get_xdata())) - 0.5) < 1e-9
+        ]
+        medians = {
+            round(float(xs.mean()), 6): float(ys[0])
+            for xs, ys in segments
+            if xs.size == 2 and abs(float(np.ptp(xs)) - 0.5) < 1e-9
         }
         ticks = {
             t.get_text(): round(float(x), 6) for t, x in zip(ax.get_xticklabels(), ax.get_xticks())
@@ -154,13 +160,15 @@ class TestEfficiencyFrontier:
         assert ax.get_xscale() == "log"
         assert sorted(t.get_text() for t in ax.texts) == sorted(THESIS)
         (step,) = [line for line in ax.lines if line.get_label() == "Pareto frontier"]
-        assert list(step.get_xdata()) == [122, 8897, 14869, 29357]
-        assert list(step.get_ydata()) == [
+        assert list(np.asarray(step.get_xdata())) == [122, 8897, 14869, 29357]
+        assert list(np.asarray(step.get_ydata())) == [
             THESIS[n][0] for n in ["SHNN", "ResNet", "FT-T", "SAINT"]
         ]
         # Each label is anchored on its own model's point, and each point is
         # drawn at that model's (params, score).
-        assert {t.get_text(): tuple(t.xy) for t in ax.texts} == {
+        labels = [t for t in ax.texts if isinstance(t, Annotation)]
+        assert len(labels) == len(ax.texts)
+        assert {t.get_text(): tuple(t.xy) for t in labels} == {
             name: (float(params), score) for name, (score, params) in THESIS.items()
         }
         points = np.concatenate([c.get_offsets() for c in ax.collections])
@@ -192,6 +200,13 @@ class TestSubfigureAxes:
     """
 
     @staticmethod
+    def _subfigures(parent: Figure | SubFigure, nrows: int = 1, ncols: int = 2) -> np.ndarray:
+        """``parent.subfigures``, narrowed: more than one sub-figure comes as an array."""
+        subs = parent.subfigures(nrows, ncols)
+        assert isinstance(subs, np.ndarray)
+        return subs
+
+    @staticmethod
     def _draw(kind: str, ax: Axes) -> Figure:
         if kind == "confusion":
             return plots.plot_confusion_matrix([0, 1, 1], [0, 1, 0], ax=ax)
@@ -202,7 +217,7 @@ class TestSubfigureAxes:
     @pytest.mark.parametrize("kind", ["confusion", "boxplot", "frontier"])
     def test_returns_the_root_figure_which_can_be_saved(self, kind: str) -> None:
         root = plt.figure()
-        sub = root.subfigures(1, 2)[1]
+        sub = self._subfigures(root)[1]
         ax = sub.subplots()
         out = self._draw(kind, ax)
         assert out is root and type(out) is Figure
@@ -210,14 +225,14 @@ class TestSubfigureAxes:
 
     def test_nested_subfigures_reach_the_root(self) -> None:
         root = plt.figure()
-        inner = root.subfigures(1, 2)[0].subfigures(2, 1)[1]
+        inner = self._subfigures(self._subfigures(root)[0], 2, 1)[1]
         assert self._draw("confusion", inner.subplots()) is root
 
     def test_confusion_contents_land_on_the_subfigure(self) -> None:
         # The root is returned, but the colorbar is stolen from the sub-figure
         # axes and lives on that sub-figure, not on the root beside it.
         root = plt.figure()
-        sub = root.subfigures(1, 2)[1]
+        sub = self._subfigures(root)[1]
         ax = sub.subplots()
         self._draw("confusion", ax)
         assert len(sub.axes) == 2 and ax in sub.axes
@@ -229,3 +244,25 @@ class TestSubfigureAxes:
         ax.remove()
         with pytest.raises(ValueError, match="not attached"):
             plots.plot_confusion_matrix([0, 1], [0, 1], ax=ax)
+
+
+def test_reliability_diagram_plots_the_reliability_curve() -> None:
+    # Here rather than in test_calibration.py: the lowest-floors CI job has no
+    # matplotlib and leaves exactly this module out.
+    from hqnn_forge.evaluation import expected_calibration_error, reliability_curve
+
+    rng = np.random.default_rng(7)
+    prob = 1 / (1 + np.exp(-3 * rng.standard_normal(500)))
+    y = (rng.random(500) < prob).astype(float)
+    fig = plots.plot_reliability_diagram(y, prob, strategy="quantile")
+    (ax,) = fig.axes
+    diagonal, model = ax.get_lines()
+    confidence, frequency, counts = reliability_curve(y, prob, 10, "quantile")
+    np.testing.assert_allclose(np.asarray(diagonal.get_xydata(), dtype=float), [[0, 0], [1, 1]])
+    np.testing.assert_allclose(np.asarray(model.get_xdata(), dtype=float), confidence.numpy())
+    np.testing.assert_allclose(np.asarray(model.get_ydata(), dtype=float), frequency.numpy())
+    assert [t.get_text() for t in ax.texts] == [str(int(n)) for n in counts.tolist()]
+    ece = expected_calibration_error(y, prob, 10, "quantile")
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend.get_texts()[1].get_text() == f"model (ECE {ece:.3f})"

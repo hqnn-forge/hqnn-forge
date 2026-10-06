@@ -13,7 +13,7 @@ from __future__ import annotations
 import itertools
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pennylane as qml
 import pytest
@@ -30,6 +30,7 @@ from hqnn_forge.noise import (
     Channel,
     Position,
     apply_depolarizing_noise,
+    apply_shots,
     noise_sweep,
     training_noise_qnode,
     trajectory_noise_qnode,
@@ -78,6 +79,12 @@ def _x() -> torch.Tensor:
 
 def test_every_channel_is_tabulated() -> None:
     assert set(CHANNELS) == set(END_EFFECT)
+
+
+def test_channel_map_matches_the_literal() -> None:
+    # The Literal is what mypy checks call sites against; the map is what
+    # validate_noise accepts at run time.  They must name the same channels.
+    assert set(CHANNELS) == set(get_args(Channel))
 
 
 @pytest.mark.parametrize("channel", CHANNEL_NAMES)
@@ -136,7 +143,7 @@ class TestTrajectories:
         p, draws = 0.2, 3000
         layer = _layer(noise_level=p, noise_channel=channel, noise_method="trajectories")
         x = _x()[:2]
-        density = training_noise_qnode(layer.qlayer.qnode, 3, p, "all", channel)
+        density = training_noise_qnode(layer.qlayer.qnode, 3, p, "all", channel=channel)
         with torch.no_grad():
             exact = torch.stack(
                 [torch.stack(density(xi, layer.qlayer.weights)) for xi in x]
@@ -181,6 +188,31 @@ class TestTrajectories:
             for _ in range(20):
                 torch.testing.assert_close(layer(x), clean, atol=1e-6, rtol=0)
 
+    # 0.9 is a valid bit-flip strength but above the depolarizing maximum.
+    @pytest.mark.parametrize("p", [0.3, 0.9])
+    def test_bit_flip_keeps_its_channel_inside_apply_shots(self, p: float) -> None:
+        # apply_shots rebuilds the train-mode trajectory QNode on its sampled
+        # one; the rebuilt QNode must sample the layer's channel, whose mean
+        # damps each readout by 1 − 2p at the end (depolarizing: 1 − 4p/3).
+        # Parameter-shift runs sample by sample, so one input keeps it quick.
+        draws, shots = 1000, 100
+        layer = _layer(
+            noise_level=p,
+            noise_position="end",
+            noise_channel="bit_flip",
+            noise_method="trajectories",
+        )
+        x = _x()[:1]
+        with torch.no_grad():
+            layer.eval()
+            clean = layer(x).double()
+            layer.train()
+            torch.manual_seed(4)
+            with apply_shots(layer, shots):
+                runs = layer(x.repeat(draws, 1)).reshape(draws, *clean.shape).double()
+        se = runs.std(0) / math.sqrt(draws)
+        assert ((runs.mean(0) - (1 - 2 * p) * clean).abs() <= Z * se + 1e-6).all()
+
 
 class TestDampingTrajectories:
     """#357: phase damping as a phase flip, amplitude damping by weighted Kraus branches."""
@@ -189,8 +221,10 @@ class TestDampingTrajectories:
         gamma = 0.3
         layer = _layer()
         flip = (1 - math.sqrt(1 - gamma)) / 2
-        damping = training_noise_qnode(layer.qlayer.qnode, 3, gamma, "all", "phase_damping")
-        flipping = training_noise_qnode(layer.qlayer.qnode, 3, flip, "all", "phase_flip")
+        damping = training_noise_qnode(
+            layer.qlayer.qnode, 3, gamma, "all", channel="phase_damping"
+        )
+        flipping = training_noise_qnode(layer.qlayer.qnode, 3, flip, "all", channel="phase_flip")
         with torch.no_grad():
             for xi in _x():
                 a = torch.stack(damping(xi, layer.qlayer.weights))
@@ -218,7 +252,9 @@ class TestDampingTrajectories:
         layer.double()
         x = torch.tensor([0.4, -1.1], dtype=torch.float64)
         weights = layer.qlayer.weights
-        noisy = trajectory_noise_qnode(layer.qlayer.qnode, gamma, position, "amplitude_damping")
+        noisy = trajectory_noise_qnode(
+            layer.qlayer.qnode, gamma, position, channel="amplitude_damping"
+        )
 
         real_rand = torch.rand
         calls: list[int] = []
@@ -257,7 +293,9 @@ class TestDampingTrajectories:
         grad = weights.grad.clone()
         monkeypatch.setattr(torch, "rand", real_rand)
 
-        density = training_noise_qnode(layer.qlayer.qnode, 2, gamma, position, "amplitude_damping")
+        density = training_noise_qnode(
+            layer.qlayer.qnode, 2, gamma, position, channel="amplitude_damping"
+        )
         weights.grad = None
         exact = torch.stack(density(x, weights))
         exact.sum().backward()
@@ -304,18 +342,18 @@ class TestDampingTrajectories:
     ) -> None:
         with pytest.raises(ValueError, match="not known to differentiate correctly"):
             trajectory_noise_qnode(
-                _qnode(device_name, diff_method), 0.1, "all", "amplitude_damping"
+                _qnode(device_name, diff_method), 0.1, "all", channel="amplitude_damping"
             )
 
     def test_trajectory_qnode_refuses_shots(self) -> None:
         sampled = _qnode("default.qubit", "parameter-shift", shots=100)
         with pytest.raises(ValueError, match="unnormalised"):
-            trajectory_noise_qnode(sampled, 0.1, "all", "amplitude_damping")
+            trajectory_noise_qnode(sampled, 0.1, "all", channel="amplitude_damping")
 
     def test_trajectory_qnode_refuses_an_unchecked_device(self) -> None:
         mixed = _qnode("default.mixed", "backprop")
         with pytest.raises(ValueError, match="decomposes QubitUnitary"):
-            trajectory_noise_qnode(mixed, 0.1, "all", "amplitude_damping")
+            trajectory_noise_qnode(mixed, 0.1, "all", channel="amplitude_damping")
 
     @pytest.mark.parametrize(
         ("device_name", "diff_method", "shots"),
@@ -330,13 +368,13 @@ class TestDampingTrajectories:
     ) -> None:
         qnode = _qnode(device_name, diff_method, shots=shots)
         for channel in ("depolarizing", "phase_damping"):
-            noisy = trajectory_noise_qnode(qnode, 0.1, "all", channel)  # type: ignore[arg-type]
+            noisy = trajectory_noise_qnode(qnode, 0.1, "all", channel=channel)  # type: ignore[arg-type]
             assert torch.isfinite(noisy(torch.tensor(0.3, dtype=torch.float64)))
 
     def test_trajectory_qnode_runs_without_a_diff_method(self) -> None:
         # diff_method=None computes no gradient, so there is none to get wrong.
         noisy = trajectory_noise_qnode(
-            _qnode("default.qubit", None), 0.1, "all", "amplitude_damping"
+            _qnode("default.qubit", None), 0.1, "all", channel="amplitude_damping"
         )
         assert torch.isfinite(noisy(torch.tensor(0.3, dtype=torch.float64)))
 
@@ -355,10 +393,36 @@ class TestDampingTrajectories:
                 )
         with pytest.raises(ValueError, match="no trajectory sampler"):
             trajectory_noise_qnode(
-                _qnode("default.qubit", "backprop"), 0.1, "all", "amplitude_damping"
+                _qnode("default.qubit", "backprop"), 0.1, "all", channel="amplitude_damping"
             )
         # The density method does not need one.
         _layer(noise_level=0.1, noise_channel="amplitude_damping")
+
+    def test_apply_shots_refuses_train_mode_only(self) -> None:
+        # The weighted branches cannot be sampled, so the shot block leaves
+        # the exact trajectory QNode alone and the layer refuses to train on
+        # it; eval mode, where training noise is off, samples as usual.
+        layer = _layer(
+            noise_level=0.1, noise_channel="amplitude_damping", noise_method="trajectories"
+        )
+        x = _x()
+        exact_noisy = layer._training_noise_qnode
+        with apply_shots(layer, 50):
+            assert layer._training_noise_qnode is exact_noisy
+            layer.eval()
+            with torch.no_grad():
+                sampled = layer(x)
+            # 50 shots give multiples of 1/25 in [-1, 1].
+            torch.testing.assert_close(sampled * 25, (sampled * 25).round(), atol=1e-4, rtol=0)
+            layer.train()
+            with pytest.raises(RuntimeError, match="unnormalised"):
+                layer(x)
+        # shots=None is exact, so the trajectories run.
+        with apply_shots(layer, None):
+            assert layer._training_noise_qnode is not exact_noisy
+            layer(x).sum().backward()
+        assert torch.isfinite(layer.qlayer.weights.grad).all()
+        assert layer._training_noise_qnode is exact_noisy
 
     def test_phase_damping_runs_under_adjoint(self) -> None:
         # A Pauli channel in disguise: unitary draws, so adjoint is fine.
@@ -402,7 +466,9 @@ class TestValidation:
     def test_unknown_channel_is_named(self) -> None:
         with pytest.raises(ValueError, match="noise_channel must be one of"):
             _layer(noise_channel="thermal")
-        with pytest.raises(ValueError, match="channel must be one of"):
+        # Anchored: unanchored, the pattern would also match the
+        # "noise_channel must be one of" message above.
+        with pytest.raises(ValueError, match="^channel must be one of"):
             model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
             noise_sweep(model, _x(), [0.1], channel="thermal")  # type: ignore[arg-type]
 
@@ -441,3 +507,13 @@ def test_classifiers_record_and_restore_the_channel(
     # Weight-safe: a channel can be swapped at load time for fine-tuning.
     swapped: Any = load_checkpoint(tmp_path / "m.pt", noise_channel="bit_flip")
     assert swapped.quantum_layer.noise_channel == "bit_flip"
+    # ... and the swapped channel is the one the train-mode forward applies,
+    # not only the recorded one: at the end, bit flip damps every readout by
+    # 1 − 2p where amplitude damping would give (1 − p)⟨Z⟩ + p.
+    end: Any = load_checkpoint(tmp_path / "m.pt", noise_channel="bit_flip", noise_position="end")
+    layer = end.quantum_layer
+    x = torch.rand(4, layer.n_features, generator=torch.Generator().manual_seed(1)) * 4 - 2
+    with torch.no_grad():
+        clean = layer.eval()(x)
+        noisy = layer.train()(x)
+    torch.testing.assert_close(noisy, END_EFFECT["bit_flip"](clean, 0.1), atol=1e-5, rtol=0)

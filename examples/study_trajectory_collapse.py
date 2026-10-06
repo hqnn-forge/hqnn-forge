@@ -103,6 +103,7 @@ def _set_trajectory_noise(model: torch.nn.Module, p: float, position: str) -> No
                 layer.qlayer.qnode,  # type: ignore[union-attr]
                 p,
                 position,  # type: ignore[arg-type]
+                channel=layer.noise_channel,  # type: ignore[arg-type]
             )
 
 

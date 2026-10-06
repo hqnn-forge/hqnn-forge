@@ -23,6 +23,11 @@ build_amplitude_qnode   Factory for the amplitude-embedding QNode.
 DataReuploadingLayer    nn.Module: angle embedding repeated before every layer.
 build_data_reuploading_qnode  Factory for the data re-uploading QNode.
 
+Backend choice:
+
+resolve_backend         What device_name="auto" and diff_method="auto" become.
+AUTO_BACKPROP_MAX_QUBITS  Largest circuit "auto" runs on default.qubit with backprop.
+
 Circuit building blocks shared by the encoders:
 
 apply_variational_layers  The entangler + Rot blocks, inside a QNode.
@@ -30,9 +35,19 @@ readout_wires           Wires measured under a readout option.
 measure_z               The ⟨Z_i⟩ measurements a circuit returns.
 input_scaling_shape     Shape of the re-uploading QNode's input_scaling weights.
 
+The encoder interface:
+
+EncodingLayer           Protocol: qlayer, n_qubits, n_features, prepare_inputs;
+                        forward is qlayer(prepare_inputs(x)).  The contract is
+                        spelled out in hqnn_forge._encoding_contract.
+CircuitLayer            Protocol: qlayer and n_qubits, the minimum the
+                        diagnostics accept.
+is_encoding_layer       Runtime check for EncodingLayer (isinstance cannot do it).
+is_circuit_layer        Runtime check for CircuitLayer.
+
 Option types, for annotating calls:
 
-DeviceName              Literal of the supported PennyLane devices.
+DeviceName              Any PennyLane device name (``str``); see ``KNOWN_DEVICES``.
 DiffMethod              Literal of the supported differentiation methods.
 Entangler               Literal of the entangler options.
 Position                Literal of where training noise is inserted (from hqnn_forge.noise).
@@ -40,6 +55,13 @@ Readout                 Literal of the readout options.
 RotationAxis            Literal of the embedding rotation axes.
 """
 
+from hqnn_forge._encoding_contract import (
+    CircuitLayer,
+    EncodingLayer,
+    is_circuit_layer,
+    is_encoding_layer,
+)
+from hqnn_forge.encoding._common import AUTO_BACKPROP_MAX_QUBITS, resolve_backend
 from hqnn_forge.encoding.amplitude_embedding import (
     AmplitudeEncodingLayer,
     build_amplitude_qnode,
@@ -66,11 +88,14 @@ from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer, build_iqp_qnode
 from hqnn_forge.noise import Position
 
 __all__: list[str] = [
+    "AUTO_BACKPROP_MAX_QUBITS",
     "AmplitudeEncodingLayer",
     "AngleEmbeddingQNode",
+    "CircuitLayer",
     "DataReuploadingLayer",
     "DeviceName",
     "DiffMethod",
+    "EncodingLayer",
     "Entangler",
     "IQPEncodingLayer",
     "Position",
@@ -83,6 +108,9 @@ __all__: list[str] = [
     "build_encoding_qnode",
     "build_iqp_qnode",
     "input_scaling_shape",
+    "is_circuit_layer",
+    "is_encoding_layer",
     "measure_z",
     "readout_wires",
+    "resolve_backend",
 ]

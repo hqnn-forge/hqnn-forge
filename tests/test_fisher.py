@@ -22,7 +22,9 @@ z = w·⟨Z⟩ + b the Bernoulli Fisher matrix is the rank-one
 from __future__ import annotations
 
 import math
+from typing import TypedDict
 
+import pennylane as qml
 import pytest
 import torch
 
@@ -35,10 +37,17 @@ from hqnn_forge.diagnostics import (
     fisher_information_spectrum,
 )
 from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 
-CPU = {"device_name": "default.qubit", "diff_method": "backprop"}
+
+class _Backend(TypedDict):
+    device_name: DeviceName
+    diff_method: DiffMethod
+
+
+CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
 WEIGHTS = torch.tensor([[[0.3, 0.7, 1.1], [0.2, 1.9, 0.5]]])  # (1 layer, 2 qubits, φ θ ω)
 THETA = (0.7, 1.9)
 
@@ -443,3 +452,71 @@ class TestEffectiveDimension:
             for _ in range(2)
         )
         assert (a == again) is True
+
+
+# ---------------------------------------------------------------------------
+# Circuit executions per Fisher matrix (#223)
+# ---------------------------------------------------------------------------
+
+
+def _lightning_works() -> bool:
+    try:
+        qml.device("lightning.qubit", wires=1)
+    except Exception:  # noqa: BLE001 - any failure means "not installed"
+        return False
+    return True
+
+
+def _executions(model: torch.nn.Module, X: torch.Tensor) -> int:
+    layer = getattr(model, "quantum_layer", model)
+    qlayer = layer.qlayer
+    assert isinstance(qlayer, qml.qnn.TorchLayer)
+    with qml.Tracker(qlayer.qnode.device) as tracker:
+        fisher_information_matrix(model, X)
+    return int(tracker.totals["executions"])
+
+
+class TestExecutionCount:
+    """
+    The k backward passes per row reuse the forward's Jacobian, so the cost in
+    circuit executions does not grow with the number of outputs.
+    """
+
+    @pytest.mark.parametrize("diff_method", ["backprop", "adjoint"])
+    @pytest.mark.parametrize("readout", ["all", "first"])
+    def test_one_execution_per_row_on_default_qubit(self, diff_method: str, readout: str) -> None:
+        torch.manual_seed(0)
+        layer = QuantumEncodingLayer(
+            n_qubits=3,
+            n_layers=2,
+            readout=readout,  # type: ignore[arg-type]
+            device_name="default.qubit",
+            diff_method=diff_method,  # type: ignore[arg-type]
+        )
+        assert _executions(layer, torch.rand(5, 3)) == 5
+
+    def test_classifier_on_default_qubit(self) -> None:
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(4, 3, 2, device_name="default.qubit", diff_method="adjoint")
+        assert _executions(model, torch.rand(5, 4)) == 5
+
+    @pytest.mark.skipif(not _lightning_works(), reason="pennylane-lightning not installed")
+    def test_two_executions_per_row_on_lightning(self) -> None:
+        # The forward pass, and the adjoint Jacobian its three outputs share.
+        torch.manual_seed(0)
+        layer = QuantumEncodingLayer(
+            n_qubits=3, n_layers=2, device_name="lightning.qubit", diff_method="adjoint"
+        )
+        assert layer.qlayer.qnode.device.name == "lightning.qubit"
+        assert _executions(layer, torch.rand(5, 3)) == 10
+
+    def test_parameter_shift_repeats_its_shifts_per_output(self) -> None:
+        # The one real k factor: per row, the forward plus 2d shifted circuits
+        # for each of the k = 3 outputs, d = 2 layers x 3 qubits x 3 angles.
+        torch.manual_seed(0)
+        layer = QuantumEncodingLayer(
+            n_qubits=3, n_layers=2, device_name="default.qubit", diff_method="parameter-shift"
+        )
+        d = layer.qlayer.weights.numel()
+        assert d == 18
+        assert _executions(layer, torch.rand(5, 3)) == 5 * (1 + 3 * 2 * d)  # 545

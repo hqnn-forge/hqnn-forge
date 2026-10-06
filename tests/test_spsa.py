@@ -97,6 +97,34 @@ class TestSteps:
             opt.step(lambda: 2.0 * theta.sum())
             assert abs(before - theta.item()) == pytest.approx(0.8 / (k + 1 + 3.0) ** 0.602 * 2.0)
 
+    def test_perturbation_follows_its_schedule(self) -> None:
+        # With L = θ³, a central difference is not exact: ĝ = (3θ² + c_k²)Δ,
+        # so the step a_k (3θ² + c_k²) reveals c_k = c / (k + 1)^gamma (with no
+        # stability term, which only a_k has).  Non-default gamma and A.
+        theta = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+        lr, c, alpha, gamma, stability = 0.05, 0.4, 0.602, 0.3, 2.0
+        opt = SPSA([theta], lr=lr, perturbation=c, alpha=alpha, gamma=gamma, stability=stability)
+        for k in range(6):
+            before = theta.item()
+            opt.step(lambda: (theta**3).sum())
+            a_k = lr / (k + 1 + stability) ** alpha
+            c_k = c / (k + 1) ** gamma
+            expected = a_k * (3 * before**2 + c_k**2)
+            assert abs(before - theta.item()) == pytest.approx(expected, rel=1e-12)
+
+    def test_parameter_groups_take_their_own_perturbation(self) -> None:
+        # L = a³ at a = b = 0: L+ − L− = 2 c_a³ Δ_a, so ĝ_a = c_a² and
+        # |ĝ_b| = c_a³ / c_b, each from its own group's perturbation.
+        a = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+        b = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+        opt = SPSA(
+            [{"params": [a], "perturbation": 0.5}, {"params": [b], "perturbation": 0.2}],
+            perturbation=0.1,
+        )
+        g_a, g_b = opt.gradient_estimate(lambda: (a**3).sum())
+        assert g_a.item() == pytest.approx(0.5**2, rel=1e-12)
+        assert abs(g_b.item()) == pytest.approx(0.5**3 / 0.2, rel=1e-12)
+
     def test_parameter_groups_take_their_own_lr(self) -> None:
         a = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
         b = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
@@ -113,6 +141,23 @@ class TestSteps:
                 opt.step(loss)
             results.append(theta.detach().clone())
         torch.testing.assert_close(results[0], results[1], rtol=0, atol=0)
+
+    def test_default_directions_follow_torch_manual_seed(self) -> None:
+        # Without a generator, the directions are seeded from torch.initial_seed():
+        # the same under the same torch.manual_seed, different under another,
+        # and building the optimiser leaves the global RNG where it was.
+        def directions(seed: int) -> torch.Tensor:
+            torch.manual_seed(seed)
+            theta = torch.nn.Parameter(torch.zeros(64, dtype=torch.float64))
+            before = torch.get_rng_state()
+            opt = SPSA([theta], perturbation=1.0)
+            assert torch.equal(torch.get_rng_state(), before)
+            (g,) = opt.gradient_estimate(lambda: theta[0])
+            return g  # Δ_0 Δ, the direction up to sign
+
+        torch.testing.assert_close(directions(1), directions(1), rtol=0, atol=0)
+        d1, d2 = directions(1), directions(2)
+        assert not torch.equal(d1, d2) and not torch.equal(d1, -d2)
 
     def test_frozen_parameters_are_left_alone(self) -> None:
         theta, _, loss = _quadratic(3)
@@ -138,6 +183,37 @@ class TestCommonRandomNumbers:
             delta = g / g.abs().max()  # the ±1 direction, up to sign
             torch.testing.assert_close(g, (w * delta).sum() * delta, rtol=1e-9, atol=1e-9)
 
+    def test_cuda_rng_is_restored_between_the_evaluations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dropout mask on a CUDA model is drawn from CUDA's RNG, so the second
+        # evaluation must start from the CUDA state the first started from.
+        # Faked, so this runs without a GPU: each "evaluation" draws by
+        # advancing the fake CUDA state.
+        cuda = {"state": [torch.tensor([0])]}
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: list(cuda["state"]))
+        monkeypatch.setattr(
+            torch.cuda, "set_rng_state_all", lambda states: cuda.update(state=list(states))
+        )
+        seen = []
+        theta = torch.nn.Parameter(torch.zeros(2))
+
+        def loss() -> torch.Tensor:
+            seen.append(int(cuda["state"][0]))
+            cuda["state"] = [cuda["state"][0] + 1]
+            return theta.sum()
+
+        SPSA([theta]).step(loss)
+        assert seen == [0, 0]
+
+    @pytest.mark.may_skip  # no CUDA device on the CI runners
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+    def test_steps_a_cuda_parameter(self) -> None:
+        theta = torch.nn.Parameter(torch.zeros(3, device="cuda"))
+        SPSA([theta]).step(lambda: (theta**2).sum() + theta.sum())
+        assert theta.device.type == "cuda" and bool(theta.ne(0).all())
+
 
 class TestValidation:
     @pytest.mark.parametrize(
@@ -152,6 +228,23 @@ class TestValidation:
     def test_bad_settings(self, kwargs: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             SPSA([torch.nn.Parameter(torch.zeros(1))], **kwargs)
+
+    @pytest.mark.parametrize(
+        "override, match",
+        [
+            ({"perturbation": 0.0}, "perturbation must be > 0"),
+            ({"lr": -0.1}, "lr must be > 0"),
+            ({"gamma": 0.0}, "alpha and gamma"),
+        ],
+    )
+    def test_bad_group_settings(self, override: dict[str, Any], match: str) -> None:
+        good = {"params": [torch.nn.Parameter(torch.zeros(1))]}
+        with pytest.raises(ValueError, match=match):
+            SPSA([good, {"params": [torch.nn.Parameter(torch.zeros(1))], **override}])
+        opt = SPSA([good])
+        with pytest.raises(ValueError, match=match):
+            opt.add_param_group({"params": [torch.nn.Parameter(torch.zeros(1))], **override})
+        assert len(opt.param_groups) == 1
 
     def test_step_needs_a_closure(self) -> None:
         with pytest.raises(ValueError, match="needs a closure"):
@@ -377,3 +470,28 @@ class TestGradientOptimizer:
         opt = SPSA([theta], gradient_optimizer=torch.optim.SGD([h], lr=1.0))
         with pytest.raises(ValueError, match="loss tensor"):
             opt.step(lambda: float((theta + h).sum().detach()))
+
+
+def test_multiclass_labels_are_checked_before_the_first_spsa_step() -> None:
+    # train_model checks multiclass labels on the first logits; with SPSA the
+    # first logits come from its closure, which runs before any update.
+    from hqnn_forge.models import MulticlassHybridClassifier
+
+    torch.manual_seed(0)
+    model = MulticlassHybridClassifier(
+        n_input_features=4,
+        n_qubits=2,
+        n_layers=1,
+        n_classes=3,
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
+    before = [p.detach().clone() for p in model.parameters()]
+    opt = SPSA(model.parameters(), lr=1.0, perturbation=0.1)
+    x, y = torch.randn(6, 4), torch.tensor([0, 1, 2, 3, 0, 1])
+    with pytest.raises(ValueError, match="needs class labels in"):
+        train_model(model, torch.nn.CrossEntropyLoss(), opt, x, y, max_epochs=1)
+    assert all(torch.equal(a, b) for a, b in zip(before, model.parameters(), strict=True))
+    y_ok = torch.tensor([0, 1, 2, 2, 0, 1])
+    history = train_model(model, torch.nn.CrossEntropyLoss(), opt, x, y_ok, max_epochs=1)
+    assert history.n_epochs == 1

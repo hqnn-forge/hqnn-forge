@@ -12,6 +12,16 @@
 # `--force-exclude` keeps ruff's own exclusions in effect when pre-commit
 # passes file names explicitly.
 repos:
+  # Refuses a commit that adds a file over the limit: a non-redistributable
+  # dataset, a checkpoint or a plot dump (#220).  The largest tracked file is
+  # uv.lock at about 480 KB, so 1000 KB leaves it headroom.  CI runs the same
+  # limit, read from this line, over every tracked file
+  # (.github/scripts/check_large_files.py), since hooks are opt-in per clone.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
   - repo: local
     hooks:
       - id: ruff-check
