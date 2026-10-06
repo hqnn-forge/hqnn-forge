@@ -55,6 +55,7 @@ def test_angle_embedding_still_exports_what_it_used_to() -> None:
         "check_inputs",
         "measure_z",
         "readout_wires",
+        "reset_device_fallback",
         "validate_circuit_options",
         "variational_weight_shape",
     ):

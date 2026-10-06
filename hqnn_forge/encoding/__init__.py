@@ -35,9 +35,19 @@ readout_wires           Wires measured under a readout option.
 measure_z               The ⟨Z_i⟩ measurements a circuit returns.
 input_scaling_shape     Shape of the re-uploading QNode's input_scaling weights.
 
+The encoder interface:
+
+EncodingLayer           Protocol: qlayer, n_qubits, n_features, prepare_inputs;
+                        forward is qlayer(prepare_inputs(x)).  The contract is
+                        spelled out in hqnn_forge._encoding_contract.
+CircuitLayer            Protocol: qlayer and n_qubits, the minimum the
+                        diagnostics accept.
+is_encoding_layer       Runtime check for EncodingLayer (isinstance cannot do it).
+is_circuit_layer        Runtime check for CircuitLayer.
+
 Option types, for annotating calls:
 
-DeviceName              Literal of the supported PennyLane devices.
+DeviceName              Any PennyLane device name (``str``); see ``KNOWN_DEVICES``.
 DiffMethod              Literal of the supported differentiation methods.
 Entangler               Literal of the entangler options.
 Position                Literal of where training noise is inserted (from hqnn_forge.noise).
@@ -45,6 +55,12 @@ Readout                 Literal of the readout options.
 RotationAxis            Literal of the embedding rotation axes.
 """
 
+from hqnn_forge._encoding_contract import (
+    CircuitLayer,
+    EncodingLayer,
+    is_circuit_layer,
+    is_encoding_layer,
+)
 from hqnn_forge.encoding._common import AUTO_BACKPROP_MAX_QUBITS, resolve_backend
 from hqnn_forge.encoding.amplitude_embedding import (
     AmplitudeEncodingLayer,
@@ -75,9 +91,11 @@ __all__: list[str] = [
     "AUTO_BACKPROP_MAX_QUBITS",
     "AmplitudeEncodingLayer",
     "AngleEmbeddingQNode",
+    "CircuitLayer",
     "DataReuploadingLayer",
     "DeviceName",
     "DiffMethod",
+    "EncodingLayer",
     "Entangler",
     "IQPEncodingLayer",
     "Position",
@@ -90,6 +108,8 @@ __all__: list[str] = [
     "build_encoding_qnode",
     "build_iqp_qnode",
     "input_scaling_shape",
+    "is_circuit_layer",
+    "is_encoding_layer",
     "measure_z",
     "readout_wires",
     "resolve_backend",

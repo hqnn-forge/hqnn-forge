@@ -120,10 +120,15 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "inner_seed": f.inner_seed,
             "smote_seed": f.smote_seed,
             "init_seed": f.init_seed,
+            "seed_index": f.seed_index,
             "batch_seed": f.batch_seed,
             "device": f.device,
+            "hyperparameters": f.hyperparameters,
+            "noise_mcc": {repr(level): mcc for level, mcc in f.noise_mcc.items()},
             "threshold": f.threshold,
             "mcc": f.mcc,
+            "brier": f.brier,
+            "ece": f.ece,
             "epochs": f.epochs,
             "train_seconds": f.train_seconds,
         }
@@ -142,6 +147,7 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
                         "dataset": f.dataset,
                         "model": f.model,
                         "fold": f.fold,
+                        "seed_index": f.seed_index,
                         "split_seed": f.split_seed,
                         "inner_seed": f.inner_seed,
                         "smote_seed": f.smote_seed,
@@ -154,6 +160,8 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "datasets": result.datasets,
             "folds": folds,
             "metrics": result.records,
+            "noise": result.noise,
+            "noise_summary": result.noise_summary,
         }
     )
 
@@ -269,7 +277,7 @@ def rerun_benchmark(
         one, or if the rebuilt models' configs differ from the recorded ones.
     """
     from hqnn_forge import models as model_module
-    from hqnn_forge.benchmark import fingerprint, run_benchmark
+    from hqnn_forge.benchmark import Tuning, fingerprint, run_benchmark
 
     recorded_data = record["datasets"]
     if list(datasets) != list(recorded_data):
@@ -311,6 +319,11 @@ def rerun_benchmark(
         patience=settings["patience"],
         random_state=settings["random_state"],
         smote_kwargs=settings["smote_kwargs"],
+        n_seeds=settings.get("n_seeds", 1),
+        tuning=None if settings.get("tuning") is None else Tuning(**settings["tuning"]),
+        noise_levels=settings.get("noise_levels"),
+        noise_position=settings.get("noise_position", "all"),
+        alpha=settings.get("alpha", 0.05),
     )
     rebuilt = _plain(result.models)
     if rebuilt != recorded_models:

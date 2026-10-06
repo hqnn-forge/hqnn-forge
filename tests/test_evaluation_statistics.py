@@ -24,10 +24,10 @@ from hqnn_forge.evaluation import (
     statistics,
     wilcoxon_signed_rank,
 )
-from hqnn_forge.evaluation.statistics import EXACT_MAX_N, _average_ranks
+from hqnn_forge.evaluation.statistics import EXACT_MAX_N, Alternative, _average_ranks
 
 
-def _brute_force_p(diffs: np.ndarray, alternative: str) -> float:
+def _brute_force_p(diffs: np.ndarray, alternative: Alternative) -> float:
     """Enumerate all 2^n sign flips of the observed |d| ranks."""
     d = diffs[diffs != 0]
     ranks = _average_ranks(np.abs(d))
@@ -36,9 +36,9 @@ def _brute_force_p(diffs: np.ndarray, alternative: str) -> float:
         sum(r for r, s in zip(ranks, signs) if s)
         for signs in itertools.product([0, 1], repeat=len(d))
     ]
-    stats = np.array(stats)
-    upper = np.mean(stats >= observed - 1e-9)
-    lower = np.mean(stats <= observed + 1e-9)
+    null = np.array(stats)
+    upper = np.mean(null >= observed - 1e-9)
+    lower = np.mean(null <= observed + 1e-9)
     return {"greater": upper, "less": lower, "two-sided": min(1.0, 2 * min(upper, lower))}[
         alternative
     ]
@@ -122,7 +122,7 @@ class TestWilcoxon:
         assert res.n == 2
 
     @pytest.mark.parametrize("alternative", ["two-sided", "greater", "less"])
-    def test_matches_brute_force_with_ties(self, alternative: str) -> None:
+    def test_matches_brute_force_with_ties(self, alternative: Alternative) -> None:
         # Eighths, so the differences are exact in binary floating point and
         # the intended tie group really forms: six |d| = 0.25, one 0.5, one zero.
         a = np.array([0.375, 0.625, 0.250, 1.000, 0.500, 0.125, 0.875, 0.750])
@@ -134,7 +134,7 @@ class TestWilcoxon:
         assert res.p_value == pytest.approx(_brute_force_p(a - b, alternative), abs=1e-12)
 
     @pytest.mark.parametrize("alternative", ["two-sided", "greater", "less"])
-    def test_matches_scipy_without_ties(self, alternative: str) -> None:
+    def test_matches_scipy_without_ties(self, alternative: Alternative) -> None:
         stats = pytest.importorskip("scipy.stats")
         rng = np.random.default_rng(1)
         for n in (5, 9, 20):

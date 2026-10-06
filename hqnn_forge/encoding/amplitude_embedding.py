@@ -34,11 +34,45 @@ Design Rationale
   differentiate the Möttönen rotation-gate decomposition of the state
   preparation, whose angles are ``arcsin`` of amplitude ratios.  That
   derivative is infinite when an amplitude is zero and ill-conditioned when
-  it is merely small next to its partner, so PennyLane silently returns an
-  input gradient that is **NaN** (an exactly-zero amplitude, or in float32
-  one below about 1e-4 of its partner) or **finite but wrong** (near that
-  edge, and for ``finite-diff`` whenever an amplitude is smaller than its
-  step).  ``adjoint`` on ``default.qubit`` returns **zero** for every input.
+  it is merely small next to its partner.  How PennyLane fails there
+  depends on its version, but it never raises.  Measured on 0.45.1 and on
+  the 0.46.0.dev114 nightly (0.46 itself is not released yet), on the
+  three-qubit circuit the tests pin, where amplitudes ``2k`` and ``2k + 1``
+  form a pair:
+
+  - On 0.45 the input gradient is **NaN** in every component as soon as one
+    amplitude is exactly zero, which zero padding makes true of every
+    sample.  It is also NaN when the first amplitude of a pair is merely
+    small next to the second: below about 1e-4 of it in float32, and in
+    float64 somewhere between 1e-6 and 1e-8 of it.  Short of that edge it is
+    **finite but wrong**: in float32 off by 1e-4 at 1e-2 of the second and
+    by 0.2 at 3e-4, in float64 by 5e-5 at 1e-6.  A small second amplitude
+    does no harm.
+  - On the 0.46 pre-releases one small amplitude next to a larger partner
+    differentiates correctly, and what an exactly-zero amplitude does
+    depends on its partner.  If the partner is zero too, as with two or more
+    padded amplitudes, the gradient is still **NaN** in every component.  If
+    it is not, the gradient is **finite but wrong**: the zero amplitude's
+    own component comes back as 0, which it is not, and the others are
+    right.  A single padded amplitude is therefore harmless there, its
+    component being discarded, but a feature that is exactly zero, such as
+    a ReLU output of a classical encoder, silently gets no gradient, which
+    is worse than a NaN.
+  - On both, a pair that is small as a whole breaks the gradient without
+    any exact zero, if it is the first pair of its group of four (amplitudes
+    ``4k`` and ``4k + 1``) and small next to the second.  Measured on
+    amplitudes 4 and 5 under ``parameter-shift``: in float32 the gradient is
+    **finite but wrong** (off by 5e-2) when the pair is about 1e-4 of the
+    others and **NaN** at 1e-5; in float64 it is off by 9e-5 at 1e-7 and
+    NaN at 1e-10.  A small second pair leaves ``parameter-shift`` right.
+  - On both, ``parameter-shift``, ``finite-diff`` and lightning's
+    ``adjoint`` agree with each other on single small and zero amplitudes.
+    Around a small pair, first or second and in either dtype, the latter
+    two lose accuracy where ``parameter-shift`` is still right: with the
+    pair at 1e-5 of the others they are off by between 1e-5 and 2e-3.
+    ``adjoint`` on ``default.qubit`` returns **zero** for every input they
+    handle and NaN wherever they return NaN.
+
   Which inputs are affected depends on the data, so no per-batch check can
   catch them reliably.
 
@@ -83,10 +117,12 @@ from hqnn_forge.encoding._common import (
     resolve_device,
     shots_repr,
     validate_circuit_options,
+    validate_device_shots,
+    validate_seed,
     validate_shots,
     variational_weight_shape,
 )
-from hqnn_forge.noise import NoiseMethod, Position, TrainingNoiseMixin
+from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +255,7 @@ def build_amplitude_qnode(
     device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits, seed=seed)
+    validate_device_shots(device, shots)
     circuit_fn = _make_amplitude_embedding_circuit(
         n_qubits, n_layers, diff_method, entangler, readout
     )
@@ -311,32 +348,41 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
     device_name:
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see
-        :func:`~hqnn_forge.encoding.resolve_backend`).  The four simulators
-        fall back along ``lightning.qubit → default.qubit`` with a warning
-        when a backend cannot be initialised; any other name (a plugin or
-        hardware) is used as given.
+        :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
+        ``lightning.qubit → default.qubit`` with a warning per step when
+        unavailable; any other name (a plugin or hardware) is constructed as
+        given, and PennyLane's error surfaces if it cannot be.  Hardware
+        needs ``shots`` and ``diff_method="parameter-shift"``.
     diff_method:
         Gradient method, ``"auto"`` by default.  See *Differentiation
         methods* above.
     entangler:
-        The variational block: ``"ring"`` (default), ``"strongly_entangling"``
-        or ``"hardware_efficient"``; see
+        The variational block: ``"ring"`` (default), ``"strongly_entangling"``,
+        ``"brickwork"`` or ``"hardware_efficient"``; see
         :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``.
-    noise_level, noise_position, noise_method, noise_trajectories:
-        Training-time depolarizing noise, exactly as for
+    noise_level, noise_position, noise_method, noise_trajectories, noise_channel:
+        Training-time noise, exactly as for
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: ``noise_level``
-        in ``[0, 0.75]`` (default 0, noiseless) applied in train mode only,
-        at ``"all"`` gates or at the ``"end"``, simulated exactly
-        (``"density"``) or by Pauli trajectories.  See :mod:`hqnn_forge.noise`.
+        is the strength of ``noise_channel`` (default ``"depolarizing"``), in
+        ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping and flip
+        channels (default 0, noiseless), applied in train mode only, at
+        ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
+        or by Pauli trajectories (the Pauli channels only).  See
+        :mod:`hqnn_forge.noise`.
+    shots, seed:
+        Finite-shot sampling and the device seed, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
 
     Attributes
     ----------
     n_qubits : int
     n_layers : int
     n_features : int
+        Width of the input, before padding to ``n_amplitudes``.
     n_amplitudes : int
         ``2**n_qubits``.
     qlayer : pennylane.qnn.TorchLayer
@@ -359,6 +405,12 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
     torch.Size([4, 3])
     """
 
+    #: Re-applied by :func:`hqnn_forge.noise.apply_shots`, whose
+    #: parameter-shift QNode replays this circuit function: the check built
+    #: into it holds the construction-time ``diff_method``, which under
+    #: ``backprop`` would let parameter-shift differentiate the inputs.
+    _input_gradient_check = staticmethod(_check_input_gradient)
+
     def __init__(
         self,
         n_qubits: int = 8,
@@ -373,6 +425,7 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         noise_method: NoiseMethod = "density",
         noise_trajectories: int = 1,
         shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
         seed: int | None = None,
     ) -> None:
         super().__init__()
@@ -419,9 +472,9 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
             noise_method,
             noise_trajectories,
             shots=shots,
+            noise_channel=noise_channel,
         )
-        self.shots = shots
-        self.seed = seed
+        self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:

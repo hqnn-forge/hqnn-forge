@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from hqnn_forge.diagnostics import circuit_summary
 from hqnn_forge.models import (
     ClassicalBaseline,
     HybridBinaryClassifier,
@@ -30,6 +31,11 @@ CPU: dict[str, Any] = dict(device_name="default.qubit", diff_method="backprop")
 
 def _hybrid(cls: type, **kwargs: Any) -> Any:
     return cls(**{"n_input_features": 30, "n_qubits": 8, "n_layers": 2, **CPU, **kwargs})
+
+
+def _live(hybrid: Any) -> int:
+    """The count ``classical_baseline`` matches: total minus inert circuit weights."""
+    return int(hybrid.count_parameters() - circuit_summary(hybrid).n_inert_params)
 
 
 def _same_weights(a: nn.Module, b: nn.Module) -> bool:
@@ -116,21 +122,36 @@ class TestBuilder:
 
     @pytest.mark.parametrize(
         "sizes",
-        [dict(), dict(n_input_features=5, n_qubits=3, n_layers=1), dict(n_layers=6)],
-        ids=["default", "small", "deep"],
+        [
+            dict(),
+            dict(n_input_features=5, n_qubits=3, n_layers=1),
+            dict(n_layers=6),
+            dict(readout="first"),
+        ],
+        ids=["default", "small", "deep", "first"],
     )
     def test_count_within_half_a_width_step(self, cls: type, sizes: dict) -> None:
-        """The documented tolerance: no integer width gets closer."""
+        """The documented tolerance, around the live count: no integer width
+        gets closer."""
         hybrid = _hybrid(cls, **sizes)
         control = classical_baseline(hybrid)
-        gap = abs(control.count_parameters() - hybrid.count_parameters())
+        gap = abs(control.count_parameters() - _live(hybrid))
         assert gap <= _step(control) / 2
+
+    def test_matched_on_the_live_count_not_the_total(self, cls: type) -> None:
+        """#234: the inert circuit weights are left out of the target."""
+        hybrid = _hybrid(cls, readout="first")
+        n_inert = circuit_summary(hybrid).n_inert_params
+        assert n_inert > 0
+        control = classical_baseline(hybrid)
+        target = hybrid.count_parameters() - n_inert
+        assert abs(control.count_parameters() - target) <= _step(control) / 2
 
     def test_no_neighbouring_width_is_closer(self, cls: type) -> None:
         hybrid = _hybrid(cls)
         control = classical_baseline(hybrid)
         n_in, dims = 30, control.get_config()["hidden_dims"]
-        target = hybrid.count_parameters()
+        target = _live(hybrid)
         gap = abs(control.count_parameters() - target)
         for delta in (-1, 1):
             other = [d + delta for d in dims]
@@ -201,9 +222,23 @@ class TestShapes:
         assert control.get_config()["activation"] == "relu"
 
     def test_published_shnn(self) -> None:
+        """122 trainable, 102 live by autograd (test_published_shnn_parity), 106
+        by the structural lower bound on the inert ones.  Both targets give the
+        same width, h = 10: 101 parameters, against 121 matched on the total."""
         hybrid = HybridBinaryClassifier.published_shnn(**CPU)
         assert hybrid.count_parameters() == 122
-        assert classical_baseline(hybrid).count_parameters() == 121
+        assert _live(hybrid) == 106
+        control = classical_baseline(hybrid)
+        assert control.get_config()["hidden_dims"] == [10]
+        assert control.count_parameters() == 101
+        n_in = control.get_config()["n_input_features"]
+        exact = min(range(1, 20), key=lambda h: (abs(mlp_parameter_count(n_in, [h]) - 102), h))
+        assert exact == 10
+
+    def test_published_parallel(self) -> None:
+        hybrid = ParallelHybridClassifier.published_shnn(**CPU)
+        assert (hybrid.count_parameters(), _live(hybrid)) == (554, 538)
+        assert classical_baseline(hybrid).count_parameters() == 523
 
     def test_other_models_are_refused(self) -> None:
         multiclass = MulticlassHybridClassifier(

@@ -62,7 +62,9 @@ from typing import Any, Literal
 import torch
 import torch.nn as nn
 
+from hqnn_forge._encoding_contract import CircuitLayer
 from hqnn_forge._resolve import resolve_encoding_layer
+from hqnn_forge.diagnostics.circuit import input_width
 from hqnn_forge.initializers import block_local_init_, restricted_normal_init_
 from hqnn_forge.initializers.restricted_variance import _not_restricting_ignored
 from hqnn_forge.utils.modes import eval_mode
@@ -77,6 +79,10 @@ CostFn = Callable[[torch.Tensor], torch.Tensor]
 class GradientVarianceResult:
     """
     Gradient-variance estimate for one layer configuration.
+
+    ``per_parameter`` and ``per_tensor`` are excluded from ``==`` and
+    ``hash``: comparing them would return a Tensor rather than a bool, so two
+    results compare on their scalar fields only.
 
     Attributes
     ----------
@@ -102,10 +108,6 @@ class GradientVarianceResult:
         Per-entry variance per trainable tensor, keyed by the TorchLayer
         argument name (``"weights"``, ``"input_scaling"``), each shaped like
         its tensor.
-
-    ``per_parameter`` and ``per_tensor`` are excluded from ``==`` and
-    ``hash``: comparing them would return a Tensor rather than a bool, so two
-    results compare on their scalar fields only.
     """
 
     layer_type: str
@@ -135,7 +137,7 @@ class GradientVarianceResult:
 
 def _resolve_layer(
     target: nn.Module, caller: str = "gradient_variance"
-) -> tuple[nn.Module, dict[str, torch.Tensor], int]:
+) -> tuple[CircuitLayer, dict[str, torch.Tensor], int]:
     """
     Return ``(layer, tensors, n_qubits)`` for the layer inside *target*.
     *caller* names the public function in the error messages.
@@ -153,7 +155,7 @@ def _resolve_layer(
 
 def _resolve_tensors(
     target: nn.Module, caller: str = "gradient_variance"
-) -> tuple[nn.Module, dict[str, torch.Tensor], str, int, int]:
+) -> tuple[CircuitLayer, dict[str, torch.Tensor], str, int, int]:
     """
     Return ``(layer, tensors, angles, n_qubits, n_layers)`` for the layer
     inside *target*, as :func:`_resolve_layer` does, plus the angle tensor.
@@ -261,8 +263,11 @@ def gradient_variance(
         means nothing for a scale factor, but its gradient is measured and
         counted in ``total_variance`` like the rest of the gradient vector.
     input_scale:
-        Inputs are uniform in ``[-input_scale, input_scale]``.  ``π`` matches
-        what the classifiers feed the circuit; ``0`` feeds zeros.
+        Inputs are uniform in ``[-input_scale, input_scale]``, one per input
+        feature (``n_features`` for the amplitude encoder, else one per
+        qubit), and go through the layer's ``prepare_inputs``.  ``π`` matches
+        what the classifiers feed the circuit; ``0`` feeds zeros, which the
+        amplitude encoder refuses (no state has zero norm).
     cost_fn:
         Maps the layer output of shape ``(1, n_qubits)`` to a scalar.
         Default: ⟨Z_0⟩.
@@ -280,6 +285,9 @@ def gradient_variance(
         raise ValueError(f"input_scale must be >= 0; got {input_scale}.")
     layer, tensors, angles, n_qubits, n_layers = _resolve_tensors(target)
     weights = tensors[angles]
+    # One value per input feature, which is not one per qubit for the
+    # amplitude encoder; forward's prepare_inputs pads and normalises them.
+    width = input_width(layer)
     gen = generator if generator is not None else torch.Generator().manual_seed(0)
     init_name, init_fn = _make_init(init, n_qubits, n_layers, gen)
     cost = cost_fn if cost_fn is not None else _local_z0
@@ -290,12 +298,15 @@ def gradient_variance(
         name: torch.empty((n_samples, *t.shape), dtype=torch.float64)
         for name, t in tensors.items()
     }
+    # resolve_encoding_layer checked this; the narrowing adds the module API
+    # the CircuitLayer protocol cannot declare.
+    assert isinstance(layer, nn.Module)
     try:
         with eval_mode(layer):
             for s in range(n_samples):
                 with torch.no_grad():
                     init_fn(weights)
-                x = (torch.rand(1, n_qubits, generator=gen) * 2 - 1) * input_scale
+                x = (torch.rand(1, width, generator=gen) * 2 - 1) * input_scale
                 for t in tensors.values():
                     t.grad = None
                 value = cost(layer(x))

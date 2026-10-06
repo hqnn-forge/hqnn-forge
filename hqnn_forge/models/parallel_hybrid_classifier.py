@@ -110,7 +110,7 @@ from hqnn_forge.models._trunk import (
 )
 from hqnn_forge.models.base import BinaryClassifierBase
 from hqnn_forge.models.hybrid_classifier import _PUBLISHED_SHNN
-from hqnn_forge.noise import NoiseMethod, Position
+from hqnn_forge.noise import Channel, NoiseMethod, Position
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
 
@@ -123,6 +123,11 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
     options and ``predict_proba`` / ``predict`` / ``count_parameters``
     interface.
 
+    The published SHNN (thesis / ``hqnn-fraud-detection-benchmark``) is
+    ``embedding_rotation="Y"``, ``entangler="strongly_entangling"``,
+    ``readout="first"``, ``encoder_activation="sigmoid"``,
+    ``init_strategy="normal"``; see :meth:`published_shnn`.
+
     Parameters
     ----------
     n_input_features:
@@ -133,7 +138,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         VQC ansatz layers.  Default: 2.  At 1, with angle encoding and
         ``readout="first"``, ⟨Z_0⟩ misses the first encoded angle under the
         default ring and RX embedding, and most of them under
-        ``entangler="brickwork"``; use 2 or more with a ring.  See step 2 of
+        ``entangler="brickwork"``; under ``"hardware_efficient"`` it sees at most
+        ``n_layers + 1`` of them at any depth.  Use 2 or more with a ring.  See step 2 of
         :func:`hqnn_forge.encoding.angle_embedding._make_angle_embedding_circuit`.
     classical_hidden_dim:
         Width of the classical MLP branch.  Default: 16.
@@ -173,12 +179,14 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
           classical encoder then maps to ``2**n_qubits`` features, and the
           ``·π`` scaling is irrelevant because the layer normalises.  Its
           input gradient is only correct under backprop, so with a classical
-          encoder it requires ``diff_method="backprop"`` (on
-          ``default.qubit``) and raises otherwise.  Without one, 1 to
-          ``2**n_qubits`` raw features are zero-padded.
+          encoder ``"auto"`` picks ``default.qubit``/backprop at any size, and
+          an explicit choice that resolves to another method raises.  Without
+          one, 1 to ``2**n_qubits`` raw features are zero-padded.
     embedding_rotation:
         Pauli axis of the angle embedding, ``"X"`` (default), ``"Y"`` or ``"Z"``.
-        Angle and re-uploading encodings only.
+        Angle and re-uploading encodings only.  ``"Z"`` raises under angle
+        encoding, since a single ``RZ`` embedding on ``|0⟩`` ignores the input;
+        under re-uploading it needs ``n_layers ≥ 2``.
     entangler:
         ``"ring"`` (default: CNOT ring then ``Rot``), ``"strongly_entangling"``
         (``qml.StronglyEntanglingLayers``: ``Rot`` then a CNOT ring of growing
@@ -198,13 +206,11 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         Standard deviation for ``init_strategy="normal"``.  Default: 0.1.
         Raises under the other strategies, which derive their own sigma.
 
-    The published SHNN (thesis / ``hqnn-fraud-detection-benchmark``) is
-    ``embedding_rotation="Y"``, ``entangler="strongly_entangling"``,
-    ``readout="first"``, ``encoder_activation="sigmoid"``,
-    ``init_strategy="normal"``; see :meth:`published_shnn`.
     noise_level:
-        Training-time depolarizing probability for the quantum layer, in
-        ``[0, 0.75]``.  Default: ``0.0`` (noiseless).  Applied in train mode
+        Training-time strength of ``noise_channel`` for the quantum layer: the
+        depolarizing probability in ``[0, 0.75]``, or the damping or flip
+        probability in ``[0, 1]`` for the other channels.  Default: ``0.0``
+        (noiseless).  Applied in train mode
         only.  With the default ``noise_method`` it runs on ``default.mixed``
         with backprop, whose memory grows as ``batch × 4^n_qubits`` per
         operation: practical up to about 6 qubits.  See :mod:`hqnn_forge.noise`.
@@ -243,10 +249,19 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
     shots:
         ``None`` (default): exact expectation values.  An ``int``: each circuit
         is sampled that many times, as on hardware, so predictions carry shot
-        noise.  Requires ``diff_method="parameter-shift"`` (or
-        ``"finite-diff"``); ``adjoint`` and ``backprop`` need the exact state.
+        noise.  ``diff_method="auto"`` then picks ``"parameter-shift"``, the
+        only method that works: ``adjoint`` and ``backprop`` need the exact
+        state, and ``finite-diff``'s tiny step turns the shot noise into
+        gradients of order 1e6.  The samples come from the device's own
+        generator, which ``torch.manual_seed`` does not reach: pass ``seed``
+        for a model with shots that repeats run to run.
         :func:`hqnn_forge.noise.apply_shots` evaluates a model with a finite
         shot count without rebuilding it.
+    noise_channel:
+        The channel ``noise_level`` is the strength of: ``"depolarizing"``
+        (default), ``"amplitude_damping"``, ``"phase_damping"``,
+        ``"bit_flip"`` or ``"phase_flip"``; see :mod:`hqnn_forge.noise`.  The
+        trajectory method samples the Pauli ones only.
     seed:
         Seed of the device's random generator, which draws the shot samples,
         so a shot-based model gives the same samples on every run.  Default
@@ -299,10 +314,12 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         noise_trajectories: int = 1,
         trainable_input_scaling: bool = False,
         shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
         seed: int | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
+        seed = as_seed(seed, "seed")
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
@@ -333,6 +350,7 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 noise_trajectories=noise_trajectories,
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
+                noise_channel=noise_channel,
                 seed=seed,
             )
 
@@ -373,6 +391,7 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 classical_encoder=classical_encoder,
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
+                noise_channel=noise_channel,
                 seed=seed,
             )
 
