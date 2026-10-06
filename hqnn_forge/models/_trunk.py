@@ -22,6 +22,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from hqnn_forge.encoding._common import resolve_backend
 from hqnn_forge.encoding.amplitude_embedding import AmplitudeEncodingLayer
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
@@ -85,6 +86,9 @@ def _check_encoding_options(
     diff_method: str,
     embedding_rotation: str,
     trainable_input_scaling: bool,
+    shots: int | None = None,
+    device_name: str | None = None,
+    requested_diff_method: str | None = None,
 ) -> int:
     """
     Raise ``ValueError`` for an option ``encoding_type`` cannot use; return the
@@ -93,6 +97,10 @@ def _check_encoding_options(
     The angle, IQP and re-uploading layers take one feature per qubit.  The
     amplitude layer takes up to ``2**n_qubits``: the classical encoder maps to
     all of them, and without it the raw features are zero-padded.
+
+    ``diff_method`` is the resolved method; ``requested_diff_method`` and
+    ``device_name``, when given, only word the error for an ``"auto"`` that
+    resolved to something else.
     """
     if encoding_type not in ENCODING_TYPES:
         raise ValueError(
@@ -116,10 +124,23 @@ def _check_encoding_options(
             # input gradient of the state preparation is NaN or silently wrong
             # under every other method (see hqnn_forge.encoding.amplitude_embedding).
             raise ValueError(
-                f"encoding_type='amplitude' with a classical encoder trains the encoder "
-                f"through the amplitude embedding, whose input gradient is only correct "
-                f"under diff_method='backprop' (on default.qubit); got "
-                f"diff_method={diff_method!r}."
+                "encoding_type='amplitude' with a classical encoder trains the encoder "
+                "through the amplitude embedding, whose input gradient is only correct "
+                "under diff_method='backprop' (on default.qubit); got "
+                + (
+                    f"diff_method='auto', which resolved to {diff_method!r}"
+                    if requested_diff_method == "auto"
+                    else f"diff_method={diff_method!r}"
+                )
+                + (
+                    ", which shots require: backprop cannot run on samples.  Use "
+                    "shots=None, or use_classical_encoder=False."
+                    if shots is not None
+                    else f" on device_name={device_name!r}.  Leave device_name='auto' "
+                    "or pass device_name='default.qubit'."
+                    if requested_diff_method == "auto"
+                    else "."
+                )
             )
         if not use_classical_encoder and not 1 <= n_input_features <= width:
             raise ValueError(
@@ -183,6 +204,7 @@ class QuantumTrunk(nn.Module):
         trainable_input_scaling: bool = False,
         shots: int | None = None,
         noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
     ) -> int:
         """
@@ -207,6 +229,17 @@ class QuantumTrunk(nn.Module):
                 "use_classical_encoder=True; use_classical_encoder=False feeds the "
                 "input to the circuit directly, with no encoder at all."
             )
+        # "auto" is resolved here rather than in the layer: amplitude encoding
+        # behind the classical encoder needs backprop at any size, and the
+        # layer alone cannot know what feeds it.
+        requested_diff_method = diff_method
+        device_name, diff_method = resolve_backend(
+            device_name,
+            diff_method,
+            n_qubits,
+            shots=shots,
+            require_backprop=encoding_type == "amplitude" and use_classical_encoder,
+        )
         width = _check_encoding_options(
             encoding_type,
             n_input_features=n_input_features,
@@ -215,6 +248,9 @@ class QuantumTrunk(nn.Module):
             diff_method=diff_method,
             embedding_rotation=embedding_rotation,
             trainable_input_scaling=trainable_input_scaling,
+            shots=shots,
+            device_name=device_name,
+            requested_diff_method=requested_diff_method,
         )
 
         self.n_input_features = n_input_features
@@ -260,6 +296,7 @@ class QuantumTrunk(nn.Module):
                 noise_trajectories=noise_trajectories,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
                 readout_error=readout_error,
             )
         elif encoding_type == "iqp":
@@ -277,6 +314,7 @@ class QuantumTrunk(nn.Module):
                 noise_trajectories=noise_trajectories,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
                 readout_error=readout_error,
             )
         elif encoding_type == "amplitude":
@@ -294,6 +332,7 @@ class QuantumTrunk(nn.Module):
                 noise_trajectories=noise_trajectories,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
                 readout_error=readout_error,
             )
         else:
@@ -312,6 +351,7 @@ class QuantumTrunk(nn.Module):
                 noise_trajectories=noise_trajectories,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
                 readout_error=readout_error,
             )
 

@@ -183,7 +183,7 @@ class TestFoldSafety:
             assert np.array_equal(fold.X_val, X[fold.val_idx])
             assert np.array_equal(fold.y_val, y[fold.val_idx])
             # prevalence of the validation split is the original one, not balanced
-            assert fold.y_val.mean() < 0.2
+            assert float(fold.y_val.mean()) < 0.2
 
     def test_training_split_is_oversampled(self, imbalanced: tuple) -> None:
         X, y = imbalanced

@@ -78,7 +78,7 @@ def _x() -> torch.Tensor:
 
 def _density(layer: Any, x: torch.Tensor, position: Position) -> torch.Tensor:
     """The exact channel's output for ``layer``'s weights, one sample at a time."""
-    noisy = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position)
+    noisy = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position, channel="depolarizing")
     weights = dict(layer.qlayer.qnode_weights)
     prepared = layer.prepare_inputs(x)
     return torch.stack([torch.stack(noisy(xi, **weights)) for xi in prepared]).detach()
@@ -127,7 +127,7 @@ def _tapes(position: Position, batch: int) -> tuple[qml.tape.QuantumScript, ...]
     x = torch.randn(batch, N_QUBITS, generator=torch.Generator().manual_seed(7))
     tape = qml.tape.make_qscript(layer.qlayer.qnode.func)(x, layer.qlayer.weights)
     (density,), _ = qml.noise.insert(tape, qml.DepolarizingChannel, P, position=position)
-    (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position)
+    (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position, channel="depolarizing")
     return density, trajectory
 
 
@@ -204,7 +204,9 @@ class TestTheSampler:
         layer = _layer(IQPEncodingLayer)
         tape = qml.tape.make_qscript(layer.qlayer.qnode.func)(_x()[0], layer.qlayer.weights)
         (density,), _ = qml.noise.insert(tape, qml.DepolarizingChannel, P, position=position)
-        (trajectory,), _ = _pauli_trajectories(tape, p=P, position=position)
+        (trajectory,), _ = _pauli_trajectories(
+            tape, p=P, position=position, channel="depolarizing"
+        )
         for rz, rx in _error_sites(density, trajectory):
             assert rz.data[0].shape == rx.data[0].shape == ()
 
@@ -225,7 +227,9 @@ class TestMatchesTheDensityMatrix:
         layer = _layer(cls, noise_level=P, noise_position=position, noise_method="trajectories")
         layer.train()
         x = _x()
-        density = training_noise_qnode(layer.qlayer.qnode, N_QUBITS, P, position)
+        density = training_noise_qnode(
+            layer.qlayer.qnode, N_QUBITS, P, position, channel="depolarizing"
+        )
         w = layer.qlayer.weights
         weights = dict(layer.qlayer.qnode_weights)
         prepared = layer.prepare_inputs(x)
@@ -326,7 +330,7 @@ class TestBehaviour:
     def test_trajectory_qnode_rejects_zero(self) -> None:
         layer = _layer()
         with pytest.raises(ValueError, match="needs p > 0"):
-            trajectory_noise_qnode(layer.qlayer.qnode, 0.0)
+            trajectory_noise_qnode(layer.qlayer.qnode, 0.0, channel="depolarizing")
 
 
 class TestValidation:
@@ -432,30 +436,45 @@ class TestClassifiers:
         assert eval_loss() < before
 
 
-@requires_lightning
-def test_library_defaults_train_within_the_noiseless_memory() -> None:
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        # The library default since #349: "auto" is default.qubit/backprop at 8 qubits.
+        ("", ("default.qubit", "backprop")),
+        # The default before #349, and what "auto" picks above 12 qubits.
+        pytest.param(
+            ', device_name="lightning.qubit", diff_method="adjoint"',
+            ("lightning.qubit", "adjoint"),
+            marks=requires_lightning,
+        ),
+    ],
+)
+def test_trajectories_train_within_the_noiseless_memory(
+    backend: str, expected: tuple[str, str]
+) -> None:
     # The point of #229: 8 qubits, 2 layers, noise after every gate, batch
-    # 64, lightning.qubit with adjoint.  The density method peaked at +2.7 GB
-    # here; trajectories measured +34 MB (+18 MB noiseless).  A fresh
-    # interpreter so the peak is this step's, not the test session's.
+    # 64.  The density method peaked at +2.7 GB here; trajectories measured
+    # +34 MB on lightning with adjoint (+18 MB noiseless) and +23 MB on
+    # default.qubit with backprop.  A fresh interpreter so the peak is this
+    # step's, not the test session's.
     script = textwrap.dedent(
-        """
+        f"""
         import json, resource, torch
-        from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+        from hqnn_forge.encoding import QuantumEncodingLayer
         torch.manual_seed(0)
         layer = QuantumEncodingLayer(
-            n_qubits=8, n_layers=2, noise_level=0.1, noise_method="trajectories"
+            n_qubits=8, n_layers=2, noise_level=0.1, noise_method="trajectories"{backend}
         )
         x = torch.randn(64, 8)
         base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         layer.train()
         layer(x).sum().backward()
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        print(json.dumps({
+        print(json.dumps({{
             "mb": (peak - base) / 1024,
             "grad": bool(layer.qlayer.weights.grad.abs().sum() > 0),
-            "device": layer.qlayer.qnode.device.name,
-        }))
+            "backend": [layer.qlayer.qnode.device.name, str(layer.qlayer.qnode.diff_method)],
+        }}))
         """
     )
     pytest.importorskip("resource")
@@ -463,5 +482,5 @@ def test_library_defaults_train_within_the_noiseless_memory() -> None:
         [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=300
     )
     report = json.loads(result.stdout.strip().splitlines()[-1])
-    assert report["device"] == "lightning.qubit" and report["grad"]
+    assert tuple(report["backend"]) == expected and report["grad"]
     assert report["mb"] < 300, report

@@ -15,10 +15,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pennylane as qml
 import pytest
 import torch
 
 from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding._common import resolve_device
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import (
     HybridBinaryClassifier,
@@ -38,6 +40,12 @@ LAYERS = [
     pytest.param(partial(AmplitudeEncodingLayer, n_features=5), 5, id="amplitude"),
     pytest.param(partial(DataReuploadingLayer, trainable_input_scaling=True), 3, id="reuploading"),
 ]
+
+
+def _on_shot_lattice(values: torch.Tensor, shots: int) -> bool:
+    """Whether every ⟨Z⟩ in ``values`` is ``(2k − shots) / shots``: a sampled estimate."""
+    k = (values.detach().double() * shots + shots) / 2
+    return bool(torch.allclose(k, k.round(), rtol=0, atol=1e-6))
 
 
 def _pair(factory: Any, shots: int) -> tuple[Any, Any]:
@@ -85,9 +93,9 @@ def test_sampled_gradients_are_unbiased() -> None:
 
 
 class TestValidation:
-    @pytest.mark.parametrize("diff_method", ["adjoint", "backprop"])
+    @pytest.mark.parametrize("diff_method", ["adjoint", "backprop", "finite-diff"])
     @pytest.mark.parametrize("factory, width", LAYERS)
-    def test_state_vector_methods_are_refused(
+    def test_exact_value_methods_are_refused(
         self, diff_method: str, factory: Any, width: int
     ) -> None:
         with pytest.raises(ValueError, match="use diff_method='parameter-shift'"):
@@ -108,7 +116,7 @@ class TestValidation:
         "cls", [HybridBinaryClassifier, ParallelHybridClassifier, MulticlassHybridClassifier]
     )
     def test_classifiers_validate_too(self, cls: type) -> None:
-        with pytest.raises(ValueError, match="needs the exact state vector"):
+        with pytest.raises(ValueError, match="needs exact ones"):
             cls(n_input_features=4, n_qubits=3, shots=100, **EXACT)
 
     def test_density_training_noise_ignores_shots_and_is_refused(self) -> None:
@@ -116,16 +124,20 @@ class TestValidation:
             QuantumEncodingLayer(n_qubits=3, n_layers=1, shots=100, noise_level=0.1, **SHIFT)
 
     def test_trajectory_training_noise_samples_on_the_shot_qnode(self) -> None:
+        # Five shots put every sampled ⟨Z⟩ on a coarse lattice no exact value
+        # of random weights lands on.
         layer = QuantumEncodingLayer(
             n_qubits=3,
             n_layers=1,
-            shots=100,
+            shots=5,
             noise_level=0.1,
             noise_method="trajectories",
             **SHIFT,
         )
         layer.train()
-        layer(torch.rand(2, 3)).sum().backward()
+        out = layer(torch.rand(4, 3))
+        assert _on_shot_lattice(out, 5)
+        out.sum().backward()
         assert layer.qlayer.weights.grad is not None
 
 
@@ -228,6 +240,53 @@ class TestApplyShots:
         with apply_depolarizing_noise(layer, 0.0):
             pass
 
+    def test_train_mode_trajectory_noise_samples_with_the_block_shots(self) -> None:
+        torch.manual_seed(0)
+        layer = QuantumEncodingLayer(
+            n_qubits=3, n_layers=1, noise_level=0.05, noise_method="trajectories", **EXACT
+        )
+        noise_qnode = layer._training_noise_qnode
+        x = torch.rand(4, 3)
+        layer.train()
+        assert not _on_shot_lattice(layer(x), 5)
+        with apply_shots(layer, 5):
+            out = layer(x)
+            assert _on_shot_lattice(out, 5)
+            out.sum().backward()
+            assert layer.qlayer.weights.grad is not None
+        assert layer._training_noise_qnode is noise_qnode
+
+    def test_train_mode_density_noise_is_refused_inside(self) -> None:
+        torch.manual_seed(0)
+        layer = QuantumEncodingLayer(n_qubits=3, n_layers=1, noise_level=0.05, **EXACT)
+        x = torch.rand(4, 3)
+        with apply_shots(layer, 5):
+            assert _on_shot_lattice(layer.eval()(x), 5)
+            with pytest.raises(RuntimeError, match="would ignore apply_shots"):
+                layer.train()(x)
+
+    def test_amplitude_input_gradients_stay_refused(self) -> None:
+        # Built under backprop, whose input gradient is exact; inside the
+        # block parameter-shift would differentiate the state preparation.
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(
+            n_input_features=4, n_qubits=2, n_layers=1, encoding_type="amplitude", **EXACT
+        )
+        x = torch.randn(4, 4)
+        with apply_shots(model, 50):
+            model.predict_proba(x)  # no input gradient: allowed
+            with pytest.raises(RuntimeError, match="cannot differentiate with respect"):
+                model(x)
+        model(x).sum().backward()  # backprop again outside
+
+    def test_shots_attribute_follows_the_block(self) -> None:
+        model = self._model()
+        assert model.quantum_layer.shots is None
+        with apply_shots(model, 40):
+            assert model.quantum_layer.shots == 40
+            assert "shots=40" in repr(model.quantum_layer)
+        assert model.quantum_layer.shots is None
+
     def test_errors_name_apply_shots(self) -> None:
         with (
             pytest.raises(TypeError, match="apply_shots expects"),
@@ -283,3 +342,67 @@ def test_any_pennylane_device_runs_a_layer() -> None:
     x = torch.rand(3, 2)
     with torch.no_grad():
         torch.testing.assert_close(mixed(x), exact(x), atol=1e-6, rtol=0)
+
+
+@pytest.mark.filterwarnings("ignore:Setting shots on device is deprecated")
+@pytest.mark.parametrize(
+    "layer_cls, module_name, kwargs, in_features",
+    [
+        (
+            QuantumEncodingLayer,
+            "hqnn_forge.encoding.angle_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            IQPEncodingLayer,
+            "hqnn_forge.encoding.iqp_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            AmplitudeEncodingLayer,
+            "hqnn_forge.encoding.amplitude_embedding",
+            {"n_features": 4, "n_qubits": 2, "n_layers": 1},
+            4,
+        ),
+        (
+            DataReuploadingLayer,
+            "hqnn_forge.encoding.data_reuploading",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+    ],
+)
+def test_finite_shot_device_rejection_and_sampled_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_cls: Any,
+    module_name: str,
+    kwargs: dict[str, Any],
+    in_features: int,
+) -> None:
+    def fake_resolve(
+        device_name: str, n_qubits: int, *, seed: int | None = None
+    ) -> qml.devices.Device:
+        if device_name == "custom.sampling.device":
+            return qml.device("default.qubit", wires=n_qubits, shots=10_000)
+        return resolve_device(device_name, n_qubits, seed=seed)
+
+    monkeypatch.setattr(f"{module_name}.resolve_device", fake_resolve)
+
+    with pytest.raises(ValueError, match="device samples"):
+        layer_cls(**kwargs, device_name="custom.sampling.device")
+
+    torch.manual_seed(0)
+    exact = layer_cls(**kwargs)
+    sampled = layer_cls(
+        **kwargs,
+        device_name="custom.sampling.device",
+        shots=10_000,
+        diff_method="parameter-shift",
+    )
+    sampled.load_state_dict(exact.state_dict())
+    x = torch.rand(2, in_features)
+    with torch.no_grad():
+        # each <Z> estimate has standard deviation <= 1/sqrt(10 000) = 0.01; allow 5 sigma
+        torch.testing.assert_close(sampled(x), exact(x), atol=0.05, rtol=0)

@@ -18,7 +18,7 @@ import functools
 import inspect
 import pickle
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -32,10 +32,11 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.estimator_checks import estimator_checks_generator
 
+import hqnn_forge.noise as noise_module
 from hqnn_forge.sklearn import HybridClassifierEstimator
 from hqnn_forge.training import train_model
 
-FAST = dict(
+FAST: dict[str, Any] = dict(
     n_qubits=2,
     n_layers=1,
     device_name="default.qubit",
@@ -86,7 +87,7 @@ class TestParams:
 
 class TestFitPredict:
     @pytest.mark.parametrize("model", ["serial", "parallel"])
-    def test_shapes_and_learning(self, data: tuple, model: str) -> None:
+    def test_shapes_and_learning(self, data: tuple, model: Literal["serial", "parallel"]) -> None:
         X, y = data
         est = HybridClassifierEstimator(model=model, **LEARN).fit(X, y)
         proba = est.predict_proba(X)
@@ -120,6 +121,7 @@ class TestFitPredict:
             **{**FAST, "validation_fraction": 0.25, "patience": 5}
         ).fit(X, y)
         assert est.history_.best_threshold is not None
+        assert est.threshold_ is not None
         assert est.threshold_ == pytest.approx(est.history_.best_threshold)
         np.testing.assert_array_equal(
             est.predict(X),
@@ -156,6 +158,7 @@ class TestFitPredict:
 
 
 class TestSklearnTooling:
+    @pytest.mark.slow  # three full fits
     def test_cross_val_score(self, data: tuple) -> None:
         X, y = data
         scores = cross_val_score(
@@ -194,13 +197,11 @@ class TestErrors:
         with pytest.raises(ValueError, match="features"):
             est.predict(X[:, :2])
 
-    def test_multiclass_rejected(self, data: tuple) -> None:
+    def test_one_class_rejected(self, data: tuple) -> None:
+        # More than two classes are supported since #309; one is not.
         X, _ = data
-        with pytest.raises(
-            ValueError,
-            match="Only binary classification is supported.  HybridClassifierEstimator got 3 classes",
-        ):
-            HybridClassifierEstimator(**FAST).fit(X, np.arange(80) % 3)
+        with pytest.raises(ValueError, match="needs at least two classes; got 1"):
+            HybridClassifierEstimator(**FAST).fit(X, np.zeros(80, dtype=int))
 
     @pytest.mark.parametrize(
         "params, match",
@@ -309,9 +310,11 @@ MAY_SKIP_CHECKS: dict[str, str] = {
 
 def _conformance_estimator() -> HybridClassifierEstimator:
     # check_classifiers_train requires training accuracy > 0.83 on its own
-    # toy problem; 2 epochs fall short, 30 pass with margin at this seed.
+    # toy problems, binary and (with the multiclass tag) 3-class blobs; 2
+    # epochs fall short, 30 pass with margin at this seed.  Two qubits reach
+    # only 0.77 on the 3-class problem (0.82 at 60 epochs); three reach 0.91.
     return HybridClassifierEstimator(
-        n_qubits=2,
+        n_qubits=3,
         n_layers=1,
         device_name="default.qubit",
         diff_method="backprop",
@@ -334,6 +337,10 @@ def _check_name(check: Any) -> str:
     return getattr(check, "func", check).__name__
 
 
+# Checks that fit to convergence several times over: 3-4 s per case (#323).
+SLOW_CHECKS = frozenset({"check_classifiers_train"})
+
+
 def _conformance_params() -> list[Any]:
     # The strict xfail marks are applied here rather than through
     # estimator_checks_generator(mark="xfail", xfail_strict=True): xfail_strict
@@ -354,6 +361,8 @@ def _conformance_params() -> list[Any]:
             )
         if name in MAY_SKIP_CHECKS:
             marks.append(pytest.mark.may_skip)
+        if name in SLOW_CHECKS:
+            marks.append(pytest.mark.slow)
         params.append(pytest.param(estimator, check, marks=marks))
     return params
 
@@ -383,3 +392,96 @@ def test_sample_order_invariance_at_float32() -> None:
         idx = np.random.RandomState(seed).permutation(X.shape[0])
         np.testing.assert_allclose(est.predict_proba(X[idx]), proba[idx], rtol=0, atol=4 * eps)
         np.testing.assert_array_equal(est.predict(X[idx]), labels[idx])
+
+
+class TestNoiseAwareTraining:
+    """#228: the model's training-noise options, exposed on the estimator."""
+
+    NOISY = {**FAST, "max_epochs": 3, "noise_level": 0.1, "noise_position": "end"}
+
+    def test_defaults_train_exactly_as_before(self, data: tuple) -> None:
+        X, y = data
+        explicit = HybridClassifierEstimator(
+            **FAST,
+            noise_level=0.0,
+            noise_position="all",
+            noise_method="density",
+            noise_trajectories=1,
+        ).fit(X, y)
+        default = HybridClassifierEstimator(**FAST).fit(X, y)
+        np.testing.assert_array_equal(explicit.predict_proba(X), default.predict_proba(X))
+        assert default.model_.quantum_layer._training_noise_qnode is None
+
+    @pytest.mark.parametrize("model", ["serial", "parallel"])
+    def test_fit_runs_the_noisy_circuit_and_predict_does_not(
+        self, data: tuple, model: Literal["serial", "parallel"], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        X, y = data
+        calls = {"n": 0}
+        original = noise_module.run_with_training_noise
+
+        def spy(*args: object, **kwargs: object) -> torch.Tensor:
+            calls["n"] += 1
+            return original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(noise_module, "run_with_training_noise", spy)
+        est = HybridClassifierEstimator(model=model, **self.NOISY).fit(X, y)
+        assert calls["n"] > 0
+        layer = est.model_.quantum_layer
+        assert (layer.noise_level, layer.noise_position) == (0.1, "end")
+        calls["n"] = 0
+        proba = est.predict_proba(X)
+        assert calls["n"] == 0
+        # predict is the noiseless model: the same weights evaluated clean.
+        est.model_.eval()
+        with torch.no_grad():
+            clean = torch.sigmoid(est.model_(torch.from_numpy(X.astype(np.float32)))).squeeze(-1)
+        np.testing.assert_allclose(proba[:, 1], clean.numpy(), rtol=1e-6)
+
+    def test_noise_changes_what_is_learned(self, data: tuple) -> None:
+        X, y = data
+        clean = HybridClassifierEstimator(**{**FAST, "max_epochs": 3}).fit(X, y)
+        noisy = HybridClassifierEstimator(**self.NOISY).fit(X, y)
+        assert not np.allclose(clean.predict_proba(X), noisy.predict_proba(X))
+
+    def test_trajectories_are_reproducible_with_random_state(self, data: tuple) -> None:
+        X, y = data
+        params = {**self.NOISY, "noise_method": "trajectories", "noise_trajectories": 2}
+        a = HybridClassifierEstimator(**params).fit(X, y).predict_proba(X)
+        b = HybridClassifierEstimator(**params).fit(X, y).predict_proba(X)
+        np.testing.assert_array_equal(a, b)
+
+    def test_params_round_trip_and_clone(self) -> None:
+        est = HybridClassifierEstimator(noise_level=0.2, noise_method="trajectories")
+        params = est.get_params()
+        assert params["noise_level"] == 0.2 and params["noise_method"] == "trajectories"
+        assert params["noise_position"] == "all" and params["noise_trajectories"] == 1
+        cloned = clone(est.set_params(noise_trajectories=3))
+        assert cloned.get_params() == est.get_params()
+
+    def test_grid_search_tunes_the_noise_level(self, data: tuple) -> None:
+        X, y = data
+        search = GridSearchCV(
+            HybridClassifierEstimator(**{**FAST, "max_epochs": 2}),
+            {"noise_level": [0.0, 0.05]},
+            cv=2,
+            scoring="accuracy",
+        ).fit(X, y)
+        best = search.best_params_["noise_level"]
+        assert search.best_estimator_.model_.quantum_layer.noise_level == best
+
+    @pytest.mark.parametrize(
+        "params, match",
+        [
+            ({"noise_level": 0.9}, r"noise_level must lie in \[0, 0.75\]"),
+            ({"noise_position": "middle"}, "noise_position must be 'all' or 'end'"),
+            ({"noise_method": "kraus"}, "noise_method must be"),
+            ({"noise_trajectories": 2}, "needs noise_method='trajectories'"),
+        ],
+    )
+    def test_bad_values_fail_in_fit_not_in_the_constructor(
+        self, data: tuple, params: dict, match: str
+    ) -> None:
+        est = HybridClassifierEstimator(**{**FAST, **params})  # does not raise
+        with pytest.raises(ValueError, match=match):
+            est.fit(*data)

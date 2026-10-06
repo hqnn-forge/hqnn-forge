@@ -303,10 +303,22 @@ def fisher_information_matrix(
     -----
     Cost is one forward pass and ``k`` backward passes per row, ``k`` being
     the number of outputs (1 for a classifier), plus one ``(d, d)``
-    eigendecomposition.  The model is run in eval mode (its mode is restored
-    afterwards), so dropout is off and a model built with ``noise_level > 0``
-    is measured on its noiseless circuit, as :func:`gradient_variance` is.  To
-    measure it under noise, call this inside
+    eigendecomposition.  The ``k`` backward passes do not each re-run the
+    circuit's gradient under ``backprop`` or ``adjoint``: PennyLane computes a
+    forward pass's Jacobian once and reuses it, so a row costs one circuit
+    execution on ``default.qubit`` and two (forward and adjoint Jacobian) on
+    ``lightning.qubit``, whatever ``k`` is.  Only ``parameter-shift`` repeats
+    its ``2d`` shifted circuits for each output.
+
+    Computing the Jacobians from one batched forward instead, with vectorised
+    backward passes, was measured slower on every path, with the same number
+    of executions, and it cannot vectorise through ``parameter-shift`` at all
+    (#223, #286), so the per-row loop is kept.
+
+    The model is run in eval mode (its mode is restored afterwards), so
+    dropout is off and a model built with ``noise_level > 0`` is measured on
+    its noiseless circuit, as :func:`gradient_variance` is.  To measure it
+    under noise, call this inside
     :func:`hqnn_forge.noise.apply_depolarizing_noise`.
     """
     # No init is drawn here, so no tensor has to be singled out as the angles:

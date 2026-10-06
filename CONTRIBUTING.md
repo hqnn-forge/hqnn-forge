@@ -3,6 +3,9 @@
 Thanks for your interest in contributing. This document summarizes the workflow we follow so
 changes stay easy to review and the history stays easy to read.
 
+Participation in issues, pull requests, and reviews is covered by
+our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Language
 
 All project communication must be in **English** — README, docs, commit messages, PR
@@ -14,6 +17,9 @@ background.
 
 Reduce complexity and increase clarity. A clean `main` branch, understandable commit history,
 and consistent processes lead to better software.
+
+Adding a dataset loader, an encoding layer or a variational block? The conventions and required
+tests for each are in [`docs/extending.md`](docs/extending.md).
 
 ## Git Workflow
 
@@ -53,6 +59,28 @@ This keeps the history reviewable and associates every change with a PR number.
 *   **Test plan required** for any PR that changes code behaviour: a markdown checklist of
     steps to verify the change works, checked off before merging. Pure documentation or
     configuration changes don't need one.
+*   **Stacked PRs.** A PR may use another feature branch as its base, when it builds on
+    work not yet on `main`. CI runs on it when it is opened, when its own branch is pushed
+    and when it is retargeted, but **not when its base branch is pushed**, so a review fix
+    on the parent can break a child whose check stays green. A retarget's re-run reports
+    as `tests / lint`, `tests / test (…)`, `docs / build`: read those, since the
+    unprefixed checks on the same commit still show the run against the old base. After
+    pushing to a branch other PRs are based on, re-run them by closing and reopening each:
+
+    ```bash
+    for n in $(gh pr list --base <branch> --json number --jq '.[].number'); do
+        gh pr close "$n" && gh pr reopen "$n"
+    done
+    ```
+
+    Reopening fires a fresh run against the current merge result. Re-running the old
+    run from the Actions tab does not help: it checks out the merge commit it was
+    created with. This isn't automated because events caused by the workflow's own
+    `GITHUB_TOKEN` start no new workflow runs, so it would need a personal access token
+    or GitHub App secret. Before squash-merging the parent, retarget the children to
+    `main` (`gh pr edit <n> --base main`): the repository deletes a head branch as soon as
+    its PR merges, and depending on how the branch is deleted, GitHub either retargets
+    the PRs based on it or closes them.
 
 ### 5. Squash Merge
 
@@ -69,6 +97,20 @@ Most PRs are self-reviewed before merging: does the code work as intended, does 
 project conventions, are there obvious security issues, is test coverage adequate, is
 documentation updated. Changes that modify interfaces or break existing contracts benefit from
 review by affected stakeholders before merging.
+
+How a PR reaches review:
+
+*   **The first request is automatic.** `.github/CODEOWNERS` requests a review from
+    @g8rdier on every PR, including PRs from forks: when it is opened, or for a draft, when
+    it is marked ready for review.
+*   **After pushing changes that address review comments**, say so in a PR comment that
+    mentions @g8rdier (e.g. "@g8rdier ready for another look"). From a fork, GitHub doesn't
+    let the author re-request a review in the sidebar, so the mention is the hand-off.
+    Collaborators with write access use "Re-request review" in the sidebar instead.
+*   **On fork PRs, keep "Allow edits by maintainers" enabled**, so small fixes can be pushed
+    to the branch directly instead of going back and forth in comments.
+*   CI on a first-time contributor's fork PR waits for a maintainer to approve the workflow
+    run; that's expected and needs nothing from the contributor.
 
 ### 7. Hotfixes
 
@@ -88,6 +130,21 @@ feat: add user authentication endpoint
 
 Keep commit bodies to at most 3 bullet points. If you need more, the work is probably better
 split into smaller, more atomic commits.
+
+## Testing
+
+CI runs the whole suite. For the local edit–test loop, leave out the tests marked `slow`
+(end-to-end training, the gradient-variance physics checks, parameter-shift batching, repeated
+fits and bootstraps), which take most of its run time:
+
+```bash
+uv run --frozen --all-extras pytest -m "not slow"   # about a minute
+uv run --frozen --all-extras pytest                 # the full suite, as CI runs it
+```
+
+Mark a test `@pytest.mark.slow` when it takes 1.2 s or more (`pytest --durations=50` finds
+them); `tests/conftest.py` records the rule. `--strict-markers` is on, so a misspelled marker
+fails collection instead of silently leaving a slow test in the quick run.
 
 ## Linting
 
@@ -158,11 +215,60 @@ it.
     `pyproject.toml`, so contributors only regenerate the lockfile when they change
     `pyproject.toml` by hand.
 
+*   **Upcoming PennyLane releases are tested weekly.** `.github/workflows/upstream.yml` runs
+    the suite against the newest PennyLane and pennylane-lightning pre-releases on PyPI and
+    against their nightly builds on TestPyPI. It never blocks a PR. When it fails, it opens
+    (or comments on) an issue titled `ci: test suite fails against PennyLane <source> builds`:
+    the library relies on PennyLane internals, and this is how a break shows up before users
+    upgrade. Trigger it by hand with `gh workflow run upstream.yml`.
+
+## Documentation
+
+The API reference site is built from the docstrings by `mkdocs build --strict`
+(`mkdocs.yml`, `docs/`), which the Docs workflow runs on every PR. Docstrings are NumPy style
+and cross-reference with Sphinx roles (`` :func:`gradient_variance` ``,
+`` :class:`~hqnn_forge.models.HybridBinaryClassifier` ``); `docs/griffe_sphinx_roles.py` turns
+them into links, so a reference to something that does not exist fails the build. Constants are
+documented with `#:` comments above the assignment. A new public module needs a page under
+`docs/api/` and an entry in the `nav` of `mkdocs.yml`; the workflow fails if a top-level
+module has no page or a name in a documented `__all__` has no entry.
+
 ## Versioning
 
 Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`), tagged (e.g.
 `v1.2.0`) on the `main` merge commit that encapsulates the release. `CHANGELOG.md` follows
-[Keep a Changelog](https://keepachangelog.com/) and is updated as part of the release PR.
+[Keep a Changelog](https://keepachangelog.com/).
+
+*   **Every user-facing PR adds its changelog line** under `## [Unreleased]`, in `Added`,
+    `Changed`, `Fixed` or `Removed`, ending with the PR number, e.g. `(#42)`. User-facing means
+    anything a user of the package can observe: the API, behaviour, results, dependencies,
+    supported Python versions. CI, tests, internal refactors and contributor docs don't need
+    one. A test checks that every entry names its PR.
+*   **A release PR** sets `version` in `pyproject.toml` (then `uv lock`), renames
+    `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and opens a new empty `## [Unreleased]`
+    above it, and adds the compare link at the bottom. It also bumps `version` in
+    `CITATION.cff` to the new version (`tests/test_citation.py` fails until it does) and can
+    add a `date-released`.
+*   **When uv moves to a new minor release, raise the `<0.13` cap by hand in `[build-system]` in
+    `pyproject.toml`.**
+*   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
+    tag:
+
+    ```bash
+    git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z
+    ```
+
+    `.github/workflows/release.yml` then checks that the tag equals `v` + `project.version`,
+    that the tagged commit is on `main`, and that the changelog has a non-empty `[X.Y.Z]`
+    section (`.github/scripts/release_notes.py`). It builds and checks the sdist and wheel and
+    runs the locked test suite on that commit. Only then does the publish job, in the `pypi`
+    environment, wait for the owner's approval, publish to PyPI through trusted publishing (no
+    stored token), and create the GitHub release with that changelog section as its notes. A
+    manual run of the workflow on `main` is a dry run to TestPyPI; it refuses any other branch.
+*   **The `pypi` environment must be protected before the first tag**: required reviewer the
+    owner, deployments limited to `v*` tags. A job that names an environment the repository
+    does not have creates it unprotected, so without this setup a pushed tag publishes with
+    no approval step.
 
 ## Using AI Coding Assistants
 
