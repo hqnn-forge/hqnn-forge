@@ -10,12 +10,15 @@ simulator's state, and the budget that matters is the number of circuits
 executed.  This script walks through the pieces the library has for that:
 
 1. **Check the gradient method.**  Parameter-shift, the method hardware
-   supports, is compared against backprop on the same weights, exactly.
+   supports, is compared against backprop on the same weights, exactly, on
+   ``default.qubit`` whatever ``DEVICE`` is: it checks the method, not the
+   device, and a device that samples cannot match to 1e-5.
 2. **Count the cost.**  One training step with parameter-shift (Adam) and one
    with SPSA, each under ``qml.Tracker``: circuits executed and shots used.
-3. **Train with shots.**  SPSA on a shot-based model, with the device seeded
-   and SPSA's two evaluations sharing their shot noise
-   (``SPSA(..., model=model)``).
+3. **Train with shots.**  SPSA on the circuit weights of a shot-based model
+   and Adam on the classical head, whose exact gradients cost no circuits
+   (``gradient_optimizer``), with the device seeded and SPSA's two
+   evaluations sharing their shot noise.
 4. **Evaluate.**  Test MCC under shot noise (``shot_sweep``) and under
    depolarizing noise (``noise_sweep``).
 
@@ -27,17 +30,19 @@ circuit's input gradient and multiply the parameter-shift cost).
 Running on a real device
 ------------------------
 Change ``DEVICE`` to the plugin's device name, e.g. ``"braket.aws.qubit"``
-(``amazon-braket-pennylane-plugin``) or ``"qiskit.remote"``
-(``pennylane-qiskit``), and give the device its options and credentials the
-way the plugin documents.  The library builds the device from its name alone,
-so options go in PennyLane's configuration file, which ``qml.device`` reads
-for every device it builds, e.g. in ``config.toml``::
+(``amazon-braket-pennylane-plugin``), and give the device its options and
+credentials the way the plugin documents.  The library builds the device
+from its name alone, so options go in PennyLane's configuration file, which
+``qml.device`` reads for every device it builds, e.g. in ``config.toml``::
 
     [braket.aws.qubit]
     device_arn = "arn:aws:braket:::device/qpu/..."
 
 An option that has to be a Python object rather than a string cannot be
-given this way.  ``SEED`` only reaches simulators; hardware ignores it.  The
+given this way, so a device that needs one, such as ``pennylane-qiskit``'s
+``"qiskit.remote"`` (its ``backend``), cannot be used here as it stands.
+The library passes ``seed`` to any device it does not know as given, so
+``build`` seeds only the simulators in ``KNOWN_DEVICES``.  The
 execution counts printed in step 2 are what a run costs there, and they are
 the reason to prefer SPSA: its cost per step does not grow with the number of
 parameters.
@@ -52,12 +57,13 @@ Takes about a minute and a half on a laptop CPU.
 from __future__ import annotations
 
 import time
-import warnings
 
 import numpy as np
 import pennylane as qml
 import torch
 
+from hqnn_forge.encoding import DiffMethod
+from hqnn_forge.encoding.angle_embedding import KNOWN_DEVICES
 from hqnn_forge.evaluation import find_optimal_threshold, matthews_corrcoef
 from hqnn_forge.models import HybridBinaryClassifier
 from hqnn_forge.noise import noise_sweep, shot_sweep
@@ -90,12 +96,14 @@ def load() -> tuple[torch.Tensor, ...]:
     pca = PCANormalizer(n_components=N_QUBITS).fit(X[train])
     out: list[torch.Tensor] = []
     for rows in (train, val, test):
-        out.append(torch.tensor(pca.transform(X[rows]), dtype=torch.float32))
+        out.append(torch.as_tensor(pca.transform(X[rows]), dtype=torch.float32))
         out.append(torch.tensor(y[rows], dtype=torch.float32))
     return tuple(out)
 
 
-def build(shots: int | None, diff_method: str, device: str = DEVICE) -> HybridBinaryClassifier:
+def build(
+    shots: int | None, diff_method: DiffMethod, device: str = DEVICE
+) -> HybridBinaryClassifier:
     torch.manual_seed(SEED)
     return HybridBinaryClassifier(
         n_input_features=N_QUBITS,
@@ -103,17 +111,38 @@ def build(shots: int | None, diff_method: str, device: str = DEVICE) -> HybridBi
         n_layers=N_LAYERS,
         use_classical_encoder=False,
         device_name=device,
-        diff_method=diff_method,  # type: ignore[arg-type]
+        diff_method=diff_method,
         shots=shots,
-        seed=SEED,
+        # A plugin device is passed seed as given, and may reject it.
+        seed=SEED if device in KNOWN_DEVICES else None,
+    )
+
+
+def make_spsa(
+    classifier: HybridBinaryClassifier,
+    lr: float = 0.1,
+    stability: float = 0.0,
+    model: torch.nn.Module | None = None,
+) -> SPSA:
+    """SPSA on everything before the head, Adam on the head.
+
+    The head acts after the circuit, so its exact gradient costs no circuit
+    evaluations: SPSA still runs two circuits per sample per step.
+    """
+    head = list(classifier.head.parameters())
+    rest = [p for n, p in classifier.named_parameters() if not n.startswith("head.")]
+    adam = torch.optim.Adam(head, lr=0.05)
+    return SPSA(
+        rest, lr, perturbation=0.1, stability=stability, gradient_optimizer=adam, model=model
     )
 
 
 def check_gradients(x: torch.Tensor, y: torch.Tensor) -> None:
     """Parameter-shift against backprop, both exact, on the same weights."""
     grads = []
-    for method, device in (("parameter-shift", DEVICE), ("backprop", "default.qubit")):
-        model = build(None, method, device)
+    methods: tuple[DiffMethod, ...] = ("parameter-shift", "backprop")
+    for method in methods:
+        model = build(None, method, "default.qubit")
         torch.nn.functional.binary_cross_entropy_with_logits(model(x).squeeze(-1), y).backward()
         grads.append(model.quantum_layer.qlayer.weights.grad)
     error = (grads[0] - grads[1]).abs().max().item()
@@ -130,7 +159,9 @@ def count_step(x: torch.Tensor, y: torch.Tensor) -> None:
         device = model.quantum_layer.qlayer.qnode.device
         with qml.Tracker(device) as tracker:
             if name == "SPSA":
-                spsa = SPSA(model.parameters(), model=model)
+                # model= shares the two evaluations' shot noise; train_model
+                # passes it itself, a manual step has to.
+                spsa = make_spsa(model, model=model)
 
                 def closure(m: torch.nn.Module = model) -> torch.Tensor:
                     return loss_fn(m(x).squeeze(-1), y)
@@ -148,24 +179,25 @@ def count_step(x: torch.Tensor, y: torch.Tensor) -> None:
 
 
 def main() -> None:
-    warnings.simplefilter("ignore")
     x_tr, y_tr, x_va, y_va, x_te, y_te = load()
-    n_weights = N_LAYERS * N_QUBITS * 3
+    n_weights = build(None, "backprop", "default.qubit").quantum_layer.qlayer.weights.numel()
     print(f"{N_QUBITS} qubits, {N_LAYERS} layers ({n_weights} circuit weights), device {DEVICE}")
 
     check_gradients(x_tr[:BATCH], y_tr[:BATCH])
     count_step(x_tr[:BATCH], y_tr[:BATCH])
 
-    # 3. Train with shots and SPSA.  SPSA's lr is not on Adam's scale: it
-    # multiplies a raw gradient estimate, here of size ~0.05, so it needs to be
-    # large.  With lr 0.1-0.4 this model barely moved in 30 epochs; lr 1-8
-    # all trained.  stability ~10 % of the ~330 steps, as Spall suggests.
+    # 3. Train with shots: SPSA on the circuit weights, Adam on the head.
+    # SPSA's lr is not on Adam's scale: it multiplies a raw gradient estimate,
+    # here of size ~0.05, so it needs to be large.  With SPSA on every
+    # parameter, lr 0.1-0.4 barely moved this model in 30 epochs and lr 1-8
+    # all trained; with the head on Adam, lr 1 and 2 did best of 1-8.
+    # stability ~10 % of the ~330 steps, as Spall suggests.
     model = build(SHOTS, "parameter-shift")
     start = time.perf_counter()
     history = train_model(
         model,
         torch.nn.BCEWithLogitsLoss(),
-        SPSA(model.parameters(), lr=4.0, perturbation=0.1, stability=30, model=model),
+        make_spsa(model, lr=1.0, stability=30),
         x_tr,
         y_tr,
         x_va,

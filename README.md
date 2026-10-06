@@ -175,16 +175,17 @@ near 12 qubits pass `device_name="lightning.qubit"` explicitly.
 
 ### Running on hardware
 
-[`examples/hardware_workflow.py`](examples/hardware_workflow.py) trains a small classifier the
-way a quantum device requires, on `default.qubit` standing in for one: `shots`, parameter-shift
+[`examples/hardware_workflow.py`](https://github.com/hqnn-forge/hqnn-forge/blob/main/examples/hardware_workflow.py)
+trains a small classifier the way a quantum device requires, on `default.qubit` standing in for one: `shots`, parameter-shift
 gradients checked against backprop, SPSA, the circuit executions each step costs (counted
 with `qml.Tracker`), and test MCC under shot and depolarizing noise (`shot_sweep`,
 `noise_sweep`). One step on a batch of 32 costs 1568 circuits with parameter-shift and 64 with
-SPSA; SPSA trained with 1000 shots and evaluated exactly scored within 0.01 test MCC
-of exact training.
+SPSA, which trains the circuit weights while Adam trains the classical head at no extra circuit
+cost. Trained with 1000 shots and evaluated exactly, it scored 0.87 test MCC against 0.83 for
+exact training with backprop and Adam (one seed, 115 test samples).
 
 For a real device, change `DEVICE` to the plugin's device name (for example
-`"braket.aws.qubit"` or `"qiskit.remote"`) and set up its credentials as the plugin documents.
+`"braket.aws.qubit"`) and set up its credentials as the plugin documents.
 The library creates the device from its name, so device options go in PennyLane's
 [configuration file](https://docs.pennylane.ai/en/stable/introduction/configuration.html),
 which `qml.device` reads for every device:
@@ -195,8 +196,10 @@ which `qml.device` reads for every device:
 device_arn = "arn:aws:braket:::device/qpu/..."
 ```
 
-An option that must be a Python object rather than a string cannot be passed this way.
-`seed` reaches simulators only.
+An option that must be a Python object rather than a string cannot be passed this way, so a
+device that needs one, such as `"qiskit.remote"` (its `backend`), does not work here. The
+library passes `seed` to a plugin device as given, so the example seeds only the simulators in
+`KNOWN_DEVICES`.
 
 ---
 
