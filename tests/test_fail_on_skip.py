@@ -107,3 +107,25 @@ def test_a_module_skipped_at_import_fails_collection(
             "Skipped: could not import 'hqnn_forge_no_such_module'*",
         ]
     )
+
+
+def test_deselected_tests_are_not_skips(
+    suite: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pytest -m "not slow", the quick local run (#323): deselected tests never
+    # run and produce no report, so the fail-on-skip hooks must not see them.
+    monkeypatch.setenv(ENV, "1")
+    suite.makepyfile(
+        test_marked="""
+import pytest
+
+@pytest.mark.slow
+def test_slow():
+    pass
+
+def test_fast():
+    pass
+"""
+    )
+    result = suite.runpytest("-m", "not slow", "test_marked.py")
+    result.assert_outcomes(passed=1, deselected=1)

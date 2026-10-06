@@ -69,6 +69,15 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--qubits", type=int, default=4)
     parser.add_argument("--layers", type=int, default=2)
+    parser.add_argument(
+        "--seeds", type=int, default=1, help="initialisation seeds per fold (fold score = mean)"
+    )
+    parser.add_argument(
+        "--noise",
+        type=float,
+        nargs="*",
+        help="also score the hybrid under these inference-time depolarising probabilities",
+    )
     parser.add_argument("--csv", help="also write the table to this file")
     parser.add_argument(
         "--record", help="write an experiment record (JSON) for reproducing the run here"
@@ -84,7 +93,13 @@ def main() -> None:
         return HybridBinaryClassifier(n_input_features, args.qubits, args.layers)
 
     result = run_benchmark(
-        datasets, hybrid, n_splits=args.folds, max_epochs=args.epochs, record_path=args.record
+        datasets,
+        hybrid,
+        n_splits=args.folds,
+        max_epochs=args.epochs,
+        record_path=args.record,
+        n_seeds=args.seeds,
+        noise_levels=args.noise,
     )
 
     print(f"{'dataset':<12} {'model':<8} {'params':>6} {'MCC':>14} {'MCC/kP':>7} {'train s':>8}")
@@ -100,6 +115,21 @@ def main() -> None:
             f"{r['n_folds']} folds: {r['wilcoxon_min_p']:.4f}), rank-biserial r = "
             f"{r['rank_biserial']:+.2f}"
         )
+    for row in result.noise:
+        print(
+            f"{row['dataset']}: noise p = {row['noise_level']:.2f}: hybrid MCC "
+            f"{row['hybrid_mcc_mean']:.3f} vs control {row['control_mcc_mean']:.3f}, "
+            f"p(hybrid better) = {row['p_hybrid_better']:.4f}"
+        )
+    for dataset, summary in result.noise_summary.items():
+        if not summary["better_noiseless"]:
+            print(f"{dataset}: the hybrid is not significantly better even without noise.")
+        elif summary["lost_at"] is None:
+            print(f"{dataset}: the hybrid stays significantly better across the sweep.")
+        else:
+            print(
+                f"{dataset}: the hybrid stops being significantly better at p = {summary['lost_at']}."
+            )
     if args.csv:
         write_csv(result.records, args.csv)
         print(f"written to {args.csv}")

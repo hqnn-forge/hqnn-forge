@@ -40,6 +40,7 @@ import torch
 from torch import nn
 
 from hqnn_forge.diagnostics import LOGICAL_GATE_SET, CircuitSummary, circuit_summary
+from hqnn_forge.diagnostics.circuit import _tape_resources
 from hqnn_forge.models import HybridBinaryClassifier
 
 pytestmark = pytest.mark.reproducibility
@@ -67,7 +68,7 @@ def _published_circuit() -> qml.QNode:
     return circuit
 
 
-def _published_shnn() -> tuple[nn.Module, qml.QNode]:
+def _published_shnn() -> tuple[nn.ModuleDict, qml.QNode]:
     circuit = _published_circuit()
     vqc = qml.qnn.TorchLayer(circuit, {"weights": (N_LAYERS, N_QUBITS, 3)})
     pre = nn.Sequential(nn.Linear(N_QUBITS, N_QUBITS), _PiSigmoid())
@@ -91,15 +92,15 @@ def _published_summary(
     circuit: qml.QNode, n_quantum_params: int
 ) -> tuple[CircuitSummary, qml.tape.QuantumScript]:
     tape = _logical_tape(circuit, weights=torch.zeros(N_LAYERS, N_QUBITS, 3))
-    res = tape.specs["resources"]
+    res = _tape_resources(tape)
     summary = CircuitSummary(
         layer_type="published",
         n_qubits=N_QUBITS,
         n_trainable_params=n_quantum_params,
-        depth=int(res.depth),
-        n_gates=int(res.num_gates),
-        n_two_qubit_gates=sum(c for size, c in res.gate_sizes.items() if size >= 2),
-        gate_counts=dict(sorted(res.gate_types.items())),
+        depth=res.depth,
+        n_gates=res.n_gates,
+        n_two_qubit_gates=res.n_two_qubit_gates,
+        gate_counts=res.gate_counts,
     )
     return summary, tape
 
@@ -121,7 +122,7 @@ def _ours() -> HybridBinaryClassifier:
 
 
 @pytest.fixture(scope="module")
-def published() -> tuple[nn.Module, CircuitSummary, qml.tape.QuantumScript]:
+def published() -> tuple[nn.ModuleDict, CircuitSummary, qml.tape.QuantumScript]:
     model, circuit = _published_shnn()
     # Counted from the rebuild rather than assumed: ``test_rebuild_quantum_parameters``
     # is what checks this number against the published table.
@@ -285,3 +286,58 @@ class TestDefaultConfigurationIsAVariant:
             scaled = model.classical_encoder(x) * torch.pi
             published = _PiSigmoid()(x)
         assert scaled.min() < 0 <= published.min()  # (-π, π) vs (0, π)
+
+
+class TestLiveParameters:
+    """
+    #234: with the ⟨Z_0⟩ readout 20 of the 48 quantum weights never move the
+    output.  They are kept (the published shape); the live count is pinned
+    here against autograd, and the structural count stays a lower bound.
+    """
+
+    #: Dead entries of the (layer, wire, angle) weight tensor: the whole
+    #: last-layer Rot on wires 0, 1, 3, 5, 7, its ω on 2, 4, 6, and the
+    #: first-layer ω on wires 0 and 1.
+    DEAD = sorted(
+        [(1, w, a) for w in (0, 1, 3, 5, 7) for a in range(3)]
+        + [(1, w, 2) for w in (2, 4, 6)]
+        + [(0, 0, 2), (0, 1, 2)]
+    )
+
+    def _always_zero(self) -> dict[str, torch.Tensor]:
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier.published_shnn(
+            device_name="default.qubit", diff_method="backprop"
+        ).double()
+        params = dict(model.named_parameters())
+        zero = {name: torch.ones_like(p, dtype=torch.bool) for name, p in params.items()}
+        g = torch.Generator().manual_seed(1)
+        for _ in range(8):
+            with torch.no_grad():
+                for name, p in params.items():
+                    low, high = (0.0, 2 * math.pi) if "qlayer" in name else (-1.0, 1.0)
+                    p.uniform_(low, high, generator=g)
+            x = torch.randn(4, N_QUBITS, generator=g, dtype=torch.float64)
+            model.zero_grad()
+            model(x).sum().backward()
+            for name, p in params.items():
+                assert p.grad is not None
+                zero[name] &= p.grad.abs() < 1e-12
+        return zero
+
+    def test_dead_quantum_weights_and_the_live_count(self) -> None:
+        zero = self._always_zero()
+        quantum = zero["quantum_layer.qlayer.weights"]
+        assert sorted(tuple(int(i) for i in idx) for idx in quantum.nonzero()) == self.DEAD
+        # Every classical parameter is live: all eight wires reach the readout.
+        assert all(not z.any() for name, z in zero.items() if "qlayer" not in name)
+        live = sum(int((~z).sum()) for z in zero.values())
+        assert (live, sum(z.numel() for z in zero.values())) == (102, PUBLISHED_PARAMS)
+
+    def test_structural_count_is_a_lower_bound(self) -> None:
+        model = HybridBinaryClassifier.published_shnn(
+            device_name="default.qubit", diff_method="backprop"
+        )
+        summary = circuit_summary(model)
+        assert summary.n_inert_params == 16
+        assert summary.n_inert_params <= len(self.DEAD)

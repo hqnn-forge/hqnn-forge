@@ -42,7 +42,6 @@ EPOCHS = 12
 BATCH_SIZE = 24
 TRAIN_NOISE = 0.05
 SWEEP = (0.0, 0.02, 0.05, 0.1, 0.2)
-CPU = {"device_name": "default.qubit", "diff_method": "backprop"}
 
 
 def make_data(n: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -84,8 +83,19 @@ def main() -> None:
     # Same initial weights for both models: build the noiseless one, deep-copy
     # its state into the noisy one.
     torch.manual_seed(SEED)
-    clean = HybridBinaryClassifier(N_FEATURES, N_QUBITS, N_LAYERS, **CPU)
-    noisy = HybridBinaryClassifier(N_FEATURES, N_QUBITS, N_LAYERS, noise_level=TRAIN_NOISE, **CPU)
+    # Training noise runs on default.mixed with backprop; the noiseless path
+    # uses default.qubit with backprop too, so both models differentiate alike.
+    clean = HybridBinaryClassifier(
+        N_FEATURES, N_QUBITS, N_LAYERS, device_name="default.qubit", diff_method="backprop"
+    )
+    noisy = HybridBinaryClassifier(
+        N_FEATURES,
+        N_QUBITS,
+        N_LAYERS,
+        noise_level=TRAIN_NOISE,
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
     noisy.load_state_dict(copy.deepcopy(clean.state_dict()))
 
     print(f"Training noiseless model ({clean.count_parameters()} parameters)")

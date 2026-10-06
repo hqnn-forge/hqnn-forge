@@ -73,7 +73,7 @@ strategy:
 use_classical_encoder, dropout_p, device_name, diff_method, init_strategy,
 encoding_type, embedding_rotation, entangler, readout, encoder_activation,
 init_std, noise_level, noise_position, noise_method, noise_trajectories,
-trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel:
+trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel, seed:
     As for :class:`~hqnn_forge.models.HybridBinaryClassifier`.
 """
 
@@ -120,7 +120,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     use_classical_encoder, dropout_p, device_name, diff_method,
     init_strategy, encoding_type, embedding_rotation, entangler, readout,
     encoder_activation, init_std, noise_level, noise_position, noise_method,
-    noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel:
+    noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel, seed:
         The trunk's options, exactly as for
         :class:`~hqnn_forge.models.HybridBinaryClassifier`.  With
         ``readout="first"`` every class head reads ⟨Z_0⟩ alone.
@@ -162,8 +162,8 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
         strategy: MulticlassStrategy = "softmax",
         use_classical_encoder: bool = True,
         dropout_p: float = 0.0,
-        device_name: DeviceName = "lightning.qubit",
-        diff_method: DiffMethod = "adjoint",
+        device_name: DeviceName = "auto",
+        diff_method: DiffMethod = "auto",
         init_strategy: str = "restricted",
         encoding_type: str = "angle",
         embedding_rotation: RotationAxis = "X",
@@ -180,9 +180,11 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
         trainable_input_scaling: bool = False,
         shots: int | None = None,
         noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
+        seed = as_seed(seed, "seed")
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
@@ -215,6 +217,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
             )
 
             if n_classes < 2:
@@ -250,6 +253,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 trainable_input_scaling=trainable_input_scaling,
                 shots=shots,
                 noise_channel=noise_channel,
+                seed=seed,
             )
 
             # ── Class heads: one row per class ────────────────────────────────
