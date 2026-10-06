@@ -93,18 +93,24 @@ Two methods, chosen with ``noise_method``:
     benchmark datasets are #414): at
     ``p = 0.01``, and with noise only before measurement, trajectory
     training matched the density channel; at ``p = 0.05`` after every gate
-    it collapsed in 3 of 20 runs (``k = 1`` twice, ``k = 4`` once), density
-    in none.  A follow-up on the same data over 10 seeds (#347,
-    ``docs/results/trajectory-collapse-study.md``) found that
-    ``noise_trajectories = 8`` removes the collapses (0 of 100 runs across
-    five training variants, against 10 of 100 at ``k = 1`` and 6 of 100 at
-    ``k = 4``) and matches density, while a lower learning rate, gradient
-    clipping and a noise warm-up do not reliably help.  On ``default.qubit``
-    with backprop the draws run as one batch, so ``k = 8`` cost 1.1 to 1.4
-    times ``k = 1`` at 4 and 6 qubits; on the adjoint path each sample runs
-    separately, so it is expected to cost about 8 times (not measured),
-    which is why the default stays 1.  So keep ``"density"`` where it fits (up to about 6 qubits), and
-    beyond that use ``"trajectories"`` with ``noise_trajectories ≥ 8``.
+    it was slower to leave the initial loss plateau, so that 3 of 20 runs
+    scored a test MCC below 0.5 within 30 epochs and a patience of 10,
+    density none.  Re-run for 60 epochs without early stopping, two of the
+    three trained (one of them at ``k = 4``) and one, at ``k = 1``, still
+    had not (#480).  A follow-up on the same data and budget over 10 seeds
+    (#347, ``docs/results/trajectory-collapse-study.md``) counted such runs
+    across five training variants: 10 of 100 at ``k = 1``, 6 of 100 at
+    ``k = 4`` and none of 100 at ``noise_trajectories = 8``, which also
+    matched density.  A lower learning rate, gradient clipping and a noise
+    warm-up did not reliably help within that budget; the counts do not
+    separate a late start from a run that never trains (#480).  On
+    ``default.qubit`` with backprop the draws run as one batch, so ``k = 8``
+    cost 1.1 to 1.4 times ``k = 1`` at 4 and 6 qubits; on the adjoint path
+    each sample runs separately, so it is expected to cost about 8 times
+    (not measured), which is why the default stays 1.  So keep ``"density"``
+    where it fits (up to about 6 qubits), and beyond that use
+    ``"trajectories"`` with ``noise_trajectories ≥ 8``, or with fewer draws
+    a longer training budget than density needs, and check the runs.
 
     The Pauli at a site is applied as ``RZ(π·z)`` then ``RX(π·x)`` with bits
     ``(x, z)``: ``(0, 0)`` is ``I``, ``(1, 0)`` is ``X``, ``(0, 1)`` is ``Z``

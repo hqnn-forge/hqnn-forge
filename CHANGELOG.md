@@ -266,6 +266,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/hardware_workflow.py` and a README section: shots, parameter-shift checked against
   backprop, SPSA, per-step circuit counts with `qml.Tracker`, and shot and noise sweeps, with
   how to point it at a real device (#356)
+- A results page, `docs/results/trajectory-noise-study.md`, with its script
+  `examples/study_trajectory_noise.py` and raw data: trajectory against density noise training
+  on a breast-cancer proxy at 4 and 6 qubits. The `noise_method` documentation carries its
+  recommendation: `"density"` where it fits, otherwise `"trajectories"` with
+  `noise_trajectories ≥ 4` and a longer training budget (#311, #343)
+- A results page, `docs/results/trajectory-collapse-study.md`, with its script
+  `examples/study_trajectory_collapse.py` and raw data: lower learning rates, gradient clipping,
+  a noise warm-up and more draws against trajectory runs that had not trained within 30 epochs,
+  on the same proxy over 10 seeds. Only `noise_trajectories = 8` trained in every run, so the
+  `noise_method` and `noise_trajectories` documentation now recommends 8 or more, or a longer
+  training budget with fewer draws (#347, #367)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

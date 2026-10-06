@@ -203,9 +203,9 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
     noise_trajectories:
         Draws averaged per sample with ``"trajectories"``.  Default: 1.  Use 8
-        or more at noise of a few percent per gate: fewer draws occasionally
-        made training collapse on the breast-cancer proxy (#347; see
-        :mod:`hqnn_forge.noise`).
+        or more at noise of a few percent per gate: with fewer draws some runs
+        on the breast-cancer proxy had not started to train within 30 epochs
+        (#347, #480; see :mod:`hqnn_forge.noise`).
     init_seed:
         Seed for weight initialisation.  ``None`` (default) draws the initial
         weights from the global torch RNG; an int draws them from a private RNG

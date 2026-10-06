@@ -1,8 +1,13 @@
 # Can the collapse of trajectory-noise training be prevented?
 
 The study behind #347. #311 (`trajectory-noise-study.md`) found that training with
-`noise_method="trajectories"` at p = 0.05 after every gate collapsed in 3 of 20 runs, while the
-exact `"density"` channel never did. This tests four mitigations over twice the seeds.
+`noise_method="trajectories"` at p = 0.05 after every gate left 3 of 20 runs below a test MCC
+of 0.5 within its training budget, while the exact `"density"` channel always trained. This
+tests four mitigations over twice the seeds, with the same budget.
+
+**Read every collapse count below as "had not trained within 30 epochs and a patience of
+10".** The study has no longer-budget control, so it cannot tell a run that starts late from
+one that never trains; see *What a collapse means here*. The control is #480.
 
 ## Setup
 
@@ -27,7 +32,8 @@ exact `"density"` channel never did. This tests four mitigations over twice the 
 - **References:** density at all three learning rates, and noiseless training, on the same
   seeds.
 - **Collapse:** test MCC under noise below 0.5. The successful runs in #311 all scored at least
-  0.68, and the collapses here scored 0.05–0.47, so the cut is not borderline.
+  0.68, and the collapses here scored 0.05–0.47, so the cut is not borderline. It is a
+  statement about the score at the end of this budget, not about whether the run could train.
 - **Environment:** PennyLane 0.45.1, torch 2.14, one 16-core CPU, 14 single-threaded worker
   processes.
 
@@ -53,6 +59,29 @@ Collapsed runs of 10, and mean test MCC under noise:
 
 In total, over the five variants and both sizes, k = 1 collapsed in **10 of 100** runs,
 k = 4 in **6 of 100** and k = 8 in **0 of 100**. Density collapsed once in 60, at lr 0.01.
+
+### What a collapse means here
+
+The 16 collapsed trajectory runs fall on 7 combinations of size, k and seed (k = 1 at
+6 qubits on seed 0 accounts for 5 of them). Early stopping ended 13 of the 16 before epoch 30,
+between epochs 11 and 28; only 3 ran the full 30 epochs.
+
+Three of the baseline collapses are #311's own runs (seeds 0 to 4 reproduce it exactly), and
+#311's review re-ran those three for 60 epochs without early stopping (not in the committed
+data of either study):
+
+| run (lr 0.05) | here, 30 epochs / patience 10 | 60 epochs, no early stopping |
+|---|---|---|
+| k = 4, 4 qubits, seed 1 | stopped at epoch 15, test MCC 0.13 | 0.94 |
+| k = 1, 6 qubits, seed 4 | stopped at epoch 28, test MCC 0.42 | 0.82 |
+| k = 1, 6 qubits, seed 0 | 30 epochs, test MCC 0.19 | 0.23, loss still on the initial plateau |
+
+So two of those three were late starts that the budget cut off, and one is a stall. The other
+13 collapses have no such control. The counts are therefore an upper bound on stalls, and a
+mitigation that lengthens the initial plateau (a lower learning rate, a clipped step) is
+penalised by the budget whether or not it prevents stalls.
+
+### Cost
 
 Median seconds per run at lr 0.05. They are comparable within this table only (14 runs shared the CPU):
 
@@ -83,29 +112,34 @@ Like #311, everything below was measured on the breast-cancer proxy only: one sm
 4 and 6 qubits, 10 seeds. It has not been checked on the credit-card or UCI benchmark data;
 that re-run is #414.
 
-1. **k = 8 removes the collapses; the other mitigations do not.** k = 8 never collapsed, under
-   any variant, at either size. Against k = 1 that is 0 of 100 against 10 of 100
-   (Fisher's exact test p = 0.002), and against k = 4, 0 against 6 (p = 0.03). Both p-values
+1. **At k = 8 every run trained within the budget; no other mitigation achieved that.** k = 8
+   never collapsed, under any variant, at either size. Against k = 1 that is 0 of 100 against
+   10 of 100 (Fisher's exact test p = 0.002), and against k = 4, 0 against 6 (p = 0.03). Both p-values
    pool the five variants, which share seeds and are therefore not independent (k = 1 at
    6 qubits collapsed on seed 0 under every variant), so they overstate the evidence. Read them
    as indicative. The pattern is consistent, though: at neither size do collapses rise with k,
    and both reach zero at k = 8 (2, 2 and 0 of 50 at k = 1, 4 and 8 on 4 qubits; 8, 4 and 0
    of 50 on 6 qubits).
-2. **A lower learning rate does not help, and at k = 4 it hurts.** At 6 qubits, k = 4 went from
-   0 collapses at lr 0.05 to 2 at lr 0.02 and 2 at lr 0.01. At k = 1 no learning rate brought
-   the collapses to zero: 3, 1 and 2 of 20 at lr 0.05, 0.02 and 0.01. Collapse here is not
-   overshooting, so a smaller step does not prevent it.
-3. **Clipping and warm-up help only partly.** Clipping at 0.1 barely acts at k = 1 (7–9 % of
-   steps) and left its collapses in place. The warm-up removed k = 4's collapses (0 of 20) but
-   not k = 1's (1 of 20).
+2. **A lower learning rate did not help within this budget, and at k = 4 it did worse.** At
+   6 qubits, k = 4 went from 0 collapses at lr 0.05 to 2 at lr 0.02 and 2 at lr 0.01. At k = 1
+   no learning rate brought the collapses to zero: 3, 1 and 2 of 20 at lr 0.05, 0.02 and 0.01.
+   This does not show that a smaller step fails to prevent stalls. A smaller step also takes
+   longer to leave the plateau, and 6 of the 7 collapses at the lower rates were ended by early
+   stopping between epochs 14 and 25. Whether they would have trained is #480.
+3. **Clipping and warm-up helped only partly within this budget.** Clipping at 0.1 barely
+   acts at k = 1 (7–9 % of steps) and left its collapses in place. Two of its four collapses
+   are the baseline's runs unchanged, score for score (k = 1, 4 qubits, seed 6, where no step
+   was clipped, and k = 4, 4 qubits, seed 1, where 0.6 % were), so they are not independent
+   evidence. The warm-up removed k = 4's collapses (0 of 20) but not k = 1's (1 of 20).
 4. **k = 8 matches density, and costs a fraction of it.** At lr 0.05, paired over 20 seeds, k = 8
    scored +0.024 MCC above density on average (Wilcoxon p = 0.23, no significant difference).
    It took 1.1× (4 qubits) and 1.4× (6 qubits) the time of k = 1, not 8×, because on
    `default.qubit` with backprop the k draws run as one vectorised batch. At 6 qubits it was
    about 17× faster than density.
-5. **Density is not immune either.** It collapsed once, at lr 0.01 on seed 0 at 6 qubits, the
-   seed where k = 1 collapsed under every variant. Some splits are simply hard to train at
-   this noise level, and fewer draws make hitting that failure more likely.
+5. **Density is not immune either.** It collapsed once, at lr 0.01 on seed 0 at 6 qubits
+   (stopped at epoch 27), the seed where k = 1 collapsed under every variant. Some splits are
+   slow or hard to train at this noise level, and with fewer draws more runs had not trained
+   by the end of the budget.
 
 ## Recommendation
 
@@ -113,8 +147,13 @@ On the evidence above (breast-cancer proxy, 4 and 6 qubits, backprop; the benchm
 #414):
 
 - **Train with `noise_trajectories ≥ 8`** when using `noise_method="trajectories"` at noise of a
-  few percent per gate. On backprop devices it cost little more than k = 1 here.
-- **Keep lr 0.05**; don't lower it to stabilise trajectory training.
+  few percent per gate. It was the one setting at which every run trained within the same
+  budget as density, and on backprop devices it cost little more than k = 1 here.
+- **With fewer draws, give training a longer budget** (more epochs, and a patience well above
+  10) and check the runs. Two of the three runs re-run for 60 epochs trained; whether a longer
+  budget is enough in general is #480.
+- **Keep lr 0.05** unless the budget is lengthened too: within 30 epochs a lower rate did not
+  help.
 - **Warm-up and clipping aren't worth adding to the library** on this evidence: k = 8 does
   better alone, and adds no option.
 - **The default stays `noise_trajectories=1`.** On the adjoint path, which
@@ -128,6 +167,10 @@ On the evidence above (breast-cancer proxy, 4 and 6 qubits, backprop; the benchm
 - One small proxy dataset (breast cancer; the benchmark datasets are #414), 4 and 6 qubits,
   one noise model (depolarizing). The ">12 qubit" regime,
   where trajectories matter most, is extrapolated, not measured.
+- **Training budget.** At most 30 epochs, with early stopping (patience 10) and checkpoint
+  selection on the clean validation rows, and no longer-budget control. A collapse is a run
+  that had not trained by then; the study cannot separate late starts from stalls, and that
+  weakens the learning-rate and clipping findings most (#480).
 - 10 seeds per cell. A collapse rate of a few percent at k = 8 cannot be ruled out: 0 of 100
   bounds it below about 3 % (95 %, one-sided), assuming independent runs, and they are not
   fully independent.

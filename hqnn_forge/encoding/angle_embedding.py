@@ -497,8 +497,9 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
     noise_trajectories:
         Draws averaged per sample with ``noise_method="trajectories"``.
         Default 1; must be 1 for ``"density"``.  Use 8 or more at noise of a
-        few percent per gate: fewer draws occasionally made training collapse
-        on the breast-cancer proxy (#347; see :mod:`hqnn_forge.noise`).
+        few percent per gate: with fewer draws some runs on the breast-cancer
+        proxy had not started to train within 30 epochs (#347, #480; see
+        :mod:`hqnn_forge.noise`).
     noise_channel:
         The channel ``noise_level`` is the strength of: ``"depolarizing"``
         (default), ``"amplitude_damping"`` (T1), ``"phase_damping"`` (T2),
