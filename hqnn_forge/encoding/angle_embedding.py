@@ -481,7 +481,8 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         With ``noise_level > 0`` the train-mode forward pass runs the circuit
         on ``default.mixed`` with that channel inserted, so gradients are
         computed through the noisy circuit (noise-aware training); eval mode
-        is always noiseless, like dropout.  With the
+        is noiseless, like dropout, outside the blocks of
+        :mod:`hqnn_forge.noise`.  With the
         default ``noise_method``, backprop keeps a ``batch × 4^n`` density
         matrix per operation, so this is practical up to about 6 qubits.  See
         :mod:`hqnn_forge.noise`.
@@ -521,6 +522,19 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         non-negative ``int`` (NumPy integers are converted) or ``None``
         (default: unseeded).  Inert for exact simulation.  Shown in the repr;
         see :func:`~hqnn_forge.encoding.angle_embedding.resolve_device`.
+    readout_error:
+        ``None`` (default) or a pair ``(p01, p10)``, each in ``[0, 1]``: in
+        **train mode** each measured bit reads 1 instead of 0 with
+        probability ``p01`` and 0 instead of 1 with ``p10``, which maps every
+        output to ``(1 − p01 − p10) ⟨Z⟩ + (p10 − p01)``
+        (:func:`hqnn_forge.noise.readout_error_map`).  Independent of
+        ``noise_level``, and applied after its channel.  Eval mode has none;
+        evaluate under one with :func:`hqnn_forge.noise.apply_readout_error`.
+        Not applied inside an :func:`~hqnn_forge.noise.apply_depolarizing_noise`
+        block, like the rest of the training noise.  With ``shots`` the map
+        rescales the sampled estimate: the mean is exact, the extra spread of
+        flipped shots is not modelled.  Stored as plain floats; shown in the
+        repr.
 
     Attributes
     ----------
@@ -537,6 +551,7 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
     noise_position : str
     noise_method : str
     noise_trajectories : int
+    readout_error : tuple[float, float] or None
     qlayer : pennylane.qnn.TorchLayer
         The underlying differentiable quantum layer.
 

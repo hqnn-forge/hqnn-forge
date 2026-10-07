@@ -276,7 +276,8 @@ def load_checkpoint(
         Constructor arguments that replace the stored ones.  Without
         ``allow_architecture_override``, only :data:`WEIGHT_SAFE_ARGS`
         (``device_name``, ``diff_method``, ``dropout_p``, the five
-        ``noise_*`` training-noise options, ``shots`` and ``seed``) may be given --
+        ``noise_*`` training-noise options, ``readout_error``, ``shots`` and
+        ``seed``) may be given --
         typically to run a saved model on a different simulator or with a
         finite shot count, or to fine-tune it at a different dropout rate or
         training-noise level.

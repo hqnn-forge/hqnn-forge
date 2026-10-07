@@ -179,7 +179,8 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
     ``noise_level`` / ``noise_position`` / ``noise_method`` /
     ``noise_trajectories`` / ``noise_channel`` add training-time noise
     (depolarizing by default; ``noise_level``'s range depends on the
-    channel), and
+    channel), ``readout_error`` a train-mode readout error ``(p01, p10)`` on
+    the outputs, and
     ``shots`` and ``seed`` finite-shot sampling and its device seed, exactly as in
     :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
     """

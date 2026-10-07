@@ -40,9 +40,15 @@ error; keeping the step in ``prepare_inputs`` is what makes the replay
 faithful.
 
 The one sanctioned difference between ``forward(x)`` and
-``qlayer(prepare_inputs(x))`` is training-time noise: an encoding layer built
-with ``noise_level > 0`` runs a noisy circuit in ``train()`` mode.  In
-``eval()`` mode, or without training noise, the two are identical.
+``qlayer(prepare_inputs(x))`` is noise, in two forms.  Training-time noise: an
+encoding layer built with ``noise_level > 0`` runs a noisy circuit in
+``train()`` mode, and one built with ``readout_error`` passes the circuit's
+output through that readout error in ``train()`` mode.  And an open
+:func:`hqnn_forge.noise.apply_readout_error` block, which does the same in
+either mode.  In ``eval()`` mode outside such a block, or without any of
+these, the two are identical.  A readout error acts on the output, not in the
+circuit, so a caller that replays ``qlayer(prepare_inputs(x))`` never sees
+it.
 
 Why not ``isinstance``
 ----------------------
@@ -82,7 +88,8 @@ class EncodingLayer(CircuitLayer, Protocol):
     A :class:`CircuitLayer` taking ``n_features`` inputs through ``prepare_inputs``.
 
     ``forward(x)`` is ``qlayer(prepare_inputs(x))``, except for training-time
-    noise in ``train()`` mode (see the module docstring).
+    noise in ``train()`` mode and a readout error applied to the output (see
+    the module docstring).
     """
 
     n_features: int

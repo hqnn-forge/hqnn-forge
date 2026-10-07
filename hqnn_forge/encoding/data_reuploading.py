@@ -380,6 +380,11 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
         or by trajectories (amplitude damping with restrictions).  See
         :mod:`hqnn_forge.noise`.
+    readout_error:
+        A train-mode readout error ``(p01, p10)`` on the outputs, exactly as
+        for :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: train mode
+        only, and with ``shots`` it rescales the sampled estimate.  Default
+        ``None``.
     shots, seed:
         Finite-shot sampling and the device seed, exactly as for
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
