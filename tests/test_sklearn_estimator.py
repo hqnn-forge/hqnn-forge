@@ -514,7 +514,8 @@ class TestCalibration:
     def _nll(y: np.ndarray, p: np.ndarray) -> float:
         return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
-    def _fit(self, calibration: str | None, seed: int = 0, **kw: Any) -> HybridClassifierEstimator:
+    # Any: the tests read calibrator_ and threshold_ as the type each one fitted.
+    def _fit(self, calibration: str | None, seed: int = 0, **kw: Any) -> Any:
         X, y = self._noisy_data()
         params = {**self.CAL, "random_state": seed, "calibration": calibration, **kw}
         return HybridClassifierEstimator(**params).fit(X, y)
@@ -630,7 +631,7 @@ class TestCalibration:
         from hqnn_forge import sklearn as est_module
         from hqnn_forge.training.trainer import _validation_temperature
 
-        def train(model: torch.nn.Module, *args: Any, **kw: Any) -> Any:
+        def train(model: Any, *args: Any, **kw: Any) -> Any:
             history = train_model(model, *args, **kw)
             forward = model.forward
             model.forward = lambda x: logits(forward, x)  # type: ignore[method-assign]
@@ -664,7 +665,7 @@ class TestCalibration:
         y = (X[:, 0] + 0.05 * rng.standard_normal(240) > 13.0).astype(int)
         params = {**self.CAL, "random_state": 0}
         raw = HybridClassifierEstimator(**params).fit(X, y)
-        cal = HybridClassifierEstimator(**params, calibration="platt").fit(X, y)
+        cal: Any = HybridClassifierEstimator(**params, calibration="platt").fit(X, y)
         assert raw.threshold_ == t and cal.calibrator_.a > 0
         assert len(np.unique(raw.predict(X))) == 2
         np.testing.assert_array_equal(raw.predict(X), cal.predict(X))
@@ -685,7 +686,7 @@ class TestCalibration:
         params = {**self.CAL, "random_state": 0}
         raw = HybridClassifierEstimator(**params).fit(X, y)
         with pytest.warns(UserWarning, match=f"has no fit on the validation split.*{match}"):
-            cal = HybridClassifierEstimator(**params, calibration=calibration).fit(X, y)
+            cal = HybridClassifierEstimator(**{**params, "calibration": calibration}).fit(X, y)
         assert cal.calibrator_ is None
         assert cal.threshold_ == raw.threshold_
         np.testing.assert_array_equal(cal.predict_proba(X), raw.predict_proba(X))
