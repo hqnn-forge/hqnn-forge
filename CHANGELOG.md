@@ -414,6 +414,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of ASCII (#451)
 - Switched the package build backend from setuptools to `uv_build` and updated the
   package metadata for PEP 639-compatible license handling (#458)
+- `expressibility` and `entangling_capability` run each chunk of sampled states as one
+  broadcast tape instead of tape by tape, with the same draws and bit-identical states for
+  every encoding layer of this package: the default 5000 pairs of a 2-layer angle layer went
+  from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
+  take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
