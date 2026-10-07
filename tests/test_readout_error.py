@@ -30,6 +30,7 @@ from hqnn_forge.models import (
 from hqnn_forge.noise import (
     apply_depolarizing_noise,
     apply_readout_error,
+    apply_shots,
     noise_sweep,
     readout_error_map,
     validate_readout_error,
@@ -126,6 +127,22 @@ class TestPostHoc:
             with apply_readout_error(layer, P01, P10):
                 both = layer(x)
         torch.testing.assert_close(both, readout_error_map(noisy, P01, P10))
+
+    def test_composes_with_a_shots_block(self) -> None:
+        # Two layers with the same weights and device seed draw the same shots.
+        x = _x()
+        outputs = []
+        for pair in (None, (P01, P10)):
+            layer = _layer(seed=7)
+            with torch.no_grad(), apply_shots(layer, 200):
+                if pair is None:
+                    outputs.append(layer(x))
+                else:
+                    with apply_readout_error(layer, *pair):
+                        outputs.append(layer(x))
+        sampled, both = outputs
+        assert not torch.allclose(sampled, _layer()(x), atol=1e-3)  # really sampled
+        torch.testing.assert_close(both, readout_error_map(sampled, P01, P10))
 
     def test_block_replaces_the_layer_s_own_training_readout(self) -> None:
         layer = _layer(readout_error=(0.3, 0.3))
@@ -231,6 +248,23 @@ class TestSweep:
         with apply_readout_error(model, P01, P10):
             torch.testing.assert_close(points[2].probabilities, model.predict_proba(x))
 
+    def test_a_bare_pair_is_two_symmetric_levels(self) -> None:
+        # ps is the list of levels; one asymmetric error is [(p01, p10)].
+        model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
+        x = _x()
+        assert [pt.p for pt in noise_sweep(model, x, (P01, P10), channel="readout")] == [
+            (P01, P01),
+            (P10, P10),
+        ]
+        assert [pt.p for pt in noise_sweep(model, x, [(P01, P10)], channel="readout")] == [
+            (P01, P10)
+        ]
+
+    def test_unknown_channel_error_names_readout(self) -> None:
+        model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
+        with pytest.raises(ValueError, match="'phase_flip', 'readout'; got 'readouts'"):
+            noise_sweep(model, _x(), [0.01], channel="readouts")  # type: ignore[arg-type]
+
     def test_every_error_is_checked_before_the_first_evaluation(self) -> None:
         model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
         calls = {"n": 0}
@@ -262,7 +296,7 @@ class TestSweep:
                 readout.probabilities, flip.probabilities, atol=1e-6, rtol=0
             )
 
-    @pytest.mark.parametrize("bad", [None, True, "ab"])
+    @pytest.mark.parametrize("bad", [None, True, np.True_, "ab"])
     def test_invalid_entry(self, bad: Any) -> None:
         model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
         with pytest.raises(ValueError, match="readout error"):
@@ -335,6 +369,40 @@ class TestTraining:
         assert model.get_config()["readout_error"] == (P01, P10)
         _assert_train_mode_only(model.quantum_layer)
 
+    def test_with_shots_it_maps_the_sampled_estimate(self) -> None:
+        # Same weights and device seed, so both layers draw the same shots.
+        x = _x()
+        sampled = {"device_name": "default.qubit", "diff_method": "parameter-shift"}
+        outputs = []
+        for readout_error in (None, (P01, P10)):
+            layer = _layer(shots=200, seed=7, readout_error=readout_error, **sampled)
+            layer.train()
+            with torch.no_grad():
+                outputs.append(layer(x))
+        torch.testing.assert_close(outputs[1], readout_error_map(outputs[0], P01, P10))
+
+    @pytest.mark.parametrize("channel", ["depolarizing", "amplitude_damping"])
+    def test_with_trajectories_it_maps_the_mean_over_draws(self, channel: str) -> None:
+        # The draws come from torch's generator: reseeded, both layers take the same.
+        x = _x()
+        outputs = []
+        for readout_error in (None, (P01, P10)):
+            layer = _layer(
+                noise_level=0.2,
+                noise_channel=channel,
+                noise_method="trajectories",
+                noise_trajectories=4,
+                readout_error=readout_error,
+            )
+            layer.train()
+            torch.manual_seed(11)
+            with torch.no_grad():
+                outputs.append(layer(x))
+        layer.eval()
+        with torch.no_grad():
+            assert not torch.allclose(outputs[0], layer(x), atol=1e-3)  # really noisy
+        torch.testing.assert_close(outputs[1], readout_error_map(outputs[0], P01, P10))
+
     def test_gradient_is_scaled_by_the_contrast(self) -> None:
         x = _x()
         grads = []
@@ -358,6 +426,23 @@ class TestTraining:
     def test_unordered_or_non_numeric_pair_is_a_value_error(self, bad: Any) -> None:
         with pytest.raises(ValueError, match="readout_error"):
             _layer(readout_error=bad)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            (True, 0),
+            (np.True_, 0),
+            np.array([True, False]),
+            torch.tensor([True, False]),
+            np.array([[0.1], [0.2]]),
+            torch.tensor([[0.1], [0.2]]),
+            ([0.1], [0.2]),
+        ],
+        ids=["bool", "np.bool_", "bool-array", "bool-tensor", "2x1-array", "2x1-tensor", "lists"],
+    )
+    def test_boolean_or_non_scalar_element_is_refused(self, bad: Any) -> None:
+        with pytest.raises(ValueError, match="readout_error"):
+            validate_readout_error(bad)
 
     @pytest.mark.parametrize(
         "pair",

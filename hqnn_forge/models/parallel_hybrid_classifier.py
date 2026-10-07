@@ -276,7 +276,11 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         ``(p01, p10)``: in train mode, each measured bit reads 1 instead of 0
         with probability ``p01`` and 0 instead of 1 with ``p10``, applied
         exactly to the ⟨Z⟩ readouts (see
-        :func:`hqnn_forge.noise.readout_error_map`).  Default ``None``.
+        :func:`hqnn_forge.noise.readout_error_map`).  It shifts every readout
+        by ``p10 − p01``, which the head learns, and ``predict_proba`` runs
+        without it: evaluate inside
+        :func:`hqnn_forge.noise.apply_readout_error` with the same pair to
+        keep the shift (#488).  Default ``None``.
 
     Attributes
     ----------

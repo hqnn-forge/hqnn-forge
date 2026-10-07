@@ -532,10 +532,14 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         ``noise_level``, and applied after its channel.  Eval mode has none;
         evaluate under one with :func:`hqnn_forge.noise.apply_readout_error`.
         Not applied inside an :func:`~hqnn_forge.noise.apply_depolarizing_noise`
-        block, like the rest of the training noise.  With ``shots`` the map
-        rescales the sampled estimate: the mean is exact, the extra spread of
-        flipped shots is not modelled.  Stored as plain floats; shown in the
-        repr.
+        block, like the rest of the training noise.  The head learns the
+        offset ``p10 − p01``, so a model trained with it is evaluated on
+        outputs without that shift unless the evaluation runs inside
+        ``apply_readout_error`` with the same pair (#488).  With ``shots``
+        the map rescales the sampled estimate: the mean is exact, but the
+        shot noise is scaled by ``|1 − p01 − p10|`` and so comes out smaller
+        than that of flipped shots (#486).  Stored as plain floats; shown in
+        the repr.
 
     Attributes
     ----------

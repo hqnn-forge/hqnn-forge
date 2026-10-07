@@ -72,7 +72,11 @@ The encoding layers and hybrid classifiers also take ``noise_level``,
 the same noisy QNode (built by :func:`training_noise_qnode`) whenever it is
 in **train mode**, so gradients are computed through the noisy circuit, and
 the noiseless QNode in eval mode, like dropout.  ``readout_error`` is the
-same kind of option, train mode only, with or without a ``noise_level``.  Evaluation under noise is
+same kind of option, train mode only, with or without a ``noise_level``.  Unlike
+a channel that only shrinks ⟨Z⟩, it also shifts every output by
+``p10 − p01``, which the head learns: evaluate such a model inside
+:func:`apply_readout_error` with the same pair, or it is evaluated on outputs
+without the shift it was trained on (#488).  Evaluation under noise is
 then done with :func:`apply_depolarizing_noise` / :func:`noise_sweep`, which
 take precedence over the training-time channel if both are active at once.
 ``noise_level=0`` (the default) leaves the layer exactly as before.
@@ -187,6 +191,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import AbstractContextManager, contextmanager
 from typing import Literal, NamedTuple
 
+import numpy as np
 import pennylane as qml
 import torch
 from torch import nn
@@ -777,7 +782,10 @@ def validate_readout_error(
     ------
     ValueError
         Unless ``readout_error`` is ``None`` or such a pair.  A string, a
-        mapping and a set are refused: they have no ``(p01, p10)`` order.
+        mapping and a set are refused: they have no ``(p01, p10)`` order.  So
+        is a boolean of any kind (``bool``, ``np.bool_``, a boolean tensor):
+        a comparison result is not a probability.  So is an element that is
+        not a scalar, such as the rows of a 2 × 1 array or tensor.
     """
     if readout_error is None:
         return None
@@ -792,7 +800,10 @@ def validate_readout_error(
     values = []
     for label, value in zip(("p01", "p10"), pair, strict=True):
         try:
-            if isinstance(value, (bool, str, bytes)):
+            # ndim: float() would take a one-element array or tensor.
+            if isinstance(value, (bool, np.bool_, str, bytes)) or getattr(value, "ndim", 0) != 0:
+                raise TypeError
+            if isinstance(value, torch.Tensor) and value.dtype == torch.bool:
                 raise TypeError
             number = float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError, RuntimeError):
@@ -814,9 +825,14 @@ def readout_error_map(expectations: torch.Tensor, p01: float, p10: float) -> tor
         ⟨Z⟩ → (1 − p01 − p10) ⟨Z⟩ + (p10 − p01),
 
     exactly, for every single-qubit ⟨Z⟩ readout, which is all the layers
-    measure.  ``p01 = p10 = p`` is ``"bit_flip"`` at ``position="end"``.  On a
-    shot-based layer the map is applied to the sampled estimate, so the mean
-    is exact but the spread of a flipped sample is not modelled.
+    measure.  ``p01 = p10 = p`` is ``"bit_flip"`` at ``position="end"``.
+
+    On a shot-based layer the map is applied to the sampled estimate, not to
+    each shot.  The mean is exact, but the shot noise is scaled by
+    ``|1 − p01 − p10|``, where flipped shots would give the standard
+    deviation ``sqrt((1 − ⟨Z'⟩²) / shots)`` of the mapped value ``⟨Z'⟩``.
+    That is larger for every ``⟨Z⟩``, so the spread under a readout error
+    comes out too small, and is zero at ``p01 + p10 = 1`` (#486).
     """
     return (1.0 - p01 - p10) * expectations + (p10 - p01)
 
@@ -830,7 +846,8 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
     and eval mode alike, without touching the weights, and on top of an open
     :func:`apply_depolarizing_noise` or :func:`apply_shots` block.  A layer's
     own training-time ``readout_error`` is replaced, not added to, while the
-    block is open.
+    block is open.  On sampled outputs the mean is exact and the shot noise
+    too small; see :func:`readout_error_map`.
 
     The map is applied where the layer runs its circuit
     (:meth:`TrainingNoiseMixin._run_circuit`), not inside the QNode, so the
@@ -1001,7 +1018,10 @@ def noise_sweep(
         ``channel="readout"``, readout errors instead: a pair ``(p01, p10)``,
         or one number ``p`` for the symmetric ``(p, p)``.  Numbers may be
         NumPy scalars or 0-d tensors, so a ``torch.linspace`` works for
-        either kind of channel.
+        either kind of channel.  ``ps`` is always the list of levels: a
+        single asymmetric error is ``[(p01, p10)]``.  A bare ``(p01, p10)``
+        is two symmetric levels, ``(p01, p01)`` and ``(p10, p10)``, unlike
+        the two arguments of :func:`apply_readout_error`.
     position, channel:
         Passed to :func:`apply_depolarizing_noise`.  ``channel="readout"``
         sweeps :func:`apply_readout_error` instead; ``position`` is then
@@ -1018,11 +1038,14 @@ def noise_sweep(
     Raises
     ------
     ValueError
-        If only one of ``y`` and ``score_fn`` is given, or if any level is out
+        If only one of ``y`` and ``score_fn`` is given, if ``channel`` is
+        neither a noise channel nor ``"readout"``, or if any level is out
         of range -- checked before the first evaluation, not as the sweep
         reaches it.
     TypeError
-        If ``model`` has no ``predict_proba``.
+        If ``model`` has no ``predict_proba``, or with ``channel="readout"``
+        if its quantum layer is not a :class:`TrainingNoiseMixin` (see
+        :func:`apply_readout_error`).
     """
     if (y is None) != (score_fn is None):
         raise ValueError("pass both y and score_fn, or neither.")
@@ -1031,6 +1054,10 @@ def noise_sweep(
         raise TypeError(
             f"noise_sweep needs a model with predict_proba; got {type(model).__name__}."
         )
+    if channel != "readout" and channel not in CHANNELS:
+        # validate_noise would list the noise channels only.
+        names = ", ".join(map(repr, (*CHANNELS, "readout")))
+        raise ValueError(f"channel must be one of {names}; got {channel!r}.")
     # Materialised and range-checked up front: the levels may arrive as a
     # generator, and a bad one at the end would otherwise be found only after
     # every earlier (O(4^n)) evaluation had already been paid for.

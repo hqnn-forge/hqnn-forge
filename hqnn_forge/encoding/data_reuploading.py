@@ -383,7 +383,9 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
     readout_error:
         A train-mode readout error ``(p01, p10)`` on the outputs, exactly as
         for :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: train mode
-        only, and with ``shots`` it rescales the sampled estimate.  Default
+        only, so evaluation has none unless it runs inside
+        ``apply_readout_error``, and with ``shots`` it rescales the sampled
+        estimate, whose shot noise comes out too small (#486).  Default
         ``None``.
     shots, seed:
         Finite-shot sampling and the device seed, exactly as for
