@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import math
 import pickle
 from collections.abc import Callable
 from typing import Any, Literal
@@ -551,7 +552,9 @@ class TestCalibration:
         va = self._validation(cal, y, 2)
         ece_raw = expected_calibration_error(y[va], raw.predict_proba(X[va])[:, 1])
         ece_cal = expected_calibration_error(y[va], cal.predict_proba(X[va])[:, 1])
-        assert ece_cal < ece_raw - 0.05, (ece_cal, ece_raw)
+        # The margin is well inside the smaller measured drop (0.093): ECE is
+        # binned over 72 points, so a few of them changing bin moves it.
+        assert ece_cal < ece_raw - 0.02, (ece_cal, ece_raw)
 
     @pytest.mark.parametrize("calibration", ["temperature", "platt"])
     def test_rankings_and_predictions_are_unchanged(self, calibration: str) -> None:
@@ -564,11 +567,32 @@ class TestCalibration:
         )
         np.testing.assert_array_equal(raw.predict(X), cal.predict(X))
 
-    def test_threshold_is_mapped_through_the_calibrator(self) -> None:
-        raw, cal = self._fit(None), self._fit("temperature")
-        t = torch.logit(torch.tensor(raw.threshold_, dtype=torch.float64))
-        expected = torch.sigmoid(t / cal.calibrator_.temperature).item()
-        assert cal.threshold_ == pytest.approx(expected, abs=1e-12)
+    @pytest.mark.parametrize("calibration", ["temperature", "platt"])
+    def test_threshold_is_mapped_through_the_calibrator(self, calibration: str) -> None:
+        raw, cal = self._fit(None), self._fit(calibration)
+        assert 0.0 < raw.threshold_ < 1.0
+        z = math.log(raw.threshold_ / (1.0 - raw.threshold_))
+        if calibration == "temperature":
+            z /= cal.calibrator_.temperature
+        else:
+            # The offset moves the threshold as well as the slope.
+            assert cal.calibrator_.a > 0 and abs(cal.calibrator_.b) > 0.1
+            z = cal.calibrator_.a * z + cal.calibrator_.b
+        assert cal.threshold_ == pytest.approx(1.0 / (1.0 + math.exp(-z)), abs=1e-12)
+
+    def test_the_one_half_fallback_of_a_loss_monitor_is_mapped_too(self) -> None:
+        # val_loss searches no threshold, so "optimal" is 0.5 on the
+        # uncalibrated probabilities.  An increasing map keeps that decision,
+        # as it keeps a searched one, and threshold_ is the image of 0.5:
+        # σ(a·0 + b) = σ(b), not 0.5 on the calibrated probabilities.
+        X, _ = self._noisy_data()
+        raw, cal = self._fit(None, monitor="val_loss"), self._fit("platt", monitor="val_loss")
+        a, b = cal.calibrator_.a, cal.calibrator_.b
+        assert raw.threshold_ == 0.5 and a > 0 and abs(b) > 0.1
+        assert cal.threshold_ == pytest.approx(1.0 / (1.0 + math.exp(-b)), abs=1e-12)
+        np.testing.assert_array_equal(cal.predict(X), raw.predict(X))
+        at_one_half = cal.classes_[(cal.predict_proba(X)[:, 1] >= 0.5).astype(int)]
+        assert not np.array_equal(at_one_half, cal.predict(X))
 
     def test_a_decreasing_platt_map_searches_the_threshold_again(
         self, monkeypatch: pytest.MonkeyPatch

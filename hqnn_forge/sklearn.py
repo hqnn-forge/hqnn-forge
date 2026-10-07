@@ -161,7 +161,10 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         they change no ranking, and with ``threshold="optimal"`` ``predict``
         keeps deciding on the uncalibrated probabilities: it returns exactly
         what it would uncalibrated, and ``threshold_`` reports the threshold
-        mapped through the same function.  A Platt slope ≤ 0 (a model
+        mapped through the same function.  That holds under
+        ``monitor="val_loss"`` too, where the threshold is the 0.5 fallback
+        on the uncalibrated probabilities and ``threshold_`` its image
+        (``σ(b)`` for Platt, 0.5 for a temperature).  A Platt slope ≤ 0 (a model
         anti-correlated with the labels) reverses the order instead, and the
         threshold is then searched again on the calibrated validation
         probabilities (under ``monitor="val_loss"``, which searches none,
@@ -204,8 +207,14 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         and an increasing calibration it is the image of the uncalibrated
         threshold: ``predict`` compares the uncalibrated float32 probabilities
         with that one, and ``predict_proba(X)[:, 1] >= threshold_`` gives the
-        same labels except for logits within float32 rounding of the
-        threshold's, which occurs once the sigmoid saturates.
+        same labels with two exceptions.  A logit whose float32 sigmoid rounds
+        onto the threshold from below is positive for ``predict`` and negative
+        there; that can happen at any threshold, over a wider stretch of
+        logits as the sigmoid saturates.  And the image itself rounds to
+        exactly 1.0 (or 0.0) once the calibrated sigmoid saturates in float64,
+        which a Platt slope above 1 or a temperature below 1 brings on well
+        inside the float32 range; every probability saturated with it then
+        compares equal to it, whichever side of the threshold its logit is.
     calibrator_ : TemperatureScaler, PlattScaler or None
         The fitted calibration; ``None`` without ``calibration``, or when the
         validation split had no finite fit.
