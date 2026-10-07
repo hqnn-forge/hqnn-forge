@@ -1,0 +1,120 @@
+name: Docs
+
+# The API reference site (#322): mkdocs-material + mkdocstrings, built with
+# --strict so an unresolved cross-reference or a broken page fails the job,
+# then checked for exported names that have no entry.  Pushes to main deploy
+# it to GitHub Pages once Pages is enabled with Settings -> Pages -> Source:
+# GitHub Actions; until then the deploy job is skipped, not failed.
+
+on:
+  push:
+    branches: ["main"]
+  # Every pull request, whatever its base. Retargeting rebuilds the site
+  # through retarget.yml, which calls docs-build.yml only when the base
+  # changed, so a stacked PR is rebuilt against main after its parent merges.
+  # An `edited` trigger here would post a skipped check under the build's own
+  # name for every title or body edit, and the checks page would show that
+  # instead of the real result (#346).
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels its superseded run. Pushes to main group per
+# commit, as in tests.yml, so merges in quick succession never cancel a main
+# commit's build; the deploy job serialises on its own group. A retarget's
+# rebuild takes its group from the calling job in retarget.yml.
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The build lives in docs-build.yml so that retarget.yml can call it too. It
+  # is its own file, not a `workflow_call` on this one, because a caller must
+  # be granted every permission the called file's jobs ask for, and the deploy
+  # job below asks for pages and id-token write.
+  build:
+    uses: ./.github/workflows/docs-build.yml
+
+  # actions/deploy-pages fails (HTTP 404) while Pages is disabled or deploys
+  # from a branch, which would leave a red check on every main commit. Ask the
+  # Pages API first and deploy only when the source is GitHub Actions. Pages
+  # disabled (404) or a branch source skips the deploy with a notice; any other
+  # answer fails this job rather than skipping silently.
+  pages-status:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: read
+    outputs:
+      deploy: ${{ steps.status.outputs.deploy }}
+    steps:
+    - id: status
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        code=$(curl -sS -o pages.json -w '%{http_code}' \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+        case "$code" in
+          200)
+            build_type=$(jq -r .build_type pages.json)
+            if [ "$build_type" = "workflow" ]; then
+              echo "deploy=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Pages deploys from a branch ($build_type); set Settings -> Pages -> Source to GitHub Actions. Skipping the deploy."
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
+          404)
+            echo "::notice::GitHub Pages is not enabled (Settings -> Pages -> Source: GitHub Actions). Skipping the deploy."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "::error::The Pages API answered HTTP $code"
+            cat pages.json
+            exit 1
+            ;;
+        esac
+
+  deploy:
+    needs: [build, pages-status]
+    if: github.event_name == 'push' && needs.pages-status.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    # One deploy at a time. The group runs deploys in the order they are
+    # queued, not in commit order, so that alone does not stop an older
+    # commit's site from replacing a newer one: its build can finish later, or
+    # its run be re-run. The first step checks for that.
+    concurrency:
+      group: docs-pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    # Deploy only main's current tip. A commit main has moved past is skipped;
+    # the newer commit's own run deploys its site. One gap remains: the group
+    # keeps a single pending job, so an older commit's deploy queued after the
+    # tip's replaces it and then skips, leaving the site one push behind until
+    # the next one. That takes three deploys inside one deploy's runtime,
+    # which merging one PR per green main run rules out in practice.
+    - id: tip
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+        if [ "$tip" = "$GITHUB_SHA" ]; then
+          echo "current=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::main is at $tip, past $GITHUB_SHA. Skipping the deploy."
+          echo "current=false" >> "$GITHUB_OUTPUT"
+        fi
+    - id: deployment
+      if: steps.tip.outputs.current == 'true'
+      uses: actions/deploy-pages@v5.0.1

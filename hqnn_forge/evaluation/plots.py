@@ -28,6 +28,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
+    from hqnn_forge.evaluation.calibration import BinStrategy
+
 
 def _pyplot() -> Any:
     try:
@@ -152,7 +154,7 @@ def plot_reliability_diagram(
     prob: npt.ArrayLike,
     *,
     n_bins: int = 10,
-    strategy: str = "uniform",
+    strategy: BinStrategy = "uniform",
     title: str | None = None,
     ax: Axes | None = None,
 ) -> Figure:
@@ -173,13 +175,11 @@ def plot_reliability_diagram(
     ax:
         Draw into this axes.
     """
-    from hqnn_forge.evaluation.calibration import (
-        expected_calibration_error,
-        reliability_curve,
-    )
+    from hqnn_forge.evaluation.calibration import reliability_curve
 
-    confidence, frequency, counts = reliability_curve(y_true, prob, n_bins, strategy)  # type: ignore[arg-type]
-    ece = expected_calibration_error(y_true, prob, n_bins, strategy)  # type: ignore[arg-type]
+    confidence, frequency, counts = reliability_curve(y_true, prob, n_bins, strategy)
+    # expected_calibration_error, from the curve already computed.
+    ece = float((counts / counts.sum() * (frequency - confidence).abs()).sum())
     fig, axes = _axes(ax, (4.2, 4.0))
     axes.plot([0, 1], [0, 1], linestyle="--", color="grey", label="perfect calibration")
     axes.plot(confidence.numpy(), frequency.numpy(), marker="o", label=f"model (ECE {ece:.3f})")

@@ -459,6 +459,12 @@ def parameter_efficiency(model: nn.Module | int, score: float) -> float:
     """
     ``score`` per thousand trainable parameters, e.g. MCC/kParam.
 
+    A model's count includes every trainable parameter, also those that can
+    never move the output (``circuit_summary(...).n_inert_params``; 20 of the
+    published SHNN's 122).  That is the convention of the published results.
+    To state efficiency over the live parameters instead, pass that count as
+    an integer, and say which one was used.
+
     Parameters
     ----------
     model:

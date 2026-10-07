@@ -7,6 +7,7 @@ temperature and the benchmark's calibration columns (#319).
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Any
 
@@ -97,7 +98,8 @@ class TestMetrics:
         "y, p, match",
         [
             ([0, 1], [0.5], "differ in length"),
-            ([0, 2], [0.5, 0.5], "binary labels"),
+            ([0, 2], [0.5, 0.5], "0/1 labels"),
+            ([0, 1], [0.5, float("nan")], r"probabilities in \[0, 1\]"),
             ([0, 1], [0.5, 1.2], r"probabilities in \[0, 1\]"),
             ([], [], "empty"),
         ],
@@ -105,6 +107,24 @@ class TestMetrics:
     def test_bad_input(self, y: list[float], p: list[float], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             brier_score(y, p)
+
+    def test_bool_labels_score_as_0_and_1(self) -> None:
+        assert brier_score([False, True], [0.25, 0.5]) == pytest.approx(0.15625)
+
+    @pytest.mark.may_skip  # no CUDA device on the CI runners
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+    def test_cuda_inputs(self) -> None:
+        z, y = _synthetic(500, 9, a=0.5)
+        zc, yc = z.cuda(), y.cuda()
+        p = torch.sigmoid(z)
+        assert brier_score(yc, p.cuda()) == pytest.approx(brier_score(y, p))
+        assert expected_calibration_error(yc, p.cuda(), 10, "quantile") == pytest.approx(
+            expected_calibration_error(y, p, 10, "quantile")
+        )
+        assert TemperatureScaler.fit(zc, yc).temperature == pytest.approx(
+            TemperatureScaler.fit(z, y).temperature
+        )
+        assert PlattScaler.fit(zc, yc).a == pytest.approx(PlattScaler.fit(z, y).a)
 
     def test_bad_bins(self) -> None:
         with pytest.raises(ValueError, match="strategy must be"):
@@ -143,6 +163,34 @@ class TestTemperatureScaling:
         with pytest.raises(ValueError, match="both classes"):
             TemperatureScaler.fit(torch.randn(5), torch.zeros(5))
 
+    @pytest.mark.parametrize("scaler", [TemperatureScaler, PlattScaler])
+    @pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan])
+    def test_rejects_non_finite_logits(
+        self, scaler: type[TemperatureScaler | PlattScaler], bad: float
+    ) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            scaler.fit([-1.0, 0.5, bad, 1.0], [0, 1, 0, 1])
+
+    def test_no_finite_temperature_for_logits_that_separate_the_classes(self) -> None:
+        # Every margin positive (0 counts as not wrong): the NLL falls as T -> 0.
+        for z in ([-2.0, -1.0, 1.0, 2.0], [-2.0, 0.0, 1.0, 2.0]):
+            with pytest.raises(ValueError, match="separate the classes"):
+                TemperatureScaler.fit(z, [0, 0, 1, 1])
+
+    def test_no_finite_temperature_for_logits_no_better_than_chance(self) -> None:
+        # Sum of signed margins <= 0: the NLL falls as T -> infinity.
+        for z in ([2.0, 1.0, -1.0, -2.0], [1.0, -1.0, 1.0, -1.0], [0.0, 0.0, 0.0, 0.0]):
+            with pytest.raises(ValueError, match="no better than chance"):
+                TemperatureScaler.fit(z, [0, 0, 1, 1])
+
+    def test_one_wrong_margin_is_enough_for_a_finite_temperature(self) -> None:
+        z = torch.tensor([-2.0, 0.5, -0.5, 2.0], dtype=torch.float64)
+        y = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float64)
+        t = TemperatureScaler.fit(z, y).temperature
+        tt = torch.tensor(t, dtype=torch.float64, requires_grad=True)
+        (grad,) = torch.autograd.grad(F.binary_cross_entropy_with_logits(z / tt, y), tt)
+        assert 0 < t < math.inf and abs(float(grad)) < 1e-6
+
 
 class TestPlattScaling:
     def test_recovers_a_and_b_at_the_nll_optimum(self) -> None:
@@ -154,6 +202,22 @@ class TestPlattScaling:
         ab = torch.tensor([scaler.a, scaler.b], dtype=torch.float64, requires_grad=True)
         (grad,) = torch.autograd.grad(F.binary_cross_entropy_with_logits(ab[0] * z + ab[1], y), ab)
         assert grad.abs().max() < 1e-6
+
+    @pytest.mark.parametrize(
+        "z",
+        [
+            [-2.0, -1.0, 1.0, 2.0],  # separated in order
+            [2.0, 1.0, -1.0, -2.0],  # separated in reverse: a -> -infinity
+            [-2.0, 0.0, 0.0, 2.0],  # quasi-complete: tied only at the boundary
+        ],
+    )
+    def test_no_finite_fit_when_a_threshold_separates_the_classes(self, z: list[float]) -> None:
+        with pytest.raises(ValueError, match="separates the classes"):
+            PlattScaler.fit(z, [0, 0, 1, 1])
+
+    def test_reverse_ranked_overlapping_logits_fit_a_negative_a(self) -> None:
+        z, y = _synthetic(4000, 8, a=-0.6, b=0.2)
+        assert PlattScaler.fit(z, y).a == pytest.approx(-0.6, abs=0.08)
 
     def test_monotone_for_positive_a(self) -> None:
         z, y = _synthetic(2000, 6, a=0.7, b=0.5)
@@ -219,6 +283,25 @@ class TestTrainingHistory:
         )
         assert history.n_epochs == 2 and history.temperature is None
 
+    def test_none_when_the_validation_logits_separate_the_classes(self) -> None:
+        x = torch.tensor([[-2.0], [-1.0], [1.0], [2.0]])
+        y = torch.tensor([0.0, 0.0, 1.0, 1.0])
+        model = nn.Linear(1, 1)
+        with torch.no_grad():
+            model.weight.fill_(1.0)
+            model.bias.zero_()
+        history = train_model(
+            model,
+            nn.BCEWithLogitsLoss(),
+            torch.optim.SGD(model.parameters(), lr=0.0),
+            x,
+            y,
+            x,
+            y,
+            max_epochs=1,
+        )
+        assert history.n_epochs == 1 and history.temperature is None
+
 
 class TestBenchmark:
     def test_fit_and_score_reports_the_test_probabilities_calibration(self) -> None:
@@ -253,6 +336,39 @@ class TestBenchmark:
         assert fit.ece == pytest.approx(
             expected_calibration_error(y[70:], prob, benchmark.ECE_BINS, "quantile")
         )
+
+    def test_a_diverged_fold_scores_nan_calibration_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hqnn_forge import benchmark
+        from hqnn_forge.models import HybridBinaryClassifier
+        from hqnn_forge.utils import FocalLoss
+
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((60, 3))
+        y = (X[:, 0] > 0).astype(np.int64)
+        model = HybridBinaryClassifier(
+            3, 2, 1, device_name="default.qubit", diff_method="backprop"
+        )
+        # What a model with NaN weights predicts.
+        monkeypatch.setattr(model, "predict_proba", lambda x: torch.full((len(x),), math.nan))
+        fit = benchmark._fit_and_score(
+            model,
+            FocalLoss,
+            X[:30],
+            y[:30],
+            X[30:45],
+            y[30:45],
+            X[45:],
+            y[45:],
+            lr=0.05,
+            max_epochs=1,
+            batch_size=16,
+            patience=None,
+            batch_seed=0,
+        )
+        assert fit.mcc == 0.0
+        assert math.isnan(fit.brier) and math.isnan(fit.ece)
 
     def test_records_average_the_folds(self) -> None:
         from hqnn_forge import benchmark

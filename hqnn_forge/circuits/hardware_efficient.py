@@ -10,7 +10,7 @@ Applies one block of:
 
 Compared to the strongly-entangling layer this ansatz:
 
-* Uses half the parameters (1 angle per qubit vs. 3)
+* Uses a third of the parameters (1 angle per qubit vs. 3)
 * Has CNOT depth O(n) vs O(n)  (same depth, but CZ on real devices is often
   native and cheaper than CNOT)
 * Is better suited for near-term trapped-ion / superconducting devices with
@@ -50,14 +50,15 @@ def hardware_efficient_layer(
         Rotation angles tensor of shape ``(n_qubits,)``.
         ``weights[i]`` is the RY angle θ_i applied to qubit i.
     n_qubits:
-        Number of qubits.  Must equal ``weights.shape[0]``.
+        Number of qubits.  ``weights`` must have shape ``(n_qubits,)``.
 
     Raises
     ------
     ValueError
-        If ``weights.shape[0] != n_qubits``.
+        If ``weights.shape != (n_qubits,)``.  A ``(n_qubits, 3)`` row of a
+        ``Rot`` weight tensor would otherwise broadcast ``RY`` silently.
     """
-    if weights.shape[0] != n_qubits:
+    if weights.shape != (n_qubits,):
         raise ValueError(
             f"weights must have shape (n_qubits={n_qubits},); got {tuple(weights.shape)}."
         )

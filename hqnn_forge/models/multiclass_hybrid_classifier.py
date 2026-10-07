@@ -10,16 +10,16 @@ Architecture
     Input (batch, n_input_features)
          │
          ▼
-    [Classical encoder]  nn.Linear(n_input_features → n_qubits) + Tanh, · π
+    [Classical encoder]  nn.Linear(n_input_features → n_qubits) + Tanh (or Sigmoid), · π
          │
          ▼
     [Quantum encoding]   QuantumEncodingLayer / IQPEncodingLayer (n_qubits, n_layers)
-         │                  → ⟨Z_i⟩, shape (batch, n_qubits)
+         │                  → ⟨Z_i⟩, shape (batch, n_outputs)
          ▼
     [Dropout]
          │
          ▼
-    [Class heads]        nn.Linear(n_qubits → n_classes)
+    [Class heads]        nn.Linear(n_outputs → n_classes)
          │
          ▼
     Raw logits (batch, n_classes)
@@ -27,10 +27,11 @@ Architecture
 Design Notes
 ------------
 * The quantum layer is shared; the class heads are the rows of one
-  ``nn.Linear(n_qubits, n_classes)``, each a binary head reading the same
-  ``n_qubits`` expectation values.  This is the "ensemble of binary heads
-  sharing the quantum layer" option: the quantum parameter count does not
-  grow with ``n_classes``, only the head does (``n_qubits + 1`` per class).
+  ``nn.Linear(n_outputs, n_classes)``, each a binary head reading the same
+  ``n_outputs`` expectation values (``n_qubits``, or 1 with
+  ``readout="first"``).  This is the "ensemble of binary heads sharing the
+  quantum layer" option: the quantum parameter count does not grow with
+  ``n_classes``, only the head does (``n_outputs + 1`` per class).
 
 * ``strategy`` selects how the ``n_classes`` logits are turned into
   probabilities and, by implication, which loss to train with:
@@ -52,12 +53,10 @@ Design Notes
   :class:`~hqnn_forge.utils.FocalLoss`; this class exists for ``n_classes >
   2``.
 
-* Initialisation (``"restricted"``, ``"block_local"``, ``"normal"`` with
-  ``init_std``), encoder bypass and ``encoding_type`` behave as in
-  :class:`~hqnn_forge.models.HybridBinaryClassifier`.  The circuit options
-  added there since (``embedding_rotation``, ``entangler``, ``readout``,
-  ``encoder_activation``) are not supported here yet: this model always uses
-  the RX embedding, CNOT ring, all-qubit readout and a tanh encoder.
+* The classical encoder, quantum layer and dropout are the trunk
+  :class:`~hqnn_forge.models.HybridBinaryClassifier` builds, from the same
+  code, so every circuit, initialisation and training-noise option behaves
+  exactly as there.  Only the head differs.
 
 Parameters
 ----------
@@ -72,32 +71,36 @@ n_classes:
 strategy:
     ``"softmax"`` or ``"one_vs_rest"``; see above.
 use_classical_encoder, dropout_p, device_name, diff_method, init_strategy,
-encoding_type, init_std:
+encoding_type, embedding_rotation, entangler, readout, encoder_activation,
+init_std, noise_level, noise_position, noise_method, noise_trajectories,
+trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel, seed,
+readout_error:
     As for :class:`~hqnn_forge.models.HybridBinaryClassifier`.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 import torch.nn as nn
 
-from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod, QuantumEncodingLayer
-from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
-from hqnn_forge.initializers.restricted_variance import (
-    block_local_init_,
-    restricted_normal_init_,
+from hqnn_forge.encoding.angle_embedding import (
+    DeviceName,
+    DiffMethod,
+    Entangler,
+    Readout,
+    RotationAxis,
 )
-from hqnn_forge.utils.modes import eval_mode
+from hqnn_forge.models._trunk import DEFAULT_ENCODER_ACTIVATION, DEFAULT_INIT_STD, QuantumTrunk
+from hqnn_forge.models.base import ClassifierBase
+from hqnn_forge.noise import Channel, NoiseMethod, Position, validate_readout_error
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
 MulticlassStrategy = Literal["softmax", "one_vs_rest"]
 
-_DEFAULT_INIT_STD = 0.1
 
-
-class MulticlassHybridClassifier(nn.Module):
+class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     """
     Hybrid quantum-classical multiclass classifier.
 
@@ -115,25 +118,14 @@ class MulticlassHybridClassifier(nn.Module):
         Number of classes.  Default: 3.  Must be ``≥ 2``.
     strategy:
         ``"softmax"`` (default) or ``"one_vs_rest"``.
-    use_classical_encoder:
-        Prepend ``Linear(n_input_features → n_qubits) + Tanh``.  Default: True.
-        If ``False``, input must already lie in (-π, π); it is not rescaled.
-    dropout_p:
-        Dropout probability applied after the quantum layer, in ``[0, 1)``.
-        Default: 0.0.
-    device_name:
-        PennyLane device string.  Default: ``"lightning.qubit"``.
-    diff_method:
-        Gradient method.  Default: ``"adjoint"``.
-    init_strategy:
-        ``"restricted"``, ``"block_local"`` or ``"normal"``
-        (``N(0, init_std²)``).  Default: ``"restricted"``.
-    encoding_type:
-        ``"angle"`` or ``"iqp"``.  Default: ``"angle"``.
-    init_std:
-        Standard deviation for ``init_strategy="normal"``.  Default: 0.1.
-        Any other value with another ``init_strategy`` raises, since it would
-        be recorded in the config and ignored.
+    use_classical_encoder, dropout_p, device_name, diff_method,
+    init_strategy, encoding_type, embedding_rotation, entangler, readout,
+    encoder_activation, init_std, noise_level, noise_position, noise_method,
+    noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel, seed,
+    readout_error:
+        The trunk's options, exactly as for
+        :class:`~hqnn_forge.models.HybridBinaryClassifier`.  With
+        ``readout="first"`` every class head reads ⟨Z_0⟩ alone.
     init_seed:
         Seed for weight initialisation.  ``None`` (default) draws the initial
         weights from the global torch RNG; an int draws them from a private RNG
@@ -172,22 +164,39 @@ class MulticlassHybridClassifier(nn.Module):
         strategy: MulticlassStrategy = "softmax",
         use_classical_encoder: bool = True,
         dropout_p: float = 0.0,
-        device_name: DeviceName = "lightning.qubit",
-        diff_method: DiffMethod = "adjoint",
+        device_name: DeviceName = "auto",
+        diff_method: DiffMethod = "auto",
         init_strategy: str = "restricted",
         encoding_type: str = "angle",
-        init_std: float = _DEFAULT_INIT_STD,
+        embedding_rotation: RotationAxis = "X",
+        entangler: Entangler = "ring",
+        readout: Readout = "all",
+        encoder_activation: str = DEFAULT_ENCODER_ACTIVATION,
+        init_std: float = DEFAULT_INIT_STD,
+        noise_level: float = 0.0,
+        noise_position: Position = "all",
+        noise_method: NoiseMethod = "density",
+        noise_trajectories: int = 1,
         init_seed: int | None = None,
+        classical_encoder: nn.Module | None = None,
+        trainable_input_scaling: bool = False,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
+        seed = as_seed(seed, "seed")
+        # Plain floats: _config goes into the checkpoint as it is.
+        readout_error = validate_readout_error(readout_error)
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
         # caller's stream is exactly where it was afterwards -- also when a
         # check below raises after some layers were built.
         with seeded_rng(init_seed) as reseed:
-            self._config: dict[str, Any] = dict(
+            self._config = dict(
                 n_input_features=n_input_features,
                 n_qubits=n_qubits,
                 n_layers=n_layers,
@@ -199,78 +208,63 @@ class MulticlassHybridClassifier(nn.Module):
                 diff_method=diff_method,
                 init_strategy=init_strategy,
                 encoding_type=encoding_type,
+                embedding_rotation=embedding_rotation,
+                entangler=entangler,
+                readout=readout,
+                encoder_activation=encoder_activation,
                 init_std=init_std,
+                noise_level=noise_level,
+                noise_position=noise_position,
+                noise_method=noise_method,
+                noise_trajectories=noise_trajectories,
                 init_seed=init_seed,
+                classical_encoder=classical_encoder,
+                trainable_input_scaling=trainable_input_scaling,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
             )
 
             if n_classes < 2:
                 raise ValueError(f"n_classes must be ≥ 2; got {n_classes}.")
             if strategy not in ("softmax", "one_vs_rest"):
                 raise ValueError(f"strategy must be 'softmax' or 'one_vs_rest'; got {strategy!r}.")
-            if init_strategy not in ("restricted", "block_local", "normal"):
-                raise ValueError(
-                    f"init_strategy must be 'restricted', 'block_local' or 'normal'; "
-                    f"got {init_strategy!r}."
-                )
             if not 0.0 <= dropout_p < 1.0:
                 raise ValueError(f"dropout_p must be in [0, 1); got {dropout_p}.")
-            if init_std <= 0.0:
-                raise ValueError(f"init_std must be > 0; got {init_std}.")
-            if init_strategy != "normal" and init_std != _DEFAULT_INIT_STD:
-                raise ValueError(
-                    f"init_std applies to init_strategy='normal' only; "
-                    f"'{init_strategy}' derives its own sigma from the circuit size, so "
-                    f"init_std={init_std} would be recorded in the config and ignored."
-                )
-
-            self.n_input_features = n_input_features
-            self.n_qubits = n_qubits
-            self.n_layers = n_layers
             self.n_classes = n_classes
             self.strategy = strategy
-            self.init_strategy = init_strategy
-            self.init_std = init_std
-            self.use_classical_encoder = use_classical_encoder
 
-            # ── Classical encoder ─────────────────────────────────────────────
-            if use_classical_encoder:
-                self.classical_encoder: nn.Module = nn.Sequential(
-                    nn.Linear(n_input_features, n_qubits),
-                    nn.Tanh(),
-                )
-            else:
-                if n_input_features != n_qubits:
-                    raise ValueError(
-                        f"When use_classical_encoder=False, n_input_features "
-                        f"({n_input_features}) must equal n_qubits ({n_qubits})."
-                    )
-                self.classical_encoder = nn.Identity()
-
-            # ── Quantum encoding layer (shared by every class head) ───────────
-            self.quantum_layer: QuantumEncodingLayer | IQPEncodingLayer
-            if encoding_type == "angle":
-                self.quantum_layer = QuantumEncodingLayer(
-                    n_qubits=n_qubits,
-                    n_layers=n_layers,
-                    device_name=device_name,
-                    diff_method=diff_method,
-                )
-            elif encoding_type == "iqp":
-                self.quantum_layer = IQPEncodingLayer(
-                    n_qubits=n_qubits,
-                    n_layers=n_layers,
-                    n_repeats=1,
-                    device_name=device_name,
-                    diff_method=diff_method,
-                )
-            else:
-                raise ValueError(f"Unsupported encoding_type: {encoding_type}")
-
-            # ── Dropout ───────────────────────────────────────────────────────
-            self.dropout = nn.Dropout(p=dropout_p) if dropout_p > 0.0 else nn.Identity()
+            # ── Shared trunk: encoder → quantum layer → dropout ───────────────
+            n_readouts = self._build_trunk(
+                n_input_features=n_input_features,
+                n_qubits=n_qubits,
+                n_layers=n_layers,
+                use_classical_encoder=use_classical_encoder,
+                dropout_p=dropout_p,
+                device_name=device_name,
+                diff_method=diff_method,
+                init_strategy=init_strategy,
+                encoding_type=encoding_type,
+                embedding_rotation=embedding_rotation,
+                entangler=entangler,
+                readout=readout,
+                encoder_activation=encoder_activation,
+                init_std=init_std,
+                noise_level=noise_level,
+                noise_position=noise_position,
+                noise_method=noise_method,
+                noise_trajectories=noise_trajectories,
+                classical_encoder=classical_encoder,
+                trainable_input_scaling=trainable_input_scaling,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
+            )
 
             # ── Class heads: one row per class ────────────────────────────────
-            self.head = nn.Linear(n_qubits, n_classes)
+            self.head = nn.Linear(n_readouts, n_classes)
 
             # ── Small-angle restricted-variance initialisation ─────────────────
             reseed()
@@ -278,21 +272,14 @@ class MulticlassHybridClassifier(nn.Module):
 
     # ------------------------------------------------------------------
     def _initialise_weights(self) -> None:
-        """Restricted-variance (or chosen) init on the quantum weights; Xavier on the linear layers."""
+        """Xavier on the encoder and heads; ``init_strategy`` on the quantum weights."""
+        # A custom encoder is left as given (it may be pretrained).
         for module in self.modules():
-            if isinstance(module, nn.Linear):
+            if isinstance(module, nn.Linear) and id(module) not in self._custom_encoder_ids:
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-
-        weights = self.quantum_layer.qlayer.weights  # (n_layers, n_qubits, 3)
-        if self.init_strategy == "block_local":
-            block_local_init_(weights.data, n_qubits=self.n_qubits)
-        elif self.init_strategy == "normal":
-            with torch.no_grad():
-                weights.normal_(mean=0.0, std=self.init_std)
-        else:
-            restricted_normal_init_(weights.data, n_qubits=self.n_qubits, n_layers=self.n_layers)
+        self._initialise_quantum_weights()
 
     # ------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -312,11 +299,7 @@ class MulticlassHybridClassifier(nn.Module):
             ``nn.BCEWithLogitsLoss`` with :meth:`one_hot` targets
             (``strategy="one_vs_rest"``).
         """
-        x = self.classical_encoder(x)  # (B, n_qubits)
-        # Tanh output (-1, 1) → (-π, π); bypassed input is already in (-π, π).
-        if self.use_classical_encoder:
-            x = x * torch.pi
-        x = self.quantum_layer(x)  # (B, n_qubits), values ∈ [-1, 1]
+        x = self._quantum_features(x)  # (B, n_outputs), values ∈ [-1, 1]
         x = self.dropout(x)
         return self.head(x)  # (B, n_classes)
 
@@ -335,8 +318,7 @@ class MulticlassHybridClassifier(nn.Module):
         Runs in eval mode whatever mode the model is in (dropout off) and
         restores every submodule's ``training`` flag afterwards.
         """
-        with eval_mode(self):
-            logits = self.forward(x)
+        logits = self._eval_logits(x)
         if self.strategy == "softmax":
             return torch.softmax(logits, dim=-1)
         return torch.softmax(nn.functional.logsigmoid(logits), dim=-1)
@@ -356,9 +338,7 @@ class MulticlassHybridClassifier(nn.Module):
         class 1 while ``predict`` returns class 2.  Use this method, not
         ``predict_proba(x).argmax(-1)``, for labels.
         """
-        with eval_mode(self):
-            logits = self.forward(x)
-        return logits.argmax(dim=-1)
+        return self._eval_logits(x).argmax(dim=-1)
 
     # ------------------------------------------------------------------
     def one_hot(self, y: torch.Tensor) -> torch.Tensor:
@@ -375,30 +355,6 @@ class MulticlassHybridClassifier(nn.Module):
             raise ValueError("one_hot expects integer class labels; got non-integer values.")
         one_hot = nn.functional.one_hot(y.long(), num_classes=self.n_classes)
         return one_hot.to(self.head.weight.dtype)
-
-    # ------------------------------------------------------------------
-    def count_parameters(self, trainable_only: bool = True) -> int:
-        """Return total parameter count (quantum + classical)."""
-        params = (
-            self.parameters()
-            if not trainable_only
-            else (p for p in self.parameters() if p.requires_grad)
-        )
-        return sum(p.numel() for p in params)
-
-    # ------------------------------------------------------------------
-    def get_config(self) -> dict[str, Any]:
-        """
-        Constructor arguments of this model, as a fresh dict.
-
-        ``type(model)(**model.get_config())`` builds a model with the same
-        architecture (load a ``state_dict`` for the trained weights).  Its
-        initial weights are fresh draws only if ``init_seed`` is ``None``: a
-        model built with ``init_seed`` rebuilds the *same* initial weights, so
-        for restarts or ensemble members pass ``init_seed=None`` or a new seed.
-        Used by ``hqnn_forge.utils.checkpoint``.
-        """
-        return dict(self._config)
 
     # ------------------------------------------------------------------
     def extra_repr(self) -> str:

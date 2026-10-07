@@ -4,11 +4,6 @@ This document states the rules the library's comparisons follow, so that a resul
 with it can be checked without reading the source. Each rule names the function that
 implements it.
 
-> **Status.** The comparison runner and everything built on it (`hqnn_forge.benchmark`,
-> `hqnn_forge.experiment`) arrive with #269, #270, #294, #295 and #296, and the classical
-> control with #250. The cross-dataset tests (#273) and the bootstrap intervals (#274) are
-> separate pull requests; the sections that use them say so. Update this note as they merge.
-
 ## Question
 
 The comparisons answer one question: **on an imbalanced binary classification task, does a
@@ -41,16 +36,14 @@ would measure a model trained *with* the circuit, not what a classical model ach
   `Linear(n_in → w) → ReLU → Linear(w → w) → ReLU → Linear(w → 1)`, the branch widened to the
   matching width.
 - **Matching rule.** The width is the integer whose parameter count is closest to the hybrid's
-  `count_parameters()`, ties to the smaller model, so the two differ by at most half a width
-  step. `dropout_p` is carried over.
-- **Which count.** Matching uses the *total* trainable count, including circuit parameters
-  that can never reach the measurement: the published SHNN's 122 get a 121-parameter control.
-  `circuit_summary(...).n_inert_params` counts the structurally inert ones (16 of the
-  published SHNN's 122; by gradient, 102 of them are live, #234). #293 changes the match to
-  the structurally live count, `count_parameters() - circuit_summary(model).n_inert_params`
-  (106 for the published SHNN, halfway between widths 10 and 11, so the tie rule gives a
-  101-parameter control); efficiency figures keep the total. Update this bullet when it
-  merges.
+  live count (next bullet), ties to the smaller model, so the two differ by at most half a
+  width step. `dropout_p` and `init_seed` are carried over.
+- **Which count.** Matching uses the structurally *live* count,
+  `count_parameters() - circuit_summary(model).n_inert_params`: a circuit weight that can never
+  reach the measurement adds no capacity. For the published SHNN that is 106 of 122 (16
+  structurally inert; by gradient, 102 are live, #234), halfway between widths 10 and 11, so
+  the tie rule gives a 101-parameter control; the exact live count 102 gives the same one.
+  Efficiency figures (MCC/kParam) and the benchmark's `n_parameters` keep the total.
 
 ## Data handling
 
@@ -100,10 +93,14 @@ probability. `TemperatureScaler` and `PlattScaler` (`hqnn_forge.evaluation`) fix
 calibration after training, fitted on the validation split; `train_model` records the
 validation temperature in its history. Temperature scaling is monotone, so it leaves every
 ranking-based number above unchanged. `HybridClassifierEstimator(calibration="temperature")`
-(or `"platt"`) fits one on its validation split and applies it in `predict_proba`, mapping the
-decision threshold through it so that `predict` does not change (#359). With focal loss the
-fitted temperature was 0.3 to 1.0 on the synthetic data of the estimator's tests: the model
-was under-confident, and calibration sharpened it.
+(or `"platt"`) fits one on its validation split and applies it in `predict_proba`. With
+`threshold="optimal"` (the default) `predict` keeps deciding on the uncalibrated
+probabilities, so it does not change, and `threshold_` reports the threshold mapped through
+the calibrator; a fixed threshold applies to the calibrated probabilities, so there the
+labels can change (#359). With focal loss the fitted
+temperature was 0.37 to 0.62 over four seeds of the synthetic data of the estimator's tests
+(240 samples, 30 % validation): there the model was under-confident, and calibration
+sharpened it. That is one small dataset, not a general result about focal loss.
 
 ## Statistics
 
