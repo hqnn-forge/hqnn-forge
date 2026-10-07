@@ -273,7 +273,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An asymmetric readout error `(p01, p10)`, applied exactly to each ⟨Z⟩ as
   `(1 − p01 − p10)⟨Z⟩ + (p10 − p01)`: `apply_readout_error` post hoc,
   `noise_sweep(..., channel="readout")`, and `readout_error=` on the layers and classifiers for
-  training (weight-safe in checkpoints) (#358)
+  training (weight-safe in checkpoints). The map acts on the layer's output: a layer's own
+  `readout_error` is suppressed inside `apply_depolarizing_noise` like its other training
+  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin` (#358)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

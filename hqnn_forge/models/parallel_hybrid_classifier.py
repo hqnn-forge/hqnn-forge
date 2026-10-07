@@ -110,7 +110,7 @@ from hqnn_forge.models._trunk import (
 )
 from hqnn_forge.models.base import BinaryClassifierBase
 from hqnn_forge.models.hybrid_classifier import _PUBLISHED_SHNN
-from hqnn_forge.noise import Channel, NoiseMethod, Position
+from hqnn_forge.noise import Channel, NoiseMethod, Position, validate_readout_error
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
 
@@ -331,6 +331,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         super().__init__()
         init_seed = as_seed(init_seed)
         seed = as_seed(seed, "seed")
+        # Plain floats: _config goes into the checkpoint as it is.
+        readout_error = validate_readout_error(readout_error)
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
