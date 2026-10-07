@@ -12,6 +12,8 @@ classical input handling of its own.
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
+from typing import Any
 
 import pennylane as qml
 import pytest
@@ -178,8 +180,17 @@ class TestEveryEncoder:
         assert require_prepare_inputs(found, "f") is layer
 
 
-@pytest.mark.parametrize("cls", [QuantumEncodingLayer, IQPEncodingLayer])
-def test_training_noise_is_the_one_sanctioned_difference(cls: type) -> None:
+@pytest.mark.parametrize(
+    "cls",
+    [
+        QuantumEncodingLayer,
+        IQPEncodingLayer,
+        partial(AmplitudeEncodingLayer, n_features=N_QUBITS),
+        DataReuploadingLayer,
+    ],
+    ids=["angle", "iqp", "amplitude", "reuploading"],
+)
+def test_training_noise_is_the_one_sanctioned_difference(cls: Callable[..., Any]) -> None:
     # The contract's documented exception: with noise_level > 0, forward in
     # train() mode runs a noisy circuit; in eval() mode it is the noiseless one.
     torch.manual_seed(0)

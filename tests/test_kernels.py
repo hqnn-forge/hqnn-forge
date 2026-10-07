@@ -169,6 +169,8 @@ def _reuploading_with_random_scaling(**kwargs) -> DataReuploadingLayer:
     return layer
 
 
+LIGHTNING: dict[str, Any] = {"device_name": "lightning.qubit", "diff_method": "adjoint"}
+
 FORWARD_LAYERS = [
     *ALL_LAYERS,
     pytest.param(
@@ -177,14 +179,22 @@ FORWARD_LAYERS = [
         ),
         id="reuploading-scaled",
     ),
-    # The library defaults: lightning.qubit with adjoint, whose QNodes are
-    # wrapped in a batch-expanding transform the replay must see through.
-    pytest.param(lambda: QuantumEncodingLayer(n_qubits=N_QUBITS), id="angle-lightning"),
-    pytest.param(lambda: IQPEncodingLayer(n_qubits=N_QUBITS), id="iqp-lightning"),
+    # lightning.qubit with adjoint (the default until #349, and what "auto"
+    # picks above 12 qubits), whose QNodes are wrapped in a batch-expanding
+    # transform the replay must see through.
     pytest.param(
-        lambda: AmplitudeEncodingLayer(n_qubits=N_QUBITS, n_features=5), id="amplitude-lightning"
+        lambda: QuantumEncodingLayer(n_qubits=N_QUBITS, **LIGHTNING), id="angle-lightning"
     ),
-    pytest.param(lambda: _reuploading_with_random_scaling(), id="reuploading-lightning"),
+    pytest.param(lambda: IQPEncodingLayer(n_qubits=N_QUBITS, **LIGHTNING), id="iqp-lightning"),
+    pytest.param(
+        lambda: AmplitudeEncodingLayer(n_qubits=N_QUBITS, n_features=5, **LIGHTNING),
+        id="amplitude-lightning",
+    ),
+    pytest.param(
+        lambda: _reuploading_with_random_scaling(**LIGHTNING), id="reuploading-lightning"
+    ),
+    # The library default, "auto": default.qubit with backprop at this size.
+    pytest.param(lambda: QuantumEncodingLayer(n_qubits=N_QUBITS), id="angle-auto"),
 ]
 
 

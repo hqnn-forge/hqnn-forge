@@ -133,7 +133,7 @@ class TestMulticlassTrainingNoise:
             "encoder_activation applies with use_classical_encoder=True only",
         ),
         ({"encoding_type": "iqp", "embedding_rotation": "Y"}, "IQP embedding has no rotation"),
-        ({"encoding_type": "amplitude"}, "Unsupported encoding_type"),
+        ({"encoding_type": "kernel"}, "Unsupported encoding_type"),
         ({"noise_method": "kraus"}, "noise_method must be"),
     ],
 )

@@ -12,7 +12,8 @@ Design Rationale
   entangling operations. This is known to be classically hard to simulate.
 * **Strongly-Entangling Ansatz** — after embedding, L layers of a CNOT ring
   followed by per-qubit SU(2) Rot(φ, θ, ω) gates are applied.
-* **Adjoint Differentiation** — the QNode is configured for the `adjoint` method.
+* **Differentiation** — `diff_method="auto"` by default: backprop on `default.qubit` up to
+  12 qubits, adjoint on `lightning.qubit` above (see `hqnn_forge.encoding.resolve_backend`).
 * **Initialisation** — use `restricted_normal_init_` on the returned layer; see
   `hqnn_forge.initializers` for what the small-angle init does and does not guarantee.
 
@@ -33,22 +34,27 @@ import pennylane as qml
 import torch
 import torch.nn as nn
 
-from hqnn_forge.encoding.angle_embedding import (
+from hqnn_forge.encoding._common import (
     DeviceName,
     DiffMethod,
     Entangler,
     Readout,
-    _build_training_noise,
-    _expand_batch_dimension,
-    _noise_method_repr,
-    _resolve_device,
     apply_variational_layers,
+    backend_repr,
     check_inputs,
+    expand_batch_dimension,
     measure_z,
     readout_wires,
+    resolve_backend,
+    resolve_device,
+    shots_repr,
     validate_circuit_options,
+    validate_device_shots,
+    validate_seed,
+    validate_shots,
+    variational_weight_shape,
 )
-from hqnn_forge.noise import NoiseMethod, Position, run_with_training_noise
+from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +79,9 @@ def _make_iqp_embedding_circuit(
 
     where ``inputs`` has shape ``(n_qubits,)`` (or ``(batch, n_qubits)`` when
     broadcasted) and ``weights`` has shape ``(n_layers, n_qubits, 3)``: the
-    ``qml.Rot`` angles per layer and qubit.
+    ``qml.Rot`` angles per layer and qubit (``(n_layers, n_qubits)``, the
+    ``RY`` angles, for ``entangler="hardware_efficient"``; see
+    :func:`~hqnn_forge.encoding.angle_embedding.variational_weight_shape`).
 
     Called inside a QNode it records one ``qml.expval(PauliZ)`` measurement per
     readout wire; the QNode turns them into the expectation values.
@@ -110,7 +118,7 @@ def _make_iqp_embedding_circuit(
         # It also broadcasts a batched ``inputs`` of shape (batch, n_qubits)
         # through single-parameter gates only, a safeguard for lightning's
         # adjoint path, which mis-shapes a broadcasted MultiRZ, should the
-        # circuit ever run broadcasted without _expand_batch_dimension.
+        # circuit ever run broadcasted without expand_batch_dimension.
         # ``inputs[..., i]`` selects feature i for one sample or a batch alike.
         for _ in range(n_repeats):
             for qubit in range(n_qubits):
@@ -132,16 +140,21 @@ def build_iqp_qnode(
     n_qubits: int = 8,
     n_layers: int = 2,
     n_repeats: int = 1,
-    device_name: DeviceName = "lightning.qubit",
-    diff_method: DiffMethod = "adjoint",
+    device_name: DeviceName = "auto",
+    diff_method: DiffMethod = "auto",
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    shots: int | None = None,
+    seed: int | None = None,
 ) -> qml.QNode:
     """Build and return a PennyLane QNode for the IQP feature map."""
     if n_qubits < 2:
         raise ValueError(f"n_qubits must be ≥ 2; got {n_qubits}.")
 
-    device = _resolve_device(device_name, n_qubits)
+    device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
+    validate_shots(shots, diff_method)
+    device = resolve_device(device_name, n_qubits, seed=seed)
+    validate_device_shots(device, shots)
     circuit_fn = _make_iqp_embedding_circuit(n_qubits, n_layers, n_repeats, entangler, readout)
 
     qnode = qml.QNode(
@@ -149,12 +162,13 @@ def build_iqp_qnode(
         device=device,
         diff_method=diff_method,
         interface="torch",
+        shots=shots,
     )
-    # Batched inputs: see angle_embedding._expand_batch_dimension
-    return _expand_batch_dimension(qnode, diff_method)
+    # Batched inputs: see hqnn_forge.encoding._common.expand_batch_dimension
+    return expand_batch_dimension(qnode, diff_method)
 
 
-class IQPEncodingLayer(nn.Module):
+class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
     """
     A PyTorch nn.Module wrapping the IQP-embedding QNode.
 
@@ -163,7 +177,11 @@ class IQPEncodingLayer(nn.Module):
     ``n_outputs`` (``n_qubits``, or 1 with ``readout="first"``), and the
     input width ``n_features`` is ``n_qubits``, one feature per qubit.
     ``noise_level`` / ``noise_position`` / ``noise_method`` /
-    ``noise_trajectories`` add training-time depolarizing noise exactly as in
+    ``noise_trajectories`` / ``noise_channel`` add training-time noise
+    (depolarizing by default; ``noise_level``'s range depends on the
+    channel), ``readout_error`` a train-mode readout error ``(p01, p10)`` on
+    the outputs, and
+    ``shots`` and ``seed`` finite-shot sampling and its device seed, exactly as in
     :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
     """
 
@@ -172,14 +190,18 @@ class IQPEncodingLayer(nn.Module):
         n_qubits: int = 8,
         n_layers: int = 2,
         n_repeats: int = 1,
-        device_name: DeviceName = "lightning.qubit",
-        diff_method: DiffMethod = "adjoint",
+        device_name: DeviceName = "auto",
+        diff_method: DiffMethod = "auto",
         entangler: Entangler = "ring",
         readout: Readout = "all",
         noise_level: float = 0.0,
         noise_position: Position = "all",
         noise_method: NoiseMethod = "density",
         noise_trajectories: int = 1,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
 
@@ -190,10 +212,6 @@ class IQPEncodingLayer(nn.Module):
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
-        self.noise_level = noise_level
-        self.noise_position = noise_position
-        self.noise_method = noise_method
-        self.noise_trajectories = noise_trajectories
 
         qnode = build_iqp_qnode(
             n_qubits=n_qubits,
@@ -203,17 +221,28 @@ class IQPEncodingLayer(nn.Module):
             diff_method=diff_method,
             entangler=entangler,
             readout=readout,
+            shots=shots,
+            seed=seed,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
-            "weights": (n_layers, n_qubits, 3),
+            "weights": variational_weight_shape(entangler, n_qubits, n_layers),
         }
 
         self.qlayer = qml.qnn.TorchLayer(qnode, weight_shapes)
-        # Training-time depolarizing noise; see QuantumEncodingLayer.
-        self._training_noise_qnode = _build_training_noise(
-            qnode, n_qubits, noise_level, noise_position, noise_method, noise_trajectories
+        # Training-time noise; see QuantumEncodingLayer.
+        self._init_training_noise(
+            qnode,
+            n_qubits,
+            noise_level,
+            noise_position,
+            noise_method,
+            noise_trajectories,
+            shots=shots,
+            noise_channel=noise_channel,
+            readout_error=readout_error,
         )
+        self.seed = validate_seed(seed)
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -231,11 +260,7 @@ class IQPEncodingLayer(nn.Module):
         """Embed a batch of feature vectors."""
         # Whole batch in one call; see QuantumEncodingLayer.forward.
         x = self.prepare_inputs(x)
-        if self.training and self._training_noise_qnode is not None:
-            return run_with_training_noise(
-                self.qlayer, self._training_noise_qnode, x, self.noise_trajectories
-            )
-        return self.qlayer(x)
+        return self._run_circuit(x)
 
     def extra_repr(self) -> str:
         options = ""
@@ -243,12 +268,11 @@ class IQPEncodingLayer(nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
-        if self.noise_level:
-            options += f", noise_level={self.noise_level}, noise_position={self.noise_position!r}"
-            options += _noise_method_repr(self.noise_method, self.noise_trajectories)
+        options += self._noise_repr()
         return (
             f"n_qubits={self.n_qubits}, "
             f"n_layers={self.n_layers}, "
             f"n_repeats={self.n_repeats}, "
-            f"n_params={self.n_layers * self.n_qubits * 3}{options}"
+            f"n_params={sum(p.numel() for p in self.parameters())}{options}"
+            f"{shots_repr(self.shots, self.seed)}{backend_repr(self.qlayer)}"
         )

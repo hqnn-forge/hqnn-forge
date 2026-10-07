@@ -80,6 +80,10 @@ class GradientVarianceResult:
     """
     Gradient-variance estimate for one layer configuration.
 
+    ``per_parameter`` and ``per_tensor`` are excluded from ``==`` and
+    ``hash``: comparing them would return a Tensor rather than a bool, so two
+    results compare on their scalar fields only.
+
     Attributes
     ----------
     layer_type, n_qubits, n_layers:
@@ -104,10 +108,6 @@ class GradientVarianceResult:
         Per-entry variance per trainable tensor, keyed by the TorchLayer
         argument name (``"weights"``, ``"input_scaling"``), each shaped like
         its tensor.
-
-    ``per_parameter`` and ``per_tensor`` are excluded from ``==`` and
-    ``hash``: comparing them would return a Tensor rather than a bool, so two
-    results compare on their scalar fields only.
     """
 
     layer_type: str

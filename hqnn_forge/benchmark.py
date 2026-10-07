@@ -63,7 +63,7 @@ import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -71,6 +71,8 @@ import torch
 import torch.nn as nn
 
 from hqnn_forge.evaluation import (
+    brier_score,
+    expected_calibration_error,
     matthews_corrcoef,
     parameter_efficiency,
     rank_biserial_correlation,
@@ -102,6 +104,8 @@ COLUMNS: tuple[str, ...] = (
     "n_seeds",
     "mcc_seed_std",
     "mcc_per_kparam",
+    "brier_mean",
+    "ece_mean",
     "fold_mcc",
     "train_seconds",
     "wilcoxon_p",
@@ -153,6 +157,10 @@ class FoldResult:
     """The training settings tuning chose for this fold and model; empty without tuning."""
     noise_mcc: dict[float, float] = field(default_factory=dict)
     """Hybrid only: test MCC under depolarising noise of each swept probability."""
+    brier: float = math.nan
+    """Brier score of the test probabilities (#319)."""
+    ece: float = math.nan
+    """Expected calibration error of the test probabilities, ``ECE_BINS`` quantile bins."""
 
 
 @dataclass(frozen=True)
@@ -234,6 +242,23 @@ def _seeds(root: np.random.SeedSequence, n: int) -> list[int]:
     return [int(s.generate_state(1)[0]) for s in root.spawn(n)]
 
 
+#: Bins of the per-fold expected calibration error.  Equal-count
+#: ("quantile") bins: on imbalanced data equal-width ones put nearly every
+#: sample in the bin nearest 0 and leave the rest near-empty.
+ECE_BINS = 10
+
+
+class FitScore(NamedTuple):
+    """One trained model scored on its test rows."""
+
+    mcc: float
+    threshold: float
+    seconds: float
+    epochs: int
+    brier: float
+    ece: float
+
+
 def _fit_and_score(
     model: BinaryClassifierBase,
     loss: LossBuilder,
@@ -249,8 +274,8 @@ def _fit_and_score(
     batch_size: int,
     patience: int | None,
     batch_seed: int,
-) -> tuple[float, float, float, int]:
-    """Train, then score the test rows at the validation threshold: (mcc, threshold, s, epochs)."""
+) -> FitScore:
+    """Train, then score the test rows at the validation threshold."""
     as_tensor = torch.from_numpy
     start = time.perf_counter()
     history = train_model(
@@ -271,7 +296,18 @@ def _fit_and_score(
     threshold = history.best_threshold if history.best_threshold is not None else 0.5
     prob = model.predict_proba(as_tensor(X_test.astype(np.float32)))
     mcc = matthews_corrcoef(y_test, (prob >= threshold).long())
-    return float(mcc), float(threshold), seconds, history.n_epochs
+    # A diverged model's NaN probabilities still score an MCC (every comparison
+    # is False, so all negative); they have no calibration, and must not end
+    # the run.
+    finite = bool(torch.isfinite(prob).all())
+    return FitScore(
+        mcc=float(mcc),
+        threshold=float(threshold),
+        seconds=seconds,
+        epochs=history.n_epochs,
+        brier=brier_score(y_test, prob) if finite else math.nan,
+        ece=expected_calibration_error(y_test, prob, ECE_BINS, "quantile") if finite else math.nan,
+    )
 
 
 #: Training settings a search space may vary.  The architecture is not
@@ -387,7 +423,7 @@ def _evaluate_config(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         model = _build(model_name, hybrid, X.shape[1])
-        mcc, _, _, _ = _fit_and_score(
+        mcc = _fit_and_score(
             model,
             loss,
             X_fit,
@@ -401,7 +437,7 @@ def _evaluate_config(
             batch_size=settings["batch_size"],
             patience=settings["patience"],
             batch_seed=seed,
-        )
+        ).mcc
     return mcc
 
 
@@ -583,8 +619,9 @@ def run_benchmark(
         deviation (``ddof=1``) of its seeds' MCCs, averaged over folds.
         Default 1: one seed, as before.  With more than one, ``hybrid`` must
         build its model with ``init_seed=None`` (a model's own seed would
-        override the runner's and repeat the same weights); a ``ValueError``
-        is raised otherwise.
+        override the runner's and repeat the same weights), and a sampling one
+        (``shots``) with ``seed=None`` too (a device seed would repeat the same
+        shot noise); a ``ValueError`` is raised otherwise.
     noise_levels, noise_position:
         Also score each trained hybrid model on its test rows under
         depolarising noise of each probability (inserted as
@@ -673,6 +710,8 @@ def run_benchmark(
         outer = stratified_kfold(y, n_splits, random_state=split_seed)
         scores: dict[str, list[float]] = {m: [] for m in MODELS}
         seed_stds: dict[str, list[float]] = {m: [] for m in MODELS}
+        briers: dict[str, list[float]] = {m: [] for m in MODELS}
+        eces: dict[str, list[float]] = {m: [] for m in MODELS}
         seconds: dict[str, float] = {m: 0.0 for m in MODELS}
         n_parameters: dict[str, int] = {}
         architecture: dict[str, str] = {}
@@ -725,6 +764,8 @@ def run_benchmark(
             for model_name in MODELS:
                 train_settings = {**defaults, **chosen[model_name]}
                 seed_scores: list[float] = []
+                seed_briers: list[float] = []
+                seed_eces: list[float] = []
                 for seed_index, seed in enumerate(init_seeds):
                     with torch.random.fork_rng(devices=[]):
                         torch.manual_seed(seed)
@@ -738,7 +779,20 @@ def run_benchmark(
                                 f"{model.get_config()['init_seed']}, which gives "
                                 f"every seed the same initial weights."
                             )
-                        mcc, threshold, secs, epochs = _fit_and_score(
+                        config = model.get_config()
+                        if (
+                            n_seeds > 1
+                            and config.get("seed") is not None
+                            and config.get("shots") is not None
+                        ):
+                            # Likewise for a seeded sampling device: every
+                            # repeat would replay the same shot noise.
+                            raise ValueError(
+                                f"n_seeds={n_seeds} needs a sampling hybrid built "
+                                f"with seed=None; got seed={config['seed']}, which "
+                                f"gives every seed the same shot noise."
+                            )
+                        fit = _fit_and_score(
                             model,
                             loss,
                             X_train,
@@ -759,7 +813,7 @@ def run_benchmark(
                                 model,
                                 X_fold[test_idx],
                                 y[test_idx],
-                                threshold,
+                                fit.threshold,
                                 noise_levels,
                                 noise_position,
                             )
@@ -769,33 +823,39 @@ def run_benchmark(
                         "config": model.get_config(),
                     }
                     architecture[model_name] = type(model).__name__
-                    seed_scores.append(mcc)
-                    seconds[model_name] += secs
+                    seed_scores.append(fit.mcc)
+                    seed_briers.append(fit.brier)
+                    seed_eces.append(fit.ece)
+                    seconds[model_name] += fit.seconds
                     folds.append(
                         FoldResult(
-                            name,
-                            model_name,
-                            k,
-                            np.sort(train_idx),
-                            np.sort(val_idx),
-                            np.sort(test_idx),
-                            n_synthetic,
-                            split_seed,
-                            inner_seed,
-                            smote_seed,
-                            seed,
-                            batch_seed,
-                            threshold,
-                            mcc,
-                            secs,
-                            epochs,
-                            _device_name(model),
-                            seed_index,
-                            dict(chosen[model_name]),
-                            noisy,
+                            dataset=name,
+                            model=model_name,
+                            fold=k,
+                            train_idx=np.sort(train_idx),
+                            val_idx=np.sort(val_idx),
+                            test_idx=np.sort(test_idx),
+                            n_synthetic=n_synthetic,
+                            split_seed=split_seed,
+                            inner_seed=inner_seed,
+                            smote_seed=smote_seed,
+                            init_seed=seed,
+                            batch_seed=batch_seed,
+                            threshold=fit.threshold,
+                            mcc=fit.mcc,
+                            train_seconds=fit.seconds,
+                            epochs=fit.epochs,
+                            device=_device_name(model),
+                            seed_index=seed_index,
+                            hyperparameters=dict(chosen[model_name]),
+                            noise_mcc=noisy,
+                            brier=fit.brier,
+                            ece=fit.ece,
                         )
                     )
                 scores[model_name].append(float(np.mean(seed_scores)))
+                briers[model_name].extend(seed_briers)
+                eces[model_name].extend(seed_eces)
                 if n_seeds > 1:
                     seed_stds[model_name].append(float(np.std(seed_scores, ddof=1)))
 
@@ -833,6 +893,10 @@ def run_benchmark(
                         float(np.mean(seed_stds[model_name])) if n_seeds > 1 else None
                     ),
                     "mcc_per_kparam": parameter_efficiency(n_parameters[model_name], mean),
+                    # NaN when any fold diverged: a mean over the rest would
+                    # flatter the model.
+                    "brier_mean": float(np.mean(briers[model_name])),
+                    "ece_mean": float(np.mean(eces[model_name])),
                     "fold_mcc": tuple(float(s) for s in fold_scores),
                     "train_seconds": seconds[model_name],
                     "wilcoxon_p": p,

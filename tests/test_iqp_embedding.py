@@ -126,7 +126,7 @@ class TestExplicitDecompositionUnderNoise:
             device_name="default.qubit",
             diff_method="backprop",
         )
-        noisy = _noisy_qnode(layer.qlayer.qnode, n_qubits, 0.05, "all")
+        noisy = _noisy_qnode(layer.qlayer.qnode, n_qubits, 0.05, "all", "depolarizing")
         weights = torch.zeros(1, n_qubits, 3, dtype=torch.float64)
         tape = qml.workflow.construct_tape(noisy, level="user")(
             torch.rand(n_qubits, dtype=torch.float64), weights

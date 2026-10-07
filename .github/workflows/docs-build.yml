@@ -1,0 +1,42 @@
+name: Docs build
+
+# The build job of the Docs workflow, callable from docs.yml (every push to a
+# PR or to main) and from retarget.yml (a PR's base changed). The Pages
+# artifact is uploaded on pushes to main only, for docs.yml's deploy job.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        python-version: "3.12"
+    # Only the documentation tools: griffe reads hqnn_forge's source
+    # statically, so neither the package nor torch / PennyLane is installed.
+    # `uv sync --group docs` would install the project's dependencies too, so
+    # the `docs` group's requirements are read from pyproject.toml and pinned
+    # to their uv.lock versions through a constraints file instead.
+    - name: Install the docs tools
+      run: |
+        uv lock --check
+        uv export --frozen --all-extras --all-groups --no-emit-project --no-hashes -o "$RUNNER_TEMP/constraints.txt"
+        python3 -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['dependency-groups']['docs']))" > "$RUNNER_TEMP/docs.txt"
+        uv venv
+        uv pip install -c "$RUNNER_TEMP/constraints.txt" -r "$RUNNER_TEMP/docs.txt" pytest
+    - name: Test the griffe extension
+      run: uv run --no-sync pytest docs/ -q -p no:cacheprovider
+    - name: Build the site, strictly
+      run: uv run --no-sync mkdocs build --strict
+    - name: Check every exported name is documented
+      run: uv run --no-sync python .github/scripts/check_docs_inventory.py
+    - uses: actions/upload-pages-artifact@v5.0.0
+      if: github.event_name == 'push'
+      with:
+        path: site/

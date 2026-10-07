@@ -86,6 +86,9 @@ def _result(init: str, n_qubits: int, total: float) -> GradientVarianceResult:
     )
 
 
+# Every test that reads ``measured`` is marked slow, not only one of them: the
+# module fixture's cost (most of this module's run time) goes to whichever of
+# its tests runs first, so deselecting one test would only move it to the next.
 @pytest.fixture(scope="module")
 def measured() -> dict[tuple[str, int, float], float]:
     """
@@ -105,6 +108,7 @@ def measured() -> dict[tuple[str, int, float], float]:
     }
 
 
+@pytest.mark.slow
 class TestMeasuredInitClaims:
     """
     The statements in hqnn_forge.initializers.restricted_variance's
@@ -168,6 +172,7 @@ def entangler_sweep(measured: dict) -> dict[tuple[str, str, int], float]:
     return out
 
 
+@pytest.mark.slow
 class TestBrickworkDecay:
     """
     The brickwork measurements in hqnn_forge.initializers.restricted_variance
@@ -199,6 +204,7 @@ class TestBrickworkDecay:
 
 
 class TestPhysics:
+    @pytest.mark.slow
     def test_uniform_init_variance_decays_with_qubits(self) -> None:
         small = gradient_variance(_layer(2), n_samples=100, generator=_gen())
         large = gradient_variance(_layer(6), n_samples=100, generator=_gen())
@@ -459,18 +465,21 @@ class TestSeveralTensors:
             effective_dimension(layer, torch.zeros(80, 2))
 
 
-class TestDefaultDevice:
+class TestLightningDevice:
     @pytest.mark.requires_lightning
     @pytest.mark.parametrize("layer_cls", [QuantumEncodingLayer, IQPEncodingLayer])
-    def test_matches_default_qubit_on_the_library_default_device(self, layer_cls: type) -> None:
+    def test_matches_default_qubit_on_lightning_adjoint(self, layer_cls: type) -> None:
         """
-        Every other test pins default.qubit/backprop; the default is
-        lightning/adjoint.  The same draws on both must give the same
+        Every other test pins default.qubit/backprop, which is also what the
+        default "auto" picks at this size; lightning/adjoint is what it picks
+        above 12 qubits.  The same draws on both must give the same
         per-parameter variances, so wrong adjoint gradients or draws that are
         not reproduced on lightning fail here (they agree to about 3e-8).
         """
         torch.manual_seed(0)
-        layer = layer_cls(n_qubits=3, n_layers=2)
+        layer = layer_cls(
+            n_qubits=3, n_layers=2, device_name="lightning.qubit", diff_method="adjoint"
+        )
         qnode = layer.qlayer.qnode
         assert (qnode.device.name, qnode.diff_method) == ("lightning.qubit", "adjoint")
         reference = layer_cls(n_qubits=3, n_layers=2, **CPU)

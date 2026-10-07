@@ -29,11 +29,18 @@ from hqnn_forge.utils.modes import eval_mode
 
 
 def custom_encoder(
-    module: nn.Module, n_input_features: int, n_qubits: int, activation: str
+    module: nn.Module,
+    n_input_features: int,
+    n_qubits: int,
+    activation: str,
+    width: int | None = None,
 ) -> nn.Sequential:
     """
     ``module`` followed by the model's ``activation``, after checking that it
-    maps ``(batch, n_input_features)`` to ``(batch, n_qubits)``.
+    maps ``(batch, n_input_features)`` to ``(batch, width)``.
+
+    ``width`` is what enters the circuit: ``n_qubits`` (the default) for the
+    angle, IQP and re-uploading encodings, ``2**n_qubits`` for amplitude.
 
     The width is checked with one forward pass on zeros, in eval mode and
     without gradients, so it neither trains nor updates running statistics.
@@ -65,10 +72,12 @@ def custom_encoder(
             f"(batch, n_input_features={n_input_features}): {type(exc).__name__}: {exc}"
         ) from exc
     shape = tuple(out.shape) if isinstance(out, torch.Tensor) else None
-    if shape != (2, n_qubits):
+    expected = n_qubits if width is None else width
+    if shape != (2, expected):
+        what = f"n_qubits={n_qubits}" if expected == n_qubits else f"2**n_qubits={expected}"
         raise ValueError(
             f"classical_encoder must map (batch, n_input_features={n_input_features}) to "
-            f"(batch, n_qubits={n_qubits}); on a batch of 2 it returned "
+            f"(batch, {what}); on a batch of 2 it returned "
             f"{shape if shape is not None else type(out).__name__}."
         )
     last = list(module.modules())[-1]
@@ -137,6 +146,8 @@ class ClassifierBase(nn.Module):
         initial weights are fresh draws only if ``init_seed`` is ``None``: a
         model built with ``init_seed`` rebuilds the *same* initial weights, so
         for restarts or ensemble members pass ``init_seed=None`` or a new seed.
+        The same holds for a sampling model's device ``seed``, which would
+        replay the same shot noise: pass ``seed=None`` or a new one as well.
         Used by ``hqnn_forge.utils.checkpoint``.
 
         A module argument (a custom ``classical_encoder``) is deep-copied, so
@@ -201,7 +212,8 @@ class BinaryClassifierBase(ClassifierBase):
         Compute positive-class probabilities (inference mode, no gradients).
 
         Runs in eval mode whatever mode the model is in, so dropout is off and
-        repeated calls on the same input agree.  Every submodule's ``training``
+        repeated calls on the same input agree (except under finite ``shots``,
+        whose readouts are sampled afresh on every call).  Every submodule's ``training``
         flag is restored afterwards, so calling this mid-training leaves the
         model exactly as it was.
 

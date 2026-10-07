@@ -11,6 +11,19 @@ names the skip's reason, including a module skipped at import.  A test whose
 skip is expected in CI, because it needs hardware the runners lack or is
 opt-in (``HQNN_FORGE_REPRODUCE=1`` and a dataset CI does not have), carries
 ``@pytest.mark.may_skip``.  Expected failures (``xfail``) are unaffected.
+
+``slow``: the fast local suite
+------------------------------
+A handful of tests account for most of the suite's run time (end-to-end
+training, the gradient-variance physics checks, parameter-shift batching,
+repeated fits and bootstraps).  They carry ``@pytest.mark.slow``, so
+``pytest -m "not slow"`` is the quick edit-test loop; CI runs everything.
+The rule: mark a test that takes ``SLOW_SECONDS`` or more on a laptop
+(``pytest --durations=50`` to find them).  An expensive module- or
+class-scoped fixture shows up as the ``setup`` time of whichever of its tests
+runs first; mark every test that uses it, or deselecting one only moves the
+cost to the next.  Deselected tests never run, so they are not skips and the
+hooks below leave them alone.
 """
 
 from __future__ import annotations
@@ -23,6 +36,8 @@ import pytest
 import torch
 
 FAIL_ON_SKIP_ENV = "HQNN_FORGE_FAIL_ON_SKIP"
+#: A test taking this long or longer on a laptop is marked ``slow``.
+SLOW_SECONDS = 1.2
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -32,7 +47,9 @@ def pytest_configure(config: pytest.Config) -> None:
         "(deselect with -m 'not reproducibility')",
     )
     config.addinivalue_line(
-        "markers", "slow: takes minutes to days; opt-in (deselect with -m 'not slow')"
+        "markers",
+        f"slow: takes {SLOW_SECONDS} s or more (days for the opt-in reproduction run); "
+        "deselect with -m 'not slow' for a quick local run",
     )
     config.addinivalue_line(
         "markers",

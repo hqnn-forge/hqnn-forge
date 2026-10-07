@@ -127,6 +127,8 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "noise_mcc": {repr(level): mcc for level, mcc in f.noise_mcc.items()},
             "threshold": f.threshold,
             "mcc": f.mcc,
+            "brier": f.brier,
+            "ece": f.ece,
             "epochs": f.epochs,
             "train_seconds": f.train_seconds,
         }

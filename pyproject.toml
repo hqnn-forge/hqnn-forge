@@ -1,6 +1,10 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hqnn_forge"
+module-root = ""
 
 [project]
 name = "hqnn-forge"
@@ -8,7 +12,8 @@ version = "0.1.0"
 description = "Parameter-efficient Hybrid Quantum Neural Networks for imbalanced tabular classification."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "HQNN-Forge Contributors" }]
 keywords = [
     "quantum machine learning",
@@ -22,7 +27,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -52,6 +56,13 @@ dependencies = [
     "numpy>=2.3.2; python_version >= '3.14'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/hqnn-forge/hqnn-forge"
+Documentation = "https://hqnn-forge.github.io/hqnn-forge/"
+Repository = "https://github.com/hqnn-forge/hqnn-forge"
+Issues = "https://github.com/hqnn-forge/hqnn-forge/issues"
+Changelog = "https://github.com/hqnn-forge/hqnn-forge/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 lightning = [
     "pennylane-lightning>=0.45",  # enables adjoint diff on CPU
@@ -80,12 +91,18 @@ examples = [
     "matplotlib",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["hqnn_forge*"]
-
-[tool.setuptools.package-data]
-hqnn_forge = ["py.typed"]
+[dependency-groups]
+docs = [
+    # The API reference site: mkdocs build --strict (docs/, mkdocs.yml).  A group,
+    # not an extra: users never need it, and CI's `--all-extras` jobs stay without it.
+    "mkdocs-material>=9.7",
+    "mkdocstrings[python]>=1.0",
+    # docs/griffe_sphinx_roles.py hooks griffe's on_package event (griffe 1.14+);
+    # an older griffe never fires it, and the roles then render as literal text
+    # without failing the strict build.  2.0.3 is the first mkdocstrings-python
+    # to require griffelib>=2.0 (earlier ones allow griffe 1.13).
+    "mkdocstrings-python>=2.0.3",
+]
 
 # ruff is the only formatter and linter; black is deliberately not declared,
 # so there is one line length (99) and one formatting style (see #133)
@@ -114,6 +131,11 @@ ignore = [
     # expected to raise
     "SIM117",
 ]
+
+[tool.pytest.ini_options]
+# A misspelled marker (@pytest.mark.slwo) would otherwise be a silent no-op,
+# and a slow test would stay in the quick local run.
+addopts = ["--strict-markers"]
 
 [tool.mypy]
 # 3.12, not the 3.11 floor: the numpy stubs use the PEP 695 `type` statement,

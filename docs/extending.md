@@ -9,7 +9,7 @@ conventions the rest of the library relies on. Each section covers:
 - what else has to change alongside it.
 
 The workflow itself (issue first, branch naming, commit style, PR checklist) is in
-[`CONTRIBUTING.md`](../CONTRIBUTING.md).
+[`CONTRIBUTING.md`](https://github.com/hqnn-forge/hqnn-forge/blob/main/CONTRIBUTING.md).
 
 ---
 
@@ -111,20 +111,35 @@ contract is spelled out in `hqnn_forge/_encoding_contract.py`:
   `quantum_kernel_matrix`) refuses a layer without it.
 - **`prepare_inputs(x)`**: the *whole* classical step between the batch and the QNode, meaning
   validation (call `check_inputs(x, self.n_features, name="n_features")` from
-  `angle_embedding`, which rejects the wrong width and NaN/inf) and any transform. `forward(x)`
-  must be exactly `self.qlayer(self.prepare_inputs(x))`. The kernels (`hqnn_forge.kernels`)
+  `hqnn_forge.encoding._common`, which rejects the wrong width and NaN/inf) and any transform. `forward(x)`
+  must be exactly `self._run_circuit(self.prepare_inputs(x))`, which is
+  `self.qlayer(self.prepare_inputs(x))` but for noise (below). The kernels (`hqnn_forge.kernels`)
   replay the circuit on `prepare_inputs(X)`, so a step done inline in `forward` is silently
   skipped there, and the kernel describes a different feature map without raising.
 
-The one allowed exception is training-time noise. A layer built with `noise_level > 0` runs
-`run_with_training_noise` in `train()` mode. Build it with `_build_training_noise` in the
-constructor, as the angle and IQP layers do.
+The one allowed exception is noise. A layer built with `noise_level > 0` runs a noisy circuit in
+`train()` mode, and one built with `readout_error=(p01, p10)` passes the circuit's output
+through that readout error in `train()` mode; an open `apply_readout_error` block does the
+same in either mode. Inherit `TrainingNoiseMixin` from `hqnn_forge.noise`, take `noise_level`,
+`noise_position`, `noise_method`, `noise_trajectories`, `noise_channel` and `readout_error` in
+the constructor, call `self._init_training_noise(...)` once the QNode exists, run the circuit
+through `self._run_circuit`, and append `self._noise_repr()` to `extra_repr`, as every encoding
+layer does. The readout error is applied in `_run_circuit`, on the output: a layer without the
+mixin is refused by `apply_readout_error` (and by `noise_sweep(..., channel="readout")`), a
+`forward` that calls `self.qlayer` directly would skip it without any error, and the kernels,
+which replay `qlayer(prepare_inputs(x))`, do not see it.
 
 Beyond the protocol:
 
-- **Build the QNode through the shared helpers** in `hqnn_forge/encoding/angle_embedding.py`:
-  - `_resolve_device(device_name, n_qubits)` provides the fallback chain to `default.qubit`.
-  - `_expand_batch_dimension(qnode, diff_method)` makes a batched `inputs` work under adjoint.
+- **Build the QNode through the shared helpers** in `hqnn_forge/encoding/_common.py`:
+  - `resolve_backend(device_name, diff_method, n_qubits, shots=shots)` turns the default
+    `"auto"` into concrete names; call it first, since `"auto"` is not a PennyLane device.
+  - `resolve_device(device_name, n_qubits, seed=seed)` provides the fallback chain to
+    `default.qubit` and seeds the device's shot sampling. Take a `seed=None` argument, pass it
+    through, set `self.seed = validate_seed(seed)`, and show it with
+    `shots_repr(self.shots, self.seed)` in `extra_repr`, as the built-in layers do; without it a
+    shot-based model built with `seed=` silently does not repeat.
+  - `expand_batch_dimension(qnode, diff_method)` makes a batched `inputs` work under adjoint.
   - `apply_variational_layers` and `measure_z` provide the ansatz and the readout.
   - `validate_circuit_options` rejects a bad option at construction, not at the first forward.
 - **Name the angle tensor `weights`**, with dim 0 indexing layers. `gradient_variance` and the
@@ -173,25 +188,29 @@ Beyond the protocol:
 
 ## A variational block (ansatz)
 
-**Reference:** `apply_variational_layers` in `hqnn_forge/encoding/angle_embedding.py`. The
-`"brickwork"` branch, the most recent addition, is the example to copy; `"strongly_entangling"`
-shows a block that depends on the layer index.
+**Reference:** `apply_variational_layers` in `hqnn_forge/encoding/_common.py`. The
+`"hardware_efficient"` branch, the most recent addition, is the example to copy: a primitive in
+`hqnn_forge/circuits/` applied once per layer, with a weight shape of its own. `"brickwork"`
+shows a block written inline, and `"strongly_entangling"` one that depends on the layer index.
 
-Note that the functions in `hqnn_forge/circuits/` (`strongly_entangling_layer`,
-`hardware_efficient_layer`) are standalone primitives for writing your own QNodes. None of the
-encoding layers call them. The block the encoders use is selected by their `entangler` argument,
-so a new ansatz is a new `entangler` value.
+The functions in `hqnn_forge/circuits/` are the per-layer blocks the encoders run:
+`strongly_entangling_layer` is `entangler="ring"` (not `"strongly_entangling"`, which is
+PennyLane's `qml.StronglyEntanglingLayers`) and `hardware_efficient_layer` is
+`entangler="hardware_efficient"`. The block the encoders use is selected by their `entangler`
+argument, so a new ansatz is a new primitive there plus a new `entangler` value; a primitive
+alone has no effect on the models.
 
 ### Interface and conventions
 
 - **Signature:** a block is applied as
   `apply_variational_layers(weights, n_qubits, n_layers, entangler, layer_offset)` inside the
   QNode, and records gates only.
-- **Weight shape `(n_layers, n_qubits, 3)`.** Every encoder hardcodes this shape in its
-  `weight_shapes`, and the angle, IQP and amplitude layers compute `n_params` in `extra_repr`
-  from it. A
-  block that needs another shape first needs the shape to come from one shared function; open
-  an issue for that rather than patching four constructors. Within the shape, dim 0 must stay
+- **Weight shape.** `variational_weight_shape(entangler, n_qubits, n_layers)`, next to
+  `apply_variational_layers`, is the one definition of the `weights` shape: every encoder
+  registers its `weights` from it, and `extra_repr` counts `n_params` from the layer's
+  parameters. The `Rot` blocks take `(n_layers, n_qubits, 3)` and `"hardware_efficient"`
+  takes `(n_layers, n_qubits)`; a block with another shape adds a branch there and nowhere
+  else. Within the shape, dim 0 must stay
   the layer index, which is what `block_local_init_` and the diagnostics' `n_layers` fallback
   read.
 - **`layer_offset`.** `DataReuploadingLayer` applies the blocks one at a time, with an embedding
@@ -220,7 +239,8 @@ so a new ansatz is a new `entangler` value.
 ### Also update
 
 - The `Entangler` `Literal` and a branch in `apply_variational_layers` (with its docstring
-  entry), both in `angle_embedding.py`. `validate_circuit_options` and its error message read
+  entry), both in `_common.py`, and a branch in `variational_weight_shape` if the
+  block's shape differs. `validate_circuit_options` and its error message read
   the choices from the `Literal`, so they need no change.
 - The `entangler` parameter docstrings: the angle, IQP and re-uploading builders and layers, and
   `hqnn_forge/models/` (`HybridBinaryClassifier`, `ParallelHybridClassifier`).

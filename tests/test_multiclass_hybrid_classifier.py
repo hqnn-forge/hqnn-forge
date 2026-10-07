@@ -354,7 +354,7 @@ class TestOptions:
 
     def test_rejects_unknown_encoding(self) -> None:
         with pytest.raises(ValueError, match="encoding_type"):
-            _model(encoding_type="amplitude")
+            _model(encoding_type="kernel")
 
     def test_rejects_unknown_init_strategy(self) -> None:
         with pytest.raises(ValueError, match="init_strategy"):

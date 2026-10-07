@@ -329,6 +329,23 @@ class TestReadoutFeatures:
             ("brickwork", "Y", 1, [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3], [2, 3, 4], [2, 3, 4]]),
             ("brickwork", "X", 2, [[0, 1], [0, 1, 2, 3], [0, 1, 2, 3], _ALL, _ALL]),
             ("brickwork", "Y", 2, [[0, 1, 2, 3], _ALL, _ALL, _ALL, _ALL]),
+            # CZ is diagonal: ⟨Z_i⟩ sees a neighbour only through the X_i the RY mixes
+            # in, which the CZs dress with Z_{i±1}.  After L layers ⟨Z_i⟩ sees
+            # x_{i-L} … x_{i+L}, except that one layer under RX (⟨X⟩ = 0) sees x_i alone
+            ("hardware_efficient", "X", 1, [[0], [1], [2], [3], [4]]),
+            ("hardware_efficient", "Y", 1, [[0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4], [3, 4]]),
+            (
+                "hardware_efficient",
+                "X",
+                2,
+                [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]],
+            ),
+            (
+                "hardware_efficient",
+                "Y",
+                2,
+                [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]],
+            ),
             # "Z" sees nothing at any depth and is refused; see TestRotationZIsRefused
         ],
     )

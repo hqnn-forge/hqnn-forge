@@ -25,8 +25,9 @@ Model = HybridBinaryClassifier | ParallelHybridClassifier
 
 # The noisy QNode is rebuilt on default.mixed with backprop, which drops the
 # broadcast_expand wrapper the other differentiation methods need. These are the
-# configurations where that rebuild actually changes something, including the
-# library defaults (lightning.qubit/adjoint).
+# configurations where that rebuild actually changes something, including
+# lightning.qubit/adjoint (the default until #349, and what "auto" picks above
+# 12 qubits).
 NON_BACKPROP_CONFIGS = [
     pytest.param("default.qubit", "parameter-shift", id="default.qubit/parameter-shift"),
     pytest.param(

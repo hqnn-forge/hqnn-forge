@@ -441,8 +441,10 @@ class TestValidation:
         assert history.n_epochs == 3 and history.best_epoch is not None
 
     def test_bad_output_shape(self, data: tuple[torch.Tensor, ...]) -> None:
+        # (batch, n_classes) is a multiclass output now (#309); a 3-D one is
+        # neither kind.
         X, y, _, _ = data
-        model = nn.Linear(N_FEATURES, 2)
+        model = nn.Sequential(nn.Linear(N_FEATURES, 4), nn.Unflatten(1, (2, 2)))
         with pytest.raises(ValueError, match=r"shape \(batch,\) or \(batch, 1\)"):
             train_model(
                 model, nn.BCEWithLogitsLoss(), torch.optim.SGD(model.parameters(), lr=0.1), X, y

@@ -81,6 +81,27 @@ applies it **unchanged to the test rows**. Tuning the threshold on test rows wou
 best case, not an estimate. MCC is the primary metric because it stays informative under
 imbalance, where accuracy does not.
 
+## Calibration
+
+MCC at a tuned threshold says nothing about whether a predicted probability means what it
+says, and for risk scoring it has to. Each fold therefore also records the Brier score and
+the expected calibration error of the test probabilities (`brier_mean` and `ece_mean` in the
+records, per fold in `FoldResult`). The ECE uses 10 equal-count bins: on imbalanced data,
+equal-width bins put nearly every sample in the lowest bin. Focal loss, the default, is
+known to change calibration, so compare these columns before reading a probability as a
+probability. `TemperatureScaler` and `PlattScaler` (`hqnn_forge.evaluation`) fix
+calibration after training, fitted on the validation split; `train_model` records the
+validation temperature in its history. Temperature scaling is monotone, so it leaves every
+ranking-based number above unchanged. `HybridClassifierEstimator(calibration="temperature")`
+(or `"platt"`) fits one on its validation split and applies it in `predict_proba`. With
+`threshold="optimal"` (the default) `predict` keeps deciding on the uncalibrated
+probabilities, so it does not change, and `threshold_` reports the threshold mapped through
+the calibrator; a fixed threshold applies to the calibrated probabilities, so there the
+labels can change (#359). With focal loss the fitted
+temperature was 0.37 to 0.62 over four seeds of the synthetic data of the estimator's tests
+(240 samples, 30 % validation): there the model was under-confident, and calibration
+sharpened it. That is one small dataset, not a general result about focal loss.
+
 ## Statistics
 
 | Question | Test | Where |

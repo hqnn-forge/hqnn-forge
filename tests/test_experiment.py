@@ -147,7 +147,11 @@ class TestContents:
             return real(X, y, train_idx, val_idx, **kwargs)
 
         monkeypatch.setattr(benchmark, "oversample_fold", spy)
-        monkeypatch.setattr(benchmark, "_fit_and_score", lambda *a, **k: (0.3, 0.5, 0.01, 1))
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(0.3, 0.5, 0.01, 1, 0.2, 0.1),
+        )
         path = tmp_path / "run.json"
         run_benchmark(_datasets(), _hybrid, record_path=path, **SETTINGS)
         record, _ = load_record(path)
@@ -266,7 +270,11 @@ class TestWriting:
     def test_undefined_p_value_is_written_as_null(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(benchmark, "_fit_and_score", lambda *a, **k: (0.3, 0.5, 0.01, 1))
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(0.3, 0.5, 0.01, 1, 0.2, 0.1),
+        )
         path = tmp_path / "tied.json"
         run_benchmark({"first": _data(0)}, _hybrid, record_path=path, **SETTINGS)
         record, _ = load_record(path)

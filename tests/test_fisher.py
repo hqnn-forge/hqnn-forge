@@ -504,7 +504,10 @@ class TestExecutionCount:
     def test_two_executions_per_row_on_lightning(self) -> None:
         # The forward pass, and the adjoint Jacobian its three outputs share.
         torch.manual_seed(0)
-        layer = QuantumEncodingLayer(n_qubits=3, n_layers=2)
+        layer = QuantumEncodingLayer(
+            n_qubits=3, n_layers=2, device_name="lightning.qubit", diff_method="adjoint"
+        )
+        assert layer.qlayer.qnode.device.name == "lightning.qubit"
         assert _executions(layer, torch.rand(5, 3)) == 10
 
     def test_parameter_shift_repeats_its_shifts_per_output(self) -> None:

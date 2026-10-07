@@ -22,6 +22,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from hqnn_forge.encoding._common import resolve_backend
+from hqnn_forge.encoding.amplitude_embedding import AmplitudeEncodingLayer
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
     DiffMethod,
@@ -30,13 +32,14 @@ from hqnn_forge.encoding.angle_embedding import (
     Readout,
     RotationAxis,
 )
+from hqnn_forge.encoding.data_reuploading import DataReuploadingLayer
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.initializers.restricted_variance import (
     block_local_init_,
     restricted_normal_init_,
 )
 from hqnn_forge.models.base import custom_encoder
-from hqnn_forge.noise import NoiseMethod, Position
+from hqnn_forge.noise import Channel, NoiseMethod, Position
 
 #: Constructor defaults that mark an option as "not asked for".  Both options
 #: are inert outside the configuration that uses them, so a non-default value
@@ -71,6 +74,88 @@ def validate_encoder_activation(encoder_activation: str) -> None:
         )
 
 
+ENCODING_TYPES = ("angle", "iqp", "amplitude", "reuploading")
+
+
+def _check_encoding_options(
+    encoding_type: str,
+    *,
+    n_input_features: int,
+    n_qubits: int,
+    use_classical_encoder: bool,
+    diff_method: str,
+    embedding_rotation: str,
+    trainable_input_scaling: bool,
+    shots: int | None = None,
+    device_name: str | None = None,
+    requested_diff_method: str | None = None,
+) -> int:
+    """
+    Raise ``ValueError`` for an option ``encoding_type`` cannot use; return the
+    width of what enters the circuit (the classical encoder's output).
+
+    The angle, IQP and re-uploading layers take one feature per qubit.  The
+    amplitude layer takes up to ``2**n_qubits``: the classical encoder maps to
+    all of them, and without it the raw features are zero-padded.
+
+    ``diff_method`` is the resolved method; ``requested_diff_method`` and
+    ``device_name``, when given, only word the error for an ``"auto"`` that
+    resolved to something else.
+    """
+    if encoding_type not in ENCODING_TYPES:
+        raise ValueError(
+            f"Unsupported encoding_type: {encoding_type!r}; choose 'angle', 'iqp', "
+            f"'amplitude' or 'reuploading'."
+        )
+    if embedding_rotation != "X" and encoding_type in ("iqp", "amplitude"):
+        raise ValueError(
+            f"embedding_rotation applies to encoding_type='angle' or 'reuploading' only; "
+            f"{'IQP' if encoding_type == 'iqp' else 'amplitude'} embedding has no rotation axis."
+        )
+    if trainable_input_scaling and encoding_type != "reuploading":
+        raise ValueError(
+            f"trainable_input_scaling applies to encoding_type='reuploading' only; the "
+            f"{encoding_type} embedding uploads its inputs once."
+        )
+    if encoding_type == "amplitude":
+        width = 2**n_qubits
+        if use_classical_encoder and diff_method != "backprop":
+            # The encoder is trained through the amplitudes, and PennyLane's
+            # input gradient of the state preparation is NaN or silently wrong
+            # under every other method (see hqnn_forge.encoding.amplitude_embedding).
+            raise ValueError(
+                "encoding_type='amplitude' with a classical encoder trains the encoder "
+                "through the amplitude embedding, whose input gradient is only correct "
+                "under diff_method='backprop' (on default.qubit); got "
+                + (
+                    f"diff_method='auto', which resolved to {diff_method!r}"
+                    if requested_diff_method == "auto"
+                    else f"diff_method={diff_method!r}"
+                )
+                + (
+                    ", which shots require: backprop cannot run on samples.  Use "
+                    "shots=None, or use_classical_encoder=False."
+                    if shots is not None
+                    else f" on device_name={device_name!r}.  Leave device_name='auto' "
+                    "or pass device_name='default.qubit'."
+                    if requested_diff_method == "auto"
+                    else "."
+                )
+            )
+        if not use_classical_encoder and not 1 <= n_input_features <= width:
+            raise ValueError(
+                f"When use_classical_encoder=False, encoding_type='amplitude' takes "
+                f"1 to 2**n_qubits = {width} features; got n_input_features={n_input_features}."
+            )
+        return width
+    if not use_classical_encoder and n_input_features != n_qubits:
+        raise ValueError(
+            f"When use_classical_encoder=False, n_input_features "
+            f"({n_input_features}) must equal n_qubits ({n_qubits})."
+        )
+    return n_qubits
+
+
 class QuantumTrunk(nn.Module):
     """
     Mixin for a classifier built around the shared trunk.
@@ -81,7 +166,9 @@ class QuantumTrunk(nn.Module):
     """
 
     classical_encoder: nn.Module
-    quantum_layer: QuantumEncodingLayer | IQPEncodingLayer
+    quantum_layer: (
+        QuantumEncodingLayer | IQPEncodingLayer | AmplitudeEncodingLayer | DataReuploadingLayer
+    )
     dropout: nn.Module
     n_input_features: int
     n_qubits: int
@@ -114,6 +201,11 @@ class QuantumTrunk(nn.Module):
         noise_method: NoiseMethod,
         noise_trajectories: int,
         classical_encoder: nn.Module | None,
+        trainable_input_scaling: bool = False,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> int:
         """
         Build ``classical_encoder``, ``quantum_layer`` and ``dropout`` on ``self``.
@@ -131,6 +223,35 @@ class QuantumTrunk(nn.Module):
         # always handed it to nn.Dropout unchecked, and tightening that changes
         # which checkpoints load, so it is its own change (#404).  The
         # multiclass model keeps its own [0, 1) check.
+        if classical_encoder is not None and not use_classical_encoder:
+            raise ValueError(
+                "classical_encoder replaces the built-in encoder and needs "
+                "use_classical_encoder=True; use_classical_encoder=False feeds the "
+                "input to the circuit directly, with no encoder at all."
+            )
+        # "auto" is resolved here rather than in the layer: amplitude encoding
+        # behind the classical encoder needs backprop at any size, and the
+        # layer alone cannot know what feeds it.
+        requested_diff_method = diff_method
+        device_name, diff_method = resolve_backend(
+            device_name,
+            diff_method,
+            n_qubits,
+            shots=shots,
+            require_backprop=encoding_type == "amplitude" and use_classical_encoder,
+        )
+        width = _check_encoding_options(
+            encoding_type,
+            n_input_features=n_input_features,
+            n_qubits=n_qubits,
+            use_classical_encoder=use_classical_encoder,
+            diff_method=diff_method,
+            embedding_rotation=embedding_rotation,
+            trainable_input_scaling=trainable_input_scaling,
+            shots=shots,
+            device_name=device_name,
+            requested_diff_method=requested_diff_method,
+        )
 
         self.n_input_features = n_input_features
         self.n_qubits = n_qubits
@@ -142,26 +263,15 @@ class QuantumTrunk(nn.Module):
 
         # ── Classical encoder ─────────────────────────────────────────────
         if classical_encoder is not None:
-            if not use_classical_encoder:
-                raise ValueError(
-                    "classical_encoder replaces the built-in encoder and needs "
-                    "use_classical_encoder=True; use_classical_encoder=False feeds the "
-                    "input to the circuit directly, with no encoder at all."
-                )
             self.classical_encoder = custom_encoder(
-                classical_encoder, n_input_features, n_qubits, encoder_activation
+                classical_encoder, n_input_features, n_qubits, encoder_activation, width
             )
         elif use_classical_encoder:
             self.classical_encoder = nn.Sequential(
-                nn.Linear(n_input_features, n_qubits),
+                nn.Linear(n_input_features, width),
                 nn.Tanh() if encoder_activation == "tanh" else nn.Sigmoid(),
             )
         else:
-            if n_input_features != n_qubits:
-                raise ValueError(
-                    f"When use_classical_encoder=False, n_input_features "
-                    f"({n_input_features}) must equal n_qubits ({n_qubits})."
-                )
             if encoder_activation != DEFAULT_ENCODER_ACTIVATION:
                 raise ValueError(
                     f"encoder_activation applies with use_classical_encoder=True only; "
@@ -184,13 +294,12 @@ class QuantumTrunk(nn.Module):
                 noise_position=noise_position,
                 noise_method=noise_method,
                 noise_trajectories=noise_trajectories,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
             )
         elif encoding_type == "iqp":
-            if embedding_rotation != "X":
-                raise ValueError(
-                    "embedding_rotation applies to encoding_type='angle' only; IQP embedding "
-                    "has no rotation axis."
-                )
             self.quantum_layer = IQPEncodingLayer(
                 n_qubits=n_qubits,
                 n_layers=n_layers,
@@ -203,9 +312,48 @@ class QuantumTrunk(nn.Module):
                 noise_position=noise_position,
                 noise_method=noise_method,
                 noise_trajectories=noise_trajectories,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
+            )
+        elif encoding_type == "amplitude":
+            self.quantum_layer = AmplitudeEncodingLayer(
+                n_qubits=n_qubits,
+                n_layers=n_layers,
+                n_features=width if use_classical_encoder else n_input_features,
+                device_name=device_name,
+                diff_method=diff_method,
+                entangler=entangler,
+                readout=readout,
+                noise_level=noise_level,
+                noise_position=noise_position,
+                noise_method=noise_method,
+                noise_trajectories=noise_trajectories,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
             )
         else:
-            raise ValueError(f"Unsupported encoding_type: {encoding_type}")
+            self.quantum_layer = DataReuploadingLayer(
+                n_qubits=n_qubits,
+                n_layers=n_layers,
+                rotation=embedding_rotation,
+                device_name=device_name,
+                diff_method=diff_method,
+                trainable_input_scaling=trainable_input_scaling,
+                entangler=entangler,
+                readout=readout,
+                noise_level=noise_level,
+                noise_position=noise_position,
+                noise_method=noise_method,
+                noise_trajectories=noise_trajectories,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
+            )
 
         # ── Dropout ───────────────────────────────────────────────────────
         self.dropout = nn.Dropout(p=dropout_p) if dropout_p > 0.0 else nn.Identity()
@@ -217,7 +365,7 @@ class QuantumTrunk(nn.Module):
     # ------------------------------------------------------------------
     def _initialise_quantum_weights(self) -> None:
         """Draw the circuit weights with ``init_strategy`` (the models' classical init is their own)."""
-        weights = self.quantum_layer.qlayer.weights  # (n_layers, n_qubits, 3)
+        weights = self.quantum_layer.qlayer.weights  # dim 0: layer (variational_weight_shape)
         if self.init_strategy == "block_local":
             block_local_init_(weights.data, n_qubits=self.n_qubits)
         elif self.init_strategy == "normal":
@@ -236,4 +384,4 @@ class QuantumTrunk(nn.Module):
         # angles mod 2π.
         if self.use_classical_encoder:
             x = x * torch.pi
-        return self.quantum_layer(x)  # type: ignore[no-any-return]
+        return self.quantum_layer(x)

@@ -244,3 +244,25 @@ class TestSubfigureAxes:
         ax.remove()
         with pytest.raises(ValueError, match="not attached"):
             plots.plot_confusion_matrix([0, 1], [0, 1], ax=ax)
+
+
+def test_reliability_diagram_plots_the_reliability_curve() -> None:
+    # Here rather than in test_calibration.py: the lowest-floors CI job has no
+    # matplotlib and leaves exactly this module out.
+    from hqnn_forge.evaluation import expected_calibration_error, reliability_curve
+
+    rng = np.random.default_rng(7)
+    prob = 1 / (1 + np.exp(-3 * rng.standard_normal(500)))
+    y = (rng.random(500) < prob).astype(float)
+    fig = plots.plot_reliability_diagram(y, prob, strategy="quantile")
+    (ax,) = fig.axes
+    diagonal, model = ax.get_lines()
+    confidence, frequency, counts = reliability_curve(y, prob, 10, "quantile")
+    np.testing.assert_allclose(np.asarray(diagonal.get_xydata(), dtype=float), [[0, 0], [1, 1]])
+    np.testing.assert_allclose(np.asarray(model.get_xdata(), dtype=float), confidence.numpy())
+    np.testing.assert_allclose(np.asarray(model.get_ydata(), dtype=float), frequency.numpy())
+    assert [t.get_text() for t in ax.texts] == [str(int(n)) for n in counts.tolist()]
+    ece = expected_calibration_error(y, prob, 10, "quantile")
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend.get_texts()[1].get_text() == f"model (ECE {ece:.3f})"
