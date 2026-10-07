@@ -82,7 +82,7 @@ from hqnn_forge.encoding.angle_embedding import (
 )
 from hqnn_forge.models._trunk import DEFAULT_ENCODER_ACTIVATION, DEFAULT_INIT_STD, QuantumTrunk
 from hqnn_forge.models.base import BinaryClassifierBase
-from hqnn_forge.noise import Channel, NoiseMethod, Position
+from hqnn_forge.noise import Channel, NoiseMethod, Position, validate_readout_error
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
 #: Constructor arguments of the SHNN published in the thesis (see
@@ -252,6 +252,15 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         so a shot-based model gives the same samples on every run.  Default
         ``None``: unseeded, and ``torch.manual_seed`` does not reach it.  See
         :func:`hqnn_forge.encoding._common.resolve_device`.
+    readout_error:
+        ``(p01, p10)``: in train mode, each measured bit reads 1 instead of 0
+        with probability ``p01`` and 0 instead of 1 with ``p10``, applied
+        exactly to the ⟨Z⟩ readouts (see
+        :func:`hqnn_forge.noise.readout_error_map`).  It shifts every readout
+        by ``p10 − p01``, which the head learns, and ``predict_proba`` runs
+        without it: evaluate inside
+        :func:`hqnn_forge.noise.apply_readout_error` with the same pair to
+        keep the shift (#488).  Default ``None``.
 
     Attributes
     ----------
@@ -299,10 +308,13 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         shots: int | None = None,
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
         seed = as_seed(seed, "seed")
+        # Plain floats: _config goes into the checkpoint as it is.
+        readout_error = validate_readout_error(readout_error)
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
@@ -334,6 +346,7 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
 
             n_readouts = self._build_trunk(
@@ -360,6 +373,7 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
 
             # ── Classical head ────────────────────────────────────────────────

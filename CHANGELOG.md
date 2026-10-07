@@ -238,10 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoints (weight-safe, `"depolarizing"` for older files), selecting
   `"amplitude_damping"` (T1), `"phase_damping"` (T2 dephasing), `"bit_flip"` or
   `"phase_flip"`, each with its own `p` range (`[0, 1]`; depolarizing stays `[0, 0.75]`). A
-  readout error is `"bit_flip"` at `position="end"`, the symmetric case only: an asymmetric
-  one (`p01 ≠ p10`) is not modelled. `noise_method="trajectories"` samples the Pauli channels
-  (depolarizing, bit flip, phase flip), including inside `apply_shots`; the damping channels
-  need `"density"` (#336)
+  symmetric readout error is `"bit_flip"` at `position="end"`; an asymmetric one
+  (`p01 ≠ p10`) is the separate `readout_error` below (#358). `noise_method="trajectories"`
+  samples the Pauli channels (depolarizing, bit flip, phase flip), including inside
+  `apply_shots`; the damping channels need `"density"` (#336)
 - Calibration of binary probabilities in `hqnn_forge.evaluation`: `brier_score`,
   `expected_calibration_error` and `reliability_curve` (uniform or equal-count bins), the
   post-hoc `TemperatureScaler` and `PlattScaler` fitted on a validation split (raising when
@@ -285,6 +285,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phase flip it equals, amplitude damping by weighted Kraus branches whose mean is the density
   channel exactly; the latter needs backprop, parameter-shift or finite-diff, `default.qubit` or
   `lightning.qubit`, and exact expectation values (#357)
+- An asymmetric readout error `(p01, p10)`, applied exactly to each ⟨Z⟩ as
+  `(1 − p01 − p10)⟨Z⟩ + (p10 − p01)`: `apply_readout_error` post hoc,
+  `noise_sweep(..., channel="readout")`, and `readout_error=` on the layers and classifiers for
+  training (weight-safe in checkpoints). The map acts on the layer's output: a layer's own
+  `readout_error` is suppressed inside `apply_depolarizing_noise` like its other training
+  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. On a sampled
+  layer the mean is exact but the shot noise is scaled by `|1 − p01 − p10|`, smaller than that
+  of flipped shots (#486). A model trained with `readout_error` learns its offset, and
+  `predict_proba` runs without it unless called inside `apply_readout_error` (#488) (#358)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
