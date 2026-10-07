@@ -52,7 +52,8 @@ channel="readout")`` sweeps it, and the layers' and classifiers'
 ``p01 = p10 = p`` is exactly ``"bit_flip"`` at ``"end"``.  Because the map is
 applied to the layer's output rather than in its QNode, it exists only where
 the layer runs its circuit through :meth:`TrainingNoiseMixin._run_circuit`:
-a direct ``layer.qlayer(...)`` call, as the kernels make, is unaffected, and
+a direct ``layer.qlayer(...)`` call is unaffected, as are the kernels, which
+rebuild the circuit from ``qlayer.qnode``, and
 :func:`apply_readout_error` refuses a layer without the mixin.  Training noise by trajectories covers every channel; see
 *Damping channels as trajectories* below for how the two damping channels are
 sampled and what that rules out.
@@ -834,9 +835,10 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
     The map is applied where the layer runs its circuit
     (:meth:`TrainingNoiseMixin._run_circuit`), not inside the QNode, so the
     layer must be a :class:`TrainingNoiseMixin` whose ``forward`` goes through
-    it, as every built-in encoding layer's does.  Code that calls
-    ``layer.qlayer(...)`` directly inside the block, such as
-    :mod:`hqnn_forge.kernels`, gets the circuit's output without the error.
+    it, as every built-in encoding layer's does.  Code that runs the circuit
+    itself inside the block -- a direct ``layer.qlayer(...)`` call, or
+    :mod:`hqnn_forge.kernels`, which rebuild it from ``qlayer.qnode`` -- gets
+    its output without the error.
 
     Raises
     ------
