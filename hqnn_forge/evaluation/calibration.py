@@ -75,7 +75,9 @@ BinStrategy = Literal["uniform", "quantile"]
 def _pair(y_true: object, prob: object) -> tuple[torch.Tensor, torch.Tensor]:
     """Float64 labels and probabilities on the CPU, whatever device they came from."""
     t, p = _validate_scores(y_true, prob)
-    y, p = t.cpu().to(torch.float64), p.cpu()
+    # contiguous: a column of a 2-D array (predict_proba(X)[:, 1]) is a strided
+    # view, which torch.searchsorted in the binning copies with a warning.
+    y, p = t.cpu().to(torch.float64), p.cpu().contiguous()
     if torch.isnan(p).any() or p.min() < 0 or p.max() > 1:
         raise ValueError("prob must hold probabilities in [0, 1].")
     return y, p

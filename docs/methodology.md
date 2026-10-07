@@ -92,7 +92,13 @@ known to change calibration, so compare these columns before reading a probabili
 probability. `TemperatureScaler` and `PlattScaler` (`hqnn_forge.evaluation`) fix
 calibration after training, fitted on the validation split; `train_model` records the
 validation temperature in its history. Temperature scaling is monotone, so it leaves every
-ranking-based number above unchanged.
+ranking-based number above unchanged. `HybridClassifierEstimator(calibration="temperature")`
+(or `"platt"`) fits one on its validation split and applies it in `predict_proba`; `predict`
+keeps deciding on the uncalibrated probabilities, so it does not change, and `threshold_`
+reports the threshold mapped through the calibrator (#359). With focal loss the fitted
+temperature was 0.37 to 0.62 over four seeds of the synthetic data of the estimator's tests
+(240 samples, 30 % validation): there the model was under-confident, and calibration
+sharpened it. That is one small dataset, not a general result about focal loss.
 
 ## Statistics
 

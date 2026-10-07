@@ -249,6 +249,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TrainingHistory.temperature` for the returned weights, and per-fold `brier`/`ece` with
   `brier_mean`/`ece_mean` in `run_benchmark` (NaN for a fold whose probabilities are not
   finite) (#340)
+- `calibration="temperature"` or `"platt"` on `HybridClassifierEstimator` (two classes): fitted
+  on the validation split and applied in `predict_proba`, stored as `calibrator_`. With
+  `threshold="optimal"`, `predict` is unchanged and `threshold_` is mapped through the
+  calibrator. A split with no finite fit warns and stays uncalibrated (#359)
 - `examples/benchmark_batching.py`: inference and training-step time of the per-sample split,
   native broadcasting, `batch_obs` and `default.qubit`/backprop for every encoder, with a
   correctness check, plus a crossover by qubit count with peak memory; the README now says
