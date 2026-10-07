@@ -58,13 +58,24 @@ Matched capacity
 ----------------
 :func:`classical_baseline` returns an untrained
 :class:`~hqnn_forge.models.ClassicalBaseline` whose trainable parameter count
-is the closest it can get to the hybrid model's ``count_parameters()``, with
-every rotation angle of the circuit counted as one parameter.  That is the
-convention of ``count_parameters`` and of the MCC/kParam efficiency figures the
-hybrid models are reported with, so the control is matched on the budget the
-results are compared on.  It does not claim an angle is worth a ``Linear``
+is the closest it can get to the hybrid model's **live** count:
+``count_parameters()`` minus the circuit weights that can never move the
+output, ``circuit_summary(model).n_inert_params`` (#234).  Every other
+rotation angle counts as one parameter.  A dead weight adds no capacity, so a
+control matched on the total would get a live parameter for each one the
+hybrid cannot use: the published SHNN has 122 trainable parameters, 102 of
+them live, and a control matched on 122 would have 121, 19% more than the
+hybrid's live count.  It does not claim an angle is worth a ``Linear``
 weight; it holds the count fixed so that the comparison is about what the
 parameters are, not how many there are.
+
+``n_inert_params`` is structural and a lower bound: for strongly-entangling
+layers with a ⟨Z_0⟩ readout it finds 16 of the 20 dead weights.  The target is
+therefore an upper bound on the live count, and the control is never smaller
+than one matched to the exact live count.  For the published SHNN both
+targets, 106 and 102, give the same 101-parameter control.  Efficiency figures
+(MCC/kParam) still divide by the total, the published convention; only the
+match uses the live count.
 
 The architecture keeps the hybrid's classical shape and replaces the circuit's
 capacity with width:
@@ -79,9 +90,9 @@ capacity with width:
 Widths are integers, so the match is to within half the parameters one more
 unit adds: ``(n_in + 2) / 2`` for the serial control, ``(2w + n_in + 4) / 2``
 for the parallel one.  At 30 features, 8 qubits and 2 layers that bound is
-5.2% of the serial model's 305 parameters (the control has 289) and 3.4% of
-the parallel model's 1089 (the control has 1061); the published SHNN's 122
-get a 121-parameter control.  ``dropout_p`` is carried over, and so is
+5.4% of the serial model's 297 live parameters (305 in total: with the
+all-qubit readout the 8 last-layer ``ω`` are inert; the control has 289) and
+3.4% of the parallel model's 1081 (1089 in total; the control has 1061).  ``dropout_p`` is carried over, and so is
 ``init_seed``: a seeded hybrid gets a control seeded with the same seed, so the
 pair is reproducible without touching the global torch RNG (#175), and an
 unseeded one gets a control drawn from the global RNG as before.  For another
@@ -119,8 +130,10 @@ def classical_baseline(model: nn.Module) -> ClassicalBaseline:
     Returns
     -------
     ClassicalBaseline
-        With ``count_parameters()`` within half a width step of
-        ``model.count_parameters()``, and ``model``'s ``n_input_features``,
+        With ``count_parameters()`` within half a width step of ``model``'s
+        live count, ``model.count_parameters() -
+        circuit_summary(model).n_inert_params``, and ``model``'s
+        ``n_input_features``,
         ``dropout_p`` and ``init_seed``.
 
     Raises
@@ -128,7 +141,9 @@ def classical_baseline(model: nn.Module) -> ClassicalBaseline:
     TypeError
         If ``model`` is not one of the two binary hybrid classifiers.
     """
-    # Imported here: hqnn_forge.models imports hqnn_forge.utils.
+    # Imported here: hqnn_forge.models and hqnn_forge.diagnostics import
+    # hqnn_forge.utils.
+    from hqnn_forge.diagnostics import circuit_summary
     from hqnn_forge.models import (
         ClassicalBaseline,
         HybridBinaryClassifier,
@@ -156,7 +171,9 @@ def classical_baseline(model: nn.Module) -> ClassicalBaseline:
 
     config = model.get_config()
     n_in = config["n_input_features"]
-    target = model.count_parameters()
+    # Matched on the live count (#234): a weight that can never move the output
+    # adds no capacity for the control to match.
+    target = model.count_parameters() - circuit_summary(model).n_inert_params
 
     def count(width: int) -> int:
         return mlp_parameter_count(n_in, shape(width))

@@ -52,11 +52,14 @@ References
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
+
+from hqnn_forge.evaluation.thresholds import _validate_scores
 
 __all__ = [
     "PlattScaler",
@@ -70,16 +73,9 @@ BinStrategy = Literal["uniform", "quantile"]
 
 
 def _pair(y_true: object, prob: object) -> tuple[torch.Tensor, torch.Tensor]:
-    y = torch.as_tensor(y_true).reshape(-1).to(torch.float64)
-    # contiguous: a column of a 2-D array (predict_proba(X)[:, 1]) is a strided
-    # view, which torch.searchsorted in the binning copies with a warning.
-    p = torch.as_tensor(prob).reshape(-1).to(torch.float64).contiguous()
-    if y.shape != p.shape:
-        raise ValueError(f"y_true and prob differ in length: {y.numel()} vs {p.numel()}.")
-    if y.numel() == 0:
-        raise ValueError("y_true is empty.")
-    if not torch.isin(y, torch.tensor([0.0, 1.0], dtype=torch.float64)).all():
-        raise ValueError("y_true must hold binary labels 0 and 1.")
+    """Float64 labels and probabilities on the CPU, whatever device they came from."""
+    t, p = _validate_scores(y_true, prob)
+    y, p = t.cpu().to(torch.float64), p.cpu()
     if torch.isnan(p).any() or p.min() < 0 or p.max() > 1:
         raise ValueError("prob must hold probabilities in [0, 1].")
     return y, p
@@ -132,11 +128,35 @@ def expected_calibration_error(
 
 
 def _logit_pair(logits: object, y_true: object) -> tuple[torch.Tensor, torch.Tensor]:
-    z = torch.as_tensor(logits).detach().reshape(-1).to(torch.float64)
+    z = torch.as_tensor(logits).detach().reshape(-1).cpu().to(torch.float64)
+    if not torch.isfinite(z).all():
+        raise ValueError("logits must be finite.")
     y, _ = _pair(y_true, torch.sigmoid(z))
     if torch.unique(y).numel() < 2:
         raise ValueError("fitting a calibration needs both classes in y_true.")
     return z, y
+
+
+def _minimise_nll(
+    params: torch.Tensor, scaled: Callable[[], torch.Tensor], y: torch.Tensor
+) -> None:
+    """Minimise ``BCE(scaled(), y)`` over ``params`` in place, by L-BFGS."""
+    optimiser = torch.optim.LBFGS(
+        [params],
+        lr=1.0,
+        max_iter=500,
+        tolerance_grad=1e-10,
+        tolerance_change=1e-14,
+        line_search_fn="strong_wolfe",
+    )
+
+    def closure() -> torch.Tensor:
+        optimiser.zero_grad()
+        loss = F.binary_cross_entropy_with_logits(scaled(), y)
+        loss.backward()
+        return loss
+
+    optimiser.step(closure)
 
 
 @dataclass(frozen=True)
@@ -147,25 +167,30 @@ class TemperatureScaler:
 
     @classmethod
     def fit(cls, logits: object, y_true: object) -> TemperatureScaler:
-        """The temperature minimising the validation NLL (L-BFGS on ``log T``, so ``T > 0``)."""
+        """
+        The temperature minimising the validation NLL (L-BFGS on ``log T``, so ``T > 0``).
+
+        The NLL is convex in ``s = 1/T`` with slope ``−Σ m_i σ(−s·m_i)``, where
+        ``m_i = (2y_i − 1)·z_i`` is the signed margin.  At ``s → 0`` the slope is
+        ``−Σ m_i / 2`` and at ``s → ∞`` it is ``−Σ_{m_i<0} m_i``, so a finite
+        ``T`` exists only if ``Σ m_i > 0`` (the logits rank better than chance)
+        and some ``m_i < 0`` (the classes are not separated at 0).  Otherwise the
+        optimum is ``T → ∞`` or ``T → 0`` and fitting raises ``ValueError``.
+        """
         z, y = _logit_pair(logits, y_true)
+        margin = (2 * y - 1) * z
+        if margin.sum() <= 0:
+            raise ValueError(
+                "the logits rank no better than chance (sum of signed margins <= 0), so the "
+                "NLL falls as the temperature grows without bound; there is no finite fit."
+            )
+        if not (margin < 0).any():
+            raise ValueError(
+                "the logits separate the classes at 0, so the NLL falls as the temperature "
+                "shrinks to 0; there is no finite fit."
+            )
         log_t = torch.zeros((), dtype=torch.float64, requires_grad=True)
-        optimiser = torch.optim.LBFGS(
-            [log_t],
-            lr=1.0,
-            max_iter=500,
-            tolerance_grad=1e-10,
-            tolerance_change=1e-14,
-            line_search_fn="strong_wolfe",
-        )
-
-        def closure() -> torch.Tensor:
-            optimiser.zero_grad()
-            loss = F.binary_cross_entropy_with_logits(z / log_t.exp(), y)
-            loss.backward()
-            return loss
-
-        optimiser.step(closure)
+        _minimise_nll(log_t, lambda: z / log_t.exp(), y)
         return cls(float(log_t.detach().exp()))
 
     def __call__(self, logits: object) -> torch.Tensor:
@@ -183,25 +208,22 @@ class PlattScaler:
 
     @classmethod
     def fit(cls, logits: object, y_true: object) -> PlattScaler:
-        """``(a, b)`` minimising the validation NLL: logistic regression on the logit."""
+        """
+        ``(a, b)`` minimising the validation NLL: logistic regression on the logit.
+
+        Its maximum-likelihood estimate is finite exactly when no threshold on
+        ``z`` separates the classes, ties allowed (quasi-complete separation);
+        otherwise ``|a| → ∞`` and fitting raises ``ValueError``.
+        """
         z, y = _logit_pair(logits, y_true)
+        neg, pos = z[y == 0], z[y == 1]
+        if neg.max() <= pos.min() or pos.max() <= neg.min():
+            raise ValueError(
+                "a threshold on the logits separates the classes, so the NLL falls as |a| "
+                "grows without bound; there is no finite fit."
+            )
         ab = torch.tensor([1.0, 0.0], dtype=torch.float64, requires_grad=True)
-        optimiser = torch.optim.LBFGS(
-            [ab],
-            lr=1.0,
-            max_iter=500,
-            tolerance_grad=1e-10,
-            tolerance_change=1e-14,
-            line_search_fn="strong_wolfe",
-        )
-
-        def closure() -> torch.Tensor:
-            optimiser.zero_grad()
-            loss = F.binary_cross_entropy_with_logits(ab[0] * z + ab[1], y)
-            loss.backward()
-            return loss
-
-        optimiser.step(closure)
+        _minimise_nll(ab, lambda: ab[0] * z + ab[1], y)
         a, b = ab.detach().tolist()
         return cls(float(a), float(b))
 

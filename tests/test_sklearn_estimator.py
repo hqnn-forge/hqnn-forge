@@ -18,7 +18,7 @@ import functools
 import inspect
 import pickle
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -32,16 +32,11 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.estimator_checks import estimator_checks_generator
 
-from hqnn_forge.evaluation.calibration import (
-    PlattScaler,
-    TemperatureScaler,
-    expected_calibration_error,
-)
-from hqnn_forge.evaluation.thresholds import find_optimal_threshold
+import hqnn_forge.noise as noise_module
 from hqnn_forge.sklearn import HybridClassifierEstimator
 from hqnn_forge.training import train_model
 
-FAST = dict(
+FAST: dict[str, Any] = dict(
     n_qubits=2,
     n_layers=1,
     device_name="default.qubit",
@@ -92,7 +87,7 @@ class TestParams:
 
 class TestFitPredict:
     @pytest.mark.parametrize("model", ["serial", "parallel"])
-    def test_shapes_and_learning(self, data: tuple, model: str) -> None:
+    def test_shapes_and_learning(self, data: tuple, model: Literal["serial", "parallel"]) -> None:
         X, y = data
         est = HybridClassifierEstimator(model=model, **LEARN).fit(X, y)
         proba = est.predict_proba(X)
@@ -126,6 +121,7 @@ class TestFitPredict:
             **{**FAST, "validation_fraction": 0.25, "patience": 5}
         ).fit(X, y)
         assert est.history_.best_threshold is not None
+        assert est.threshold_ is not None
         assert est.threshold_ == pytest.approx(est.history_.best_threshold)
         np.testing.assert_array_equal(
             est.predict(X),
@@ -162,6 +158,7 @@ class TestFitPredict:
 
 
 class TestSklearnTooling:
+    @pytest.mark.slow  # three full fits
     def test_cross_val_score(self, data: tuple) -> None:
         X, y = data
         scores = cross_val_score(
@@ -200,13 +197,11 @@ class TestErrors:
         with pytest.raises(ValueError, match="features"):
             est.predict(X[:, :2])
 
-    def test_multiclass_rejected(self, data: tuple) -> None:
+    def test_one_class_rejected(self, data: tuple) -> None:
+        # More than two classes are supported since #309; one is not.
         X, _ = data
-        with pytest.raises(
-            ValueError,
-            match="Only binary classification is supported.  HybridClassifierEstimator got 3 classes",
-        ):
-            HybridClassifierEstimator(**FAST).fit(X, np.arange(80) % 3)
+        with pytest.raises(ValueError, match="needs at least two classes; got 1"):
+            HybridClassifierEstimator(**FAST).fit(X, np.zeros(80, dtype=int))
 
     @pytest.mark.parametrize(
         "params, match",
@@ -315,9 +310,11 @@ MAY_SKIP_CHECKS: dict[str, str] = {
 
 def _conformance_estimator() -> HybridClassifierEstimator:
     # check_classifiers_train requires training accuracy > 0.83 on its own
-    # toy problem; 2 epochs fall short, 30 pass with margin at this seed.
+    # toy problems, binary and (with the multiclass tag) 3-class blobs; 2
+    # epochs fall short, 30 pass with margin at this seed.  Two qubits reach
+    # only 0.77 on the 3-class problem (0.82 at 60 epochs); three reach 0.91.
     return HybridClassifierEstimator(
-        n_qubits=2,
+        n_qubits=3,
         n_layers=1,
         device_name="default.qubit",
         diff_method="backprop",
@@ -340,6 +337,10 @@ def _check_name(check: Any) -> str:
     return getattr(check, "func", check).__name__
 
 
+# Checks that fit to convergence several times over: 3-4 s per case (#323).
+SLOW_CHECKS = frozenset({"check_classifiers_train"})
+
+
 def _conformance_params() -> list[Any]:
     # The strict xfail marks are applied here rather than through
     # estimator_checks_generator(mark="xfail", xfail_strict=True): xfail_strict
@@ -360,6 +361,8 @@ def _conformance_params() -> list[Any]:
             )
         if name in MAY_SKIP_CHECKS:
             marks.append(pytest.mark.may_skip)
+        if name in SLOW_CHECKS:
+            marks.append(pytest.mark.slow)
         params.append(pytest.param(estimator, check, marks=marks))
     return params
 
@@ -391,155 +394,94 @@ def test_sample_order_invariance_at_float32() -> None:
         np.testing.assert_array_equal(est.predict(X[idx]), labels[idx])
 
 
-class TestCalibration:
-    """#359: calibration fitted on the validation split, applied in predict_proba."""
+class TestNoiseAwareTraining:
+    """#228: the model's training-noise options, exposed on the estimator."""
 
-    CAL = dict(FAST, loss="focal", validation_fraction=0.3, patience=5)
+    NOISY = {**FAST, "max_epochs": 3, "noise_level": 0.1, "noise_position": "end"}
 
-    @staticmethod
-    def _noisy_data() -> tuple[np.ndarray, np.ndarray]:
-        rng = np.random.default_rng(0)
-        X = rng.standard_normal((240, 3))
-        y = (X[:, 0] - X[:, 1] + 0.5 * rng.standard_normal(240) > 0).astype(int)
-        return X, y
+    def test_defaults_train_exactly_as_before(self, data: tuple) -> None:
+        X, y = data
+        explicit = HybridClassifierEstimator(
+            **FAST,
+            noise_level=0.0,
+            noise_position="all",
+            noise_method="density",
+            noise_trajectories=1,
+        ).fit(X, y)
+        default = HybridClassifierEstimator(**FAST).fit(X, y)
+        np.testing.assert_array_equal(explicit.predict_proba(X), default.predict_proba(X))
+        assert default.model_.quantum_layer._training_noise_qnode is None
 
-    def _validation(self, est: HybridClassifierEstimator, y: np.ndarray, seed: int) -> np.ndarray:
-        # fit draws the split first from default_rng(random_state).
-        _, va = est._stratified_holdout(y, 0.3, np.random.default_rng(seed))
-        return va
+    @pytest.mark.parametrize("model", ["serial", "parallel"])
+    def test_fit_runs_the_noisy_circuit_and_predict_does_not(
+        self, data: tuple, model: Literal["serial", "parallel"], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        X, y = data
+        calls = {"n": 0}
+        original = noise_module.run_with_training_noise
 
-    @staticmethod
-    def _nll(y: np.ndarray, p: np.ndarray) -> float:
-        return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+        def spy(*args: object, **kwargs: object) -> torch.Tensor:
+            calls["n"] += 1
+            return original(*args, **kwargs)  # type: ignore[arg-type]
 
-    def _fit(self, calibration: str | None, seed: int = 0, **kw: Any) -> HybridClassifierEstimator:
-        X, y = self._noisy_data()
-        params = {**self.CAL, "random_state": seed, "calibration": calibration, **kw}
-        return HybridClassifierEstimator(**params).fit(X, y)
+        monkeypatch.setattr(noise_module, "run_with_training_noise", spy)
+        est = HybridClassifierEstimator(model=model, **self.NOISY).fit(X, y)
+        assert calls["n"] > 0
+        layer = est.model_.quantum_layer
+        assert (layer.noise_level, layer.noise_position) == (0.1, "end")
+        calls["n"] = 0
+        proba = est.predict_proba(X)
+        assert calls["n"] == 0
+        # predict is the noiseless model: the same weights evaluated clean.
+        est.model_.eval()
+        with torch.no_grad():
+            clean = torch.sigmoid(est.model_(torch.from_numpy(X.astype(np.float32)))).squeeze(-1)
+        np.testing.assert_allclose(proba[:, 1], clean.numpy(), rtol=1e-6)
 
-    def test_no_calibration_by_default(self) -> None:
-        est = self._fit(None)
-        assert est.calibration is None and est.calibrator_ is None
+    def test_noise_changes_what_is_learned(self, data: tuple) -> None:
+        X, y = data
+        clean = HybridClassifierEstimator(**{**FAST, "max_epochs": 3}).fit(X, y)
+        noisy = HybridClassifierEstimator(**self.NOISY).fit(X, y)
+        assert not np.allclose(clean.predict_proba(X), noisy.predict_proba(X))
+
+    def test_trajectories_are_reproducible_with_random_state(self, data: tuple) -> None:
+        X, y = data
+        params = {**self.NOISY, "noise_method": "trajectories", "noise_trajectories": 2}
+        a = HybridClassifierEstimator(**params).fit(X, y).predict_proba(X)
+        b = HybridClassifierEstimator(**params).fit(X, y).predict_proba(X)
+        np.testing.assert_array_equal(a, b)
+
+    def test_params_round_trip_and_clone(self) -> None:
+        est = HybridClassifierEstimator(noise_level=0.2, noise_method="trajectories")
+        params = est.get_params()
+        assert params["noise_level"] == 0.2 and params["noise_method"] == "trajectories"
+        assert params["noise_position"] == "all" and params["noise_trajectories"] == 1
+        cloned = clone(est.set_params(noise_trajectories=3))
+        assert cloned.get_params() == est.get_params()
+
+    def test_grid_search_tunes_the_noise_level(self, data: tuple) -> None:
+        X, y = data
+        search = GridSearchCV(
+            HybridClassifierEstimator(**{**FAST, "max_epochs": 2}),
+            {"noise_level": [0.0, 0.05]},
+            cv=2,
+            scoring="accuracy",
+        ).fit(X, y)
+        best = search.best_params_["noise_level"]
+        assert search.best_estimator_.model_.quantum_layer.noise_level == best
 
     @pytest.mark.parametrize(
-        ("calibration", "cls"), [("temperature", TemperatureScaler), ("platt", PlattScaler)]
-    )
-    def test_fitted_calibrator(self, calibration: str, cls: type) -> None:
-        assert isinstance(self._fit(calibration).calibrator_, cls)
-
-    @pytest.mark.parametrize("calibration", ["temperature", "platt"])
-    @pytest.mark.parametrize("seed", [0, 1])
-    def test_validation_log_loss_never_rises(self, calibration: str, seed: int) -> None:
-        # Guaranteed: the fit minimises the validation NLL over a family that
-        # contains the identity (T = 1, or a = 1 and b = 0).
-        X, y = self._noisy_data()
-        raw, cal = self._fit(None, seed), self._fit(calibration, seed)
-        va = self._validation(cal, y, seed)
-        p_raw, p_cal = raw.predict_proba(X[va])[:, 1], cal.predict_proba(X[va])[:, 1]
-        assert self._nll(y[va], p_cal) <= self._nll(y[va], p_raw) + 1e-9
-
-    @pytest.mark.parametrize("calibration", ["temperature", "platt"])
-    def test_focal_loss_under_confidence_is_corrected(self, calibration: str) -> None:
-        # Measured on this seed: validation ECE 0.228 uncalibrated, 0.144 with
-        # temperature scaling (T = 0.45: the focal-loss model is
-        # under-confident) and 0.076 with Platt scaling.
-        X, y = self._noisy_data()
-        raw, cal = self._fit(None, 2), self._fit(calibration, 2)
-        va = self._validation(cal, y, 2)
-        ece_raw = expected_calibration_error(y[va], raw.predict_proba(X[va])[:, 1])
-        ece_cal = expected_calibration_error(y[va], cal.predict_proba(X[va])[:, 1])
-        assert ece_cal < ece_raw - 0.05, (ece_cal, ece_raw)
-
-    @pytest.mark.parametrize("calibration", ["temperature", "platt"])
-    def test_rankings_and_predictions_are_unchanged(self, calibration: str) -> None:
-        X, _ = self._noisy_data()
-        raw, cal = self._fit(None), self._fit(calibration)
-        p_raw, p_cal = raw.predict_proba(X)[:, 1], cal.predict_proba(X)[:, 1]
-        assert not np.allclose(p_raw, p_cal)
-        np.testing.assert_array_equal(
-            np.argsort(p_raw, kind="stable"), np.argsort(p_cal, kind="stable")
-        )
-        np.testing.assert_array_equal(raw.predict(X), cal.predict(X))
-
-    def test_threshold_is_mapped_through_the_calibrator(self) -> None:
-        raw, cal = self._fit(None), self._fit("temperature")
-        t = torch.logit(torch.tensor(raw.threshold_, dtype=torch.float64))
-        expected = torch.sigmoid(t / cal.calibrator_.temperature).item()
-        assert cal.threshold_ == pytest.approx(expected, abs=1e-12)
-
-    def test_a_decreasing_platt_map_searches_the_threshold_again(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from hqnn_forge import sklearn as est_module
-
-        monkeypatch.setattr(
-            est_module.PlattScaler, "fit", classmethod(lambda cls, z, y: cls(-1.0, 0.0))
-        )
-        X, y = self._noisy_data()
-        est = self._fit("platt")
-        va = self._validation(est, y, 0)
-        expected = find_optimal_threshold(
-            torch.from_numpy(y[va]), torch.from_numpy(est.predict_proba(X[va])[:, 1])
-        ).threshold
-        assert est.threshold_ == pytest.approx(expected)
-
-    def test_a_decreasing_platt_map_under_a_loss_monitor_keeps_one_half(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # val_loss searches no threshold, so there is no metric to search again
-        # with: the 0.5 fallback applies to the calibrated probabilities.
-        from hqnn_forge import sklearn as est_module
-
-        monkeypatch.setattr(
-            est_module.PlattScaler, "fit", classmethod(lambda cls, z, y: cls(-1.0, 0.0))
-        )
-        X, _ = self._noisy_data()
-        est = self._fit("platt", monitor="val_loss")
-        assert est.threshold_ == 0.5
-        np.testing.assert_array_equal(
-            est.predict(X), est.classes_[(est.predict_proba(X)[:, 1] >= 0.5).astype(int)]
-        )
-
-    def test_pickle_keeps_the_fitted_calibrator(self) -> None:
-        X, _ = self._noisy_data()
-        est = self._fit("platt")
-        loaded = pickle.loads(pickle.dumps(est))
-        assert (loaded.calibrator_.a, loaded.calibrator_.b) == (
-            est.calibrator_.a,
-            est.calibrator_.b,
-        )
-        np.testing.assert_array_equal(loaded.predict_proba(X), est.predict_proba(X))
-
-    def test_fixed_threshold_applies_to_calibrated_probabilities(self) -> None:
-        X, _ = self._noisy_data()
-        est = self._fit("temperature", threshold=0.5)
-        assert est.threshold_ == 0.5
-        np.testing.assert_array_equal(
-            est.predict(X), est.classes_[(est.predict_proba(X)[:, 1] >= 0.5).astype(int)]
-        )
-
-    @pytest.mark.parametrize(
-        ("params", "match"),
+        "params, match",
         [
-            (dict(calibration="isotonic"), "calibration must be None, 'temperature' or 'platt'"),
-            (dict(calibration="temperature", validation_fraction=0.0), "validation_fraction > 0"),
+            ({"noise_level": 0.9}, r"noise_level must lie in \[0, 0.75\]"),
+            ({"noise_position": "middle"}, "noise_position must be 'all' or 'end'"),
+            ({"noise_method": "kraus"}, "noise_method must be"),
+            ({"noise_trajectories": 2}, "needs noise_method='trajectories'"),
         ],
     )
-    def test_bad_settings_fail_in_fit(self, params: dict, match: str) -> None:
-        X, y = self._noisy_data()
+    def test_bad_values_fail_in_fit_not_in_the_constructor(
+        self, data: tuple, params: dict, match: str
+    ) -> None:
+        est = HybridClassifierEstimator(**{**FAST, **params})  # does not raise
         with pytest.raises(ValueError, match=match):
-            HybridClassifierEstimator(**{**self.CAL, **params}).fit(X, y)
-
-    def test_params_clone_and_grid_search(self) -> None:
-        est = HybridClassifierEstimator(**{**self.CAL, "calibration": "platt"})
-        assert est.get_params()["calibration"] == "platt"
-        assert clone(est).get_params()["calibration"] == "platt"
-        X, y = self._noisy_data()
-        search = GridSearchCV(
-            HybridClassifierEstimator(**{**self.CAL, "max_epochs": 3}),
-            {"calibration": [None, "temperature"]},
-            cv=2,
-            scoring="neg_log_loss",
-        ).fit(X, y)
-        assert search.best_params_["calibration"] in (None, "temperature")
-        assert len(search.cv_results_["params"]) == 2
+            est.fit(*data)

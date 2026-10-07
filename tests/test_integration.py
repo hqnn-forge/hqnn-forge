@@ -37,6 +37,7 @@ def synthetic_dataset() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
 class TestEndToEndPipeline:
+    @pytest.mark.slow
     def test_training_loss_decreases(
         self, synthetic_dataset: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     ) -> None:
@@ -71,6 +72,7 @@ class TestEndToEndPipeline:
 
         assert losses[-1] < losses[0]
 
+    @pytest.mark.slow
     def test_class_weighted_training_loss_decreases(
         self, synthetic_dataset: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     ) -> None:
@@ -106,6 +108,7 @@ class TestEndToEndPipeline:
         assert all(torch.isfinite(torch.tensor(losses)))
         assert losses[-1] < losses[0]
 
+    @pytest.mark.slow
     def test_predict_proba_after_training(
         self, synthetic_dataset: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     ) -> None:

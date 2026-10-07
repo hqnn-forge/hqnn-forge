@@ -1,12 +1,15 @@
 """
 hqnn_forge.models.base
 ======================
-Shared inference and bookkeeping API for the binary classifiers.
+Shared inference and bookkeeping API for the classifiers.
 
-Every hybrid classifier in this package is an ``nn.Module`` whose ``forward``
-returns one raw logit per sample, shape ``(batch, 1)``.  Everything downstream
-of that logit -- probabilities, thresholded labels, parameter counting -- is
-the same for all of them and lives here once, so a fix applies to every model
+:class:`ClassifierBase` holds what does not depend on the head: the recorded
+constructor arguments (``get_config``, which checkpoints rely on), parameter
+counting, and the eval-mode, gradient-free forward pass every ``predict``
+starts from.  :class:`BinaryClassifierBase` adds the single-logit head's
+sigmoid ``predict_proba`` and thresholded ``predict``;
+:class:`~hqnn_forge.models.MulticlassHybridClassifier` adds its softmax and
+one-vs-rest ones.  Each piece lives here once, so a fix applies to every model
 rather than to whichever copy happened to be found (cf. #59, which had to be
 fixed twice).
 
@@ -26,11 +29,18 @@ from hqnn_forge.utils.modes import eval_mode
 
 
 def custom_encoder(
-    module: nn.Module, n_input_features: int, n_qubits: int, activation: str
+    module: nn.Module,
+    n_input_features: int,
+    n_qubits: int,
+    activation: str,
+    width: int | None = None,
 ) -> nn.Sequential:
     """
     ``module`` followed by the model's ``activation``, after checking that it
-    maps ``(batch, n_input_features)`` to ``(batch, n_qubits)``.
+    maps ``(batch, n_input_features)`` to ``(batch, width)``.
+
+    ``width`` is what enters the circuit: ``n_qubits`` (the default) for the
+    angle, IQP and re-uploading encodings, ``2**n_qubits`` for amplitude.
 
     The width is checked with one forward pass on zeros, in eval mode and
     without gradients, so it neither trains nor updates running statistics.
@@ -62,10 +72,12 @@ def custom_encoder(
             f"(batch, n_input_features={n_input_features}): {type(exc).__name__}: {exc}"
         ) from exc
     shape = tuple(out.shape) if isinstance(out, torch.Tensor) else None
-    if shape != (2, n_qubits):
+    expected = n_qubits if width is None else width
+    if shape != (2, expected):
+        what = f"n_qubits={n_qubits}" if expected == n_qubits else f"2**n_qubits={expected}"
         raise ValueError(
             f"classical_encoder must map (batch, n_input_features={n_input_features}) to "
-            f"(batch, n_qubits={n_qubits}); on a batch of 2 it returned "
+            f"(batch, {what}); on a batch of 2 it returned "
             f"{shape if shape is not None else type(out).__name__}."
         )
     last = list(module.modules())[-1]
@@ -81,22 +93,12 @@ def custom_encoder(
     return nn.Sequential(module, nn.Tanh() if activation == "tanh" else nn.Sigmoid())
 
 
-class BinaryClassifierBase(nn.Module):
+class ClassifierBase(nn.Module):
     """
-    Base class for hybrid binary classifiers.
-
-    Contract for subclasses
-    -----------------------
-    ``forward(x)`` takes ``(batch, n_input_features)`` and returns raw logits of
-    shape ``(batch, 1)``.  ``predict_proba`` and ``predict`` are derived from it
-    and must not be overridden to keep the two models interchangeable.
+    Head-agnostic base class for the classifiers.
 
     Methods
     -------
-    predict_proba(x)
-        Sigmoid of the logits, shape ``(batch,)``, computed in eval mode.
-    predict(x, threshold=0.5)
-        ``predict_proba(x) >= threshold`` as ``torch.long``.
     count_parameters(trainable_only=True)
         Total number of (trainable) parameters, quantum and classical.
     get_config()
@@ -108,57 +110,21 @@ class BinaryClassifierBase(nn.Module):
     _config: dict[str, Any] | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement forward(x) -> logits of shape (batch, 1)."
-        )
+        raise NotImplementedError(f"{type(self).__name__} must implement forward(x) -> logits.")
 
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+    def _eval_logits(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Compute positive-class probabilities (inference mode, no gradients).
+        ``forward(x)`` in eval mode and without gradients.
 
-        Runs in eval mode whatever mode the model is in, so dropout is off and
-        repeated calls on the same input agree.  Every submodule's ``training``
-        flag is restored afterwards, so calling this mid-training leaves the
-        model exactly as it was.
-
-        Parameters
-        ----------
-        x:
-            Input tensor, shape ``(batch_size, n_input_features)``.
-
-        Returns
-        -------
-        torch.Tensor
-            Probability of class 1, shape ``(batch_size,)``, values ∈ [0, 1].
+        ``no_grad`` alone leaves ``nn.Dropout`` (and training-time circuit
+        noise) active: they check ``self.training``, not grad mode.  Every
+        submodule's ``training`` flag is restored afterwards, so calling this
+        mid-training leaves the model exactly as it was.
         """
-        # no_grad alone leaves nn.Dropout active: it checks self.training, not
-        # grad mode.
         with eval_mode(self):
-            logits = self.forward(x)
-        return torch.sigmoid(logits).squeeze(-1)
-
-    # ------------------------------------------------------------------
-    @torch.no_grad()
-    def predict(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
-        """
-        Predict binary labels.  Runs in eval mode, like ``predict_proba``.
-
-        Parameters
-        ----------
-        x:
-            Input tensor, shape ``(batch_size, n_input_features)``.
-        threshold:
-            Decision threshold.  Default: 0.5.
-            For imbalanced datasets consider tuning via ROC/PR curves.
-
-        Returns
-        -------
-        torch.Tensor
-            Binary label tensor of shape ``(batch_size,)``, dtype ``torch.long``.
-        """
-        return (self.predict_proba(x) >= threshold).long()
+            return self.forward(x)
 
     # ------------------------------------------------------------------
     def count_parameters(self, trainable_only: bool = True) -> int:
@@ -180,6 +146,8 @@ class BinaryClassifierBase(nn.Module):
         initial weights are fresh draws only if ``init_seed`` is ``None``: a
         model built with ``init_seed`` rebuilds the *same* initial weights, so
         for restarts or ensemble members pass ``init_seed=None`` or a new seed.
+        The same holds for a sampling model's device ``seed``, which would
+        replay the same shot noise: pass ``seed=None`` or a new one as well.
         Used by ``hqnn_forge.utils.checkpoint``.
 
         A module argument (a custom ``classical_encoder``) is deep-copied, so
@@ -196,3 +164,88 @@ class BinaryClassifierBase(nn.Module):
             name: copy.deepcopy(value) if isinstance(value, nn.Module) else value
             for name, value in self._config.items()
         }
+
+
+class BinaryClassifierBase(ClassifierBase):
+    """
+    Base class for hybrid binary classifiers.
+
+    Contract for subclasses
+    -----------------------
+    ``forward(x)`` takes ``(batch, n_input_features)`` and returns raw logits of
+    shape ``(batch, 1)``.  ``predict_proba`` and ``predict`` are derived from it
+    and must not be overridden to keep the two models interchangeable.
+
+    Methods
+    -------
+    predict_proba(x)
+        Sigmoid of the logits, shape ``(batch,)``, computed in eval mode.
+    predict(x, threshold=0.5)
+        ``predict_proba(x) >= threshold`` as ``torch.long``.
+    count_parameters(), get_config()
+        From :class:`ClassifierBase`.
+
+    Attributes
+    ----------
+    head : nn.Linear
+        The output layer producing the single logit.  Every subclass assigns it
+        in ``__init__``, so code that only reads it can be typed against this
+        class.  ``classical_encoder`` and ``quantum_layer`` are deliberately not
+        declared here: the hybrid models have them, but ``ClassicalBaseline``
+        does not, so a declaration on the base would let mypy accept an access
+        that raises ``AttributeError`` at runtime.
+    """
+
+    # Declaration only: nn.Module registers the submodule when a subclass
+    # assigns it, so this changes neither state_dict keys nor checkpoints.
+    head: nn.Linear
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement forward(x) -> logits of shape (batch, 1)."
+        )
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute positive-class probabilities (inference mode, no gradients).
+
+        Runs in eval mode whatever mode the model is in, so dropout is off and
+        repeated calls on the same input agree (except under finite ``shots``,
+        whose readouts are sampled afresh on every call).  Every submodule's ``training``
+        flag is restored afterwards, so calling this mid-training leaves the
+        model exactly as it was.
+
+        Parameters
+        ----------
+        x:
+            Input tensor, shape ``(batch_size, n_input_features)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Probability of class 1, shape ``(batch_size,)``, values ∈ [0, 1].
+        """
+        return torch.sigmoid(self._eval_logits(x)).squeeze(-1)
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+        """
+        Predict binary labels.  Runs in eval mode, like ``predict_proba``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor, shape ``(batch_size, n_input_features)``.
+        threshold:
+            Decision threshold.  Default: 0.5.
+            For imbalanced datasets consider tuning via ROC/PR curves.
+
+        Returns
+        -------
+        torch.Tensor
+            Binary label tensor of shape ``(batch_size,)``, dtype ``torch.long``.
+        """
+        return (self.predict_proba(x) >= threshold).long()

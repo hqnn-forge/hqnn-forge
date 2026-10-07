@@ -20,8 +20,9 @@ Design Rationale
   single forward + backward pass and scales as O(p) in the number of parameters p,
   making it strictly superior to the parameter-shift rule for state-vector sims.
   The GPU-accelerated ``lightning.gpu`` and ``lightning.kokkos`` devices support
-  the same method; ``_resolve_device`` falls back through ``lightning.qubit`` to
-  ``default.qubit`` when a backend is not installed or has no usable hardware.
+  the same method; :func:`~hqnn_forge.encoding._common.resolve_device` falls back
+  through ``lightning.qubit`` to ``default.qubit`` when a backend is not
+  installed or has no usable hardware.
 
 * **Initialisation** — weights are *not* initialised here; callers should use
   `hqnn_forge.initializers.restricted_normal_init_` on the returned layer.  Note
@@ -47,284 +48,72 @@ References
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Callable
-from typing import Literal, assert_never, get_args
 
 import pennylane as qml
 import torch
 import torch.nn as nn
-from pennylane.exceptions import AllocationError, DeviceError
 
-from hqnn_forge.noise import (
-    Position,
-    run_with_training_noise,
-    training_noise_qnode,
-    validate_noise,
+from hqnn_forge.encoding._common import (
+    DEVICE_FAILURES,
+    FALLBACK_CHAIN,
+    KNOWN_DEVICES,
+    DeviceName,
+    DiffMethod,
+    Entangler,
+    Readout,
+    RotationAxis,
+    apply_variational_layers,
+    backend_repr,
+    check_inputs,
+    expand_batch_dimension,
+    is_out_of_memory,
+    measure_z,
+    readout_wires,
+    reset_device_fallback,
+    resolve_backend,
+    resolve_device,
+    shots_repr,
+    validate_circuit_options,
+    validate_device_shots,
+    validate_seed,
+    validate_shots,
+    variational_weight_shape,
 )
+from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-RotationAxis = Literal["X", "Y", "Z"]
-DiffMethod = Literal["adjoint", "parameter-shift", "backprop", "finite-diff"]
-DeviceName = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "default.qubit"]
-Entangler = Literal["ring", "strongly_entangling", "brickwork"]
-Readout = Literal["all", "first"]
+# QuantumEncodingLayer and build_encoding_qnode are defined here; the rest are
+# re-exported from hqnn_forge.encoding._common, where they live since #306.
+# KNOWN_DEVICES was always there; it is re-exported only so the API reference
+# can render it at a public path (docs/api/encoding.md).
+__all__ = [
+    "FALLBACK_CHAIN",
+    "KNOWN_DEVICES",
+    "AngleEmbeddingQNode",
+    "DeviceName",
+    "DiffMethod",
+    "Entangler",
+    "QuantumEncodingLayer",
+    "Readout",
+    "RotationAxis",
+    "apply_variational_layers",
+    "build_encoding_qnode",
+    "check_inputs",
+    "measure_z",
+    "readout_wires",
+    "reset_device_fallback",
+    "validate_circuit_options",
+    "variational_weight_shape",
+]
 
-#: Devices tried, in order, after the requested one fails.  Each is a strict
-#: subset of the previous one's requirements: ``lightning.qubit`` needs only
-#: the ``pennylane-lightning`` wheel, ``default.qubit`` ships with PennyLane.
-FALLBACK_CHAIN: tuple[str, ...] = ("lightning.qubit", "default.qubit")
-
-#: What creating a device raises when its plugin or hardware is missing:
-#: ``DeviceError`` for a device name no installed plugin registers,
-#: ``ImportError`` / ``OSError`` when a plugin's compiled extension or a CUDA
-#: library cannot be loaded, ``RuntimeError`` when the plugin loads but finds
-#: no usable GPU.  A ``RuntimeError`` about memory is not one of these: see
-#: :func:`_is_out_of_memory`.
-_DEVICE_FAILURES: tuple[type[BaseException], ...] = (
-    DeviceError,
-    ImportError,
-    OSError,
-    RuntimeError,
-)
-
-
-# ---------------------------------------------------------------------------
-# Variational block and readout, shared by every encoding circuit
-# ---------------------------------------------------------------------------
-
-
-def apply_variational_layers(
-    weights: torch.Tensor,
-    n_qubits: int,
-    n_layers: int,
-    entangler: Entangler = "ring",
-    layer_offset: int = 0,
-) -> None:
-    """
-    Apply the ``n_layers`` variational blocks to the current circuit.
-
-    ``entangler`` selects the block:
-
-    * ``"ring"`` (the library's default): CNOT ring ``CNOT(i → i+1 mod n)``,
-      then ``Rot(φ, θ, ω)`` on every qubit.
-    * ``"strongly_entangling"``: ``qml.StronglyEntanglingLayers``, i.e.
-      ``Rot`` on every qubit **then** a CNOT ring whose range grows with the
-      layer index, ``r = ℓ mod (n-1) + 1``.  This is the block the published
-      SHNN uses (Schuld et al. 2020, PennyLane template).
-    * ``"brickwork"``: nearest-neighbour CNOTs on the even pairs
-      ``(0,1), (2,3), …``, then on the odd pairs ``(1,2), (3,4), …``, with
-      no wrap-around, then ``Rot`` on every qubit.  Unlike the two cascades
-      above, which carry a readout across the whole register at shallow
-      depth (⟨Z_0⟩ ↦ Z_1⋯Z_{n-1} through one ring), each layer widens the
-      backward light cone of a single-qubit readout by at most two qubits
-      on each side, so the ⟨Z_i⟩ readouts stay local costs in the sense of
-      Cerezo et al. (2021) while ``n_layers`` is small against ``n_qubits``;
-      see :mod:`hqnn_forge.initializers.restricted_variance` for the
-      measured gradient variance.
-
-    All three take ``weights`` of shape ``(n_layers, n_qubits, 3)`` and use
-    ``n_layers · n_qubits`` ``Rot`` gates.  The ring and
-    ``"strongly_entangling"`` use ``n_qubits`` CNOTs per layer and differ in
-    gate order and, from the second layer on, in which qubits the CNOTs
-    connect; ``"brickwork"`` uses ``n_qubits - 1``.
-
-    ``layer_offset`` is the index of the first block within the whole ansatz,
-    for circuits that interleave other gates between blocks and so apply them
-    a few at a time: the ``"strongly_entangling"`` range of block ``ℓ`` is
-    ``(layer_offset + ℓ) mod (n-1) + 1``, so applying the blocks one by one
-    with offsets ``0 … L-1`` gives the same ranges as applying all ``L`` at
-    once.  The ``"ring"`` and ``"brickwork"`` blocks do not depend on the
-    layer index.
-    """
-    if entangler == "strongly_entangling":
-        # A single wire has no CNOT partner: leave the ranges to the template,
-        # which uses 0 there instead of dividing by n - 1 = 0.
-        ranges = (
-            [(layer_offset + layer) % (n_qubits - 1) + 1 for layer in range(n_layers)]
-            if n_qubits > 1
-            else None
-        )
-        qml.StronglyEntanglingLayers(weights, wires=range(n_qubits), ranges=ranges)
-        return
-    _check_entangler(entangler)
-    for layer in range(n_layers):
-        if entangler == "ring":
-            # CNOT entangling ring (cyclic: last qubit → first qubit)
-            for qubit in range(n_qubits):
-                qml.CNOT(wires=[qubit, (qubit + 1) % n_qubits])
-        elif entangler == "brickwork":
-            # Brickwork: even nearest-neighbour pairs, then odd ones
-            for start in (0, 1):
-                for qubit in range(start, n_qubits - 1, 2):
-                    qml.CNOT(wires=[qubit, qubit + 1])
-        else:
-            assert_never(entangler)
-        # Per-qubit SU(2) rotation block
-        for qubit in range(n_qubits):
-            qml.Rot(
-                weights[layer, qubit, 0],  # φ
-                weights[layer, qubit, 1],  # θ
-                weights[layer, qubit, 2],  # ω
-                wires=qubit,
-            )
-
-
-def validate_circuit_options(
-    n_qubits: int,
-    entangler: Entangler,
-    readout: Readout,
-    rotation: RotationAxis | None = None,
-) -> None:
-    """
-    Raise ``ValueError`` for an ``entangler``, ``readout`` or (if given)
-    ``rotation`` outside the allowed values.
-
-    The encoding builders call this eagerly: ``qml.AngleEmbedding`` only
-    rejects the axis when the circuit first runs, which is a forward pass away
-    from the constructor that was given it -- and past get_config and a
-    checkpoint.
-    """
-    readout_wires(n_qubits, readout)
-    _check_entangler(entangler)
-    if rotation is not None and rotation not in ("X", "Y", "Z"):
-        raise ValueError(f"rotation must be 'X', 'Y' or 'Z'; got {rotation!r}.")
-
-
-def _check_entangler(entangler: str) -> None:
-    if entangler not in get_args(Entangler):
-        raise ValueError(
-            f"entangler must be one of {', '.join(map(repr, get_args(Entangler)))}; "
-            f"got {entangler!r}."
-        )
-
-
-def check_inputs(x: torch.Tensor, expected: int, name: str = "n_qubits", hint: str = "") -> None:
-    """
-    Raise ``ValueError`` unless ``x`` has ``expected`` features and is finite.
-
-    The shared check of every encoding layer's ``prepare_inputs``.  A NaN or
-    ±inf angle is simulated without error and gives NaN outputs, so it is
-    refused here, where ``forward`` and :mod:`hqnn_forge.kernels` both see it.
-    ``hint`` is appended to the width message.
-    """
-    if x.shape[-1] != expected:
-        raise ValueError(
-            f"Input feature dimension {x.shape[-1]} does not match {name}={expected}.{hint}"
-        )
-    if not bool(torch.isfinite(x).all()):
-        raise ValueError("Encoding layer inputs contain NaN or ±inf.")
-
-
-def readout_wires(n_qubits: int, readout: Readout = "all") -> list[int]:
-    """Wires measured in ⟨Z⟩: every qubit (``"all"``) or qubit 0 only (``"first"``)."""
-    if readout == "all":
-        return list(range(n_qubits))
-    if readout == "first":
-        return [0]
-    raise ValueError(f"readout must be 'all' or 'first'; got {readout!r}.")
-
-
-def measure_z(n_qubits: int, readout: Readout = "all") -> list[qml.measurements.ExpectationMP]:
-    """``[⟨Z_i⟩ for i in readout_wires(...)]``: the circuit's return value."""
-    return [qml.expval(qml.PauliZ(i)) for i in readout_wires(n_qubits, readout)]
-
-
-# ---------------------------------------------------------------------------
-# Device factory — graceful fallback down to default.qubit
-# ---------------------------------------------------------------------------
-
-
-def _is_out_of_memory(exc: BaseException) -> bool:
-    """
-    Whether a device-creation failure is the state vector not fitting.
-
-    Every backend in the chain allocates the same ``2**n_qubits`` amplitudes,
-    so falling back cannot help and would only move the allocation from GPU
-    memory to host memory, where it can get the process killed instead of
-    raising.  PennyLane raises :class:`AllocationError`; the lightning plugins
-    raise a bare ``RuntimeError`` naming memory.
-    """
-    return isinstance(exc, AllocationError) or (
-        isinstance(exc, RuntimeError) and "memory" in str(exc).lower()
-    )
-
-
-def _resolve_device(device_name: DeviceName, n_qubits: int) -> qml.devices.Device:
-    """
-    Create *device_name*, falling back along :data:`FALLBACK_CHAIN` when a
-    backend is not installed or has no usable hardware, with one
-    ``RuntimeWarning`` per failed step.
-
-    The chain is ``requested → lightning.qubit → default.qubit``; entries at
-    or before the requested device are skipped, so ``lightning.qubit`` falls
-    straight to ``default.qubit`` and ``default.qubit`` has no fallback.
-
-    A name outside :data:`DeviceName` is refused before anything is tried: a
-    typo such as ``"default.qbit"`` would otherwise fail like a missing plugin
-    and quietly run on another simulator.
-
-    Parameters
-    ----------
-    device_name:
-        Preferred PennyLane device string.  ``"lightning.gpu"`` (cuQuantum,
-        NVIDIA) and ``"lightning.kokkos"`` (Kokkos: OpenMP on the PyPI wheel,
-        CUDA/HIP when built from source) are the accelerated backends; see
-        the README for their prerequisites.
-    n_qubits:
-        Number of qubits to allocate.
-
-    Returns
-    -------
-    qml.devices.Device
-        An initialised PennyLane device ready for QNode attachment.
-
-    Raises
-    ------
-    ValueError
-        If *device_name* is not one of :data:`DeviceName`.
-    The backend's own exception if the state vector does not fit in memory
-    (see :func:`_is_out_of_memory`), or if every step of the chain fails,
-    which can only happen if PennyLane itself is broken (``default.qubit``
-    has no dependencies).
-    """
-    if device_name not in get_args(DeviceName):
-        raise ValueError(
-            f"device_name must be one of {', '.join(map(repr, get_args(DeviceName)))}; "
-            f"got {device_name!r}."
-        )
-    start = FALLBACK_CHAIN.index(device_name) + 1 if device_name in FALLBACK_CHAIN else 0
-    candidates = [device_name, *FALLBACK_CHAIN[start:]]
-    for attempt, name in enumerate(candidates):
-        try:
-            dev = qml.device(name, wires=n_qubits)
-        except _DEVICE_FAILURES as exc:
-            if attempt == len(candidates) - 1 or _is_out_of_memory(exc):
-                raise
-            fallback = candidates[attempt + 1]
-            hint = (
-                "  Install pennylane-lightning for adjoint differentiation support and "
-                "significantly faster simulation."
-                if fallback == "default.qubit"
-                else ""
-            )
-            warnings.warn(
-                f"Could not initialise '{name}' ({type(exc).__name__}: {exc}).  "
-                f"Falling back to '{fallback}'.{hint}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-            continue
-        if attempt:
-            logger.info("Quantum device fell back from %s to %s", device_name, name)
-        logger.debug("Quantum device initialised: %s (%d qubits)", name, n_qubits)
-        return dev
-    raise AssertionError("unreachable: the fallback chain always ends in a raise or a return")
-
+# Re-exported: these lived here until #306.  The underscored names are the old
+# spellings, kept for one release for code that imported them.
+_resolve_device = resolve_device
+_expand_batch_dimension = expand_batch_dimension
+_is_out_of_memory = is_out_of_memory
+_DEVICE_FAILURES = DEVICE_FAILURES
 
 # ---------------------------------------------------------------------------
 # Raw QNode function
@@ -349,8 +138,10 @@ def _make_angle_embedding_circuit(
     where
 
     * ``inputs``  — shape ``(n_qubits,)`` — the pre-processed feature vector.
-    * ``weights`` — shape ``(n_layers, n_qubits, 3)`` — rotation angles per
-                    layer, qubit, and Euler angle (φ, θ, ω) for ``qml.Rot``.
+    * ``weights`` — shape :func:`variational_weight_shape`: ``(n_layers,
+                    n_qubits, 3)``, the ``qml.Rot`` angles (φ, θ, ω) per layer
+                    and qubit, or ``(n_layers, n_qubits)``, the ``RY`` angles,
+                    for ``entangler="hardware_efficient"``.
 
     Called inside a QNode it records one ``qml.expval(PauliZ)`` measurement per
     readout wire; the QNode turns them into the expectation values.
@@ -393,7 +184,8 @@ def _make_angle_embedding_circuit(
        wire 0 before its ``Rot`` is reached, so ⟨Z_0⟩ ignores x_0 under either
        rotation.  For both cascades, from two layers on every readout sees
        every feature under RX or RY.  (Under ``rotation="Z"`` no readout sees
-       any feature at any depth: RZ on |0⟩ is only a phase, #212.)
+       any feature at any depth: RZ on |0⟩ is only a phase, which is why
+       :func:`build_encoding_qnode` refuses it, #212.)
 
        Under ``readout="all"`` the blind spot costs nothing, since readouts
        1 … n-1 together cover x_0.  Under ``readout="first"`` use
@@ -402,7 +194,13 @@ def _make_angle_embedding_circuit(
        keeps its own wire and each ⟨Z_i⟩ sees x_i after one layer, but the
        same narrow light cone leaves ⟨Z_0⟩ seeing only x_0 (RX) or x_0, x_1
        (RY), and at 5 qubits still missing x_2 … x_4 (RX) or x_4 (RY) after
-       two layers.
+       two layers.  Nor is ``entangler="hardware_efficient"``: its ``CZ``
+       ladder is diagonal, so ⟨Z_i⟩ reaches a neighbour only through the
+       X_i its ``RY`` mixes in, which the ``CZ`` gates dress with Z_{i±1}.
+       After L layers ⟨Z_i⟩ sees x_{i-L} … x_{i+L}, except that under RX
+       (⟨X⟩ = 0) a single layer leaves it seeing x_i alone; under
+       ``readout="first"``, ⟨Z_0⟩ thus sees L + 1 features (one at L = 1
+       under RX).
 
     3. **Per-qubit SU(2) rotation block**:
        ``qml.Rot(φ, θ, ω, wires=i)`` applies Rz(ω)·Ry(θ)·Rz(φ), covering the
@@ -424,7 +222,11 @@ def _make_angle_embedding_circuit(
        qubits and 2 layers (the last-layer ``Rot`` off wire 0, wire 0's ω,
        and layer 0's ``Rot`` on wires 2 and 3), 17 by autograd.  The weight
        tensor keeps its ``(n_layers, n_qubits, 3)`` shape for every
-       entangler.
+       ``Rot`` entangler; ``"hardware_efficient"`` has one ``RY`` angle per
+       qubit, shape ``(n_layers, n_qubits)``.  None of its angles is inert
+       under ``"all"``; under ``"first"`` the k-th layer counted back from
+       the readout (k = 0 the last) leaves max(0, n − 1 − k) dead, 6 of 12
+       at 4 qubits and 3 layers, and ``n_inert_params`` matches autograd.
 
     4. **Measurement**:
        Returns ``[qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]``.
@@ -438,13 +240,15 @@ def _make_angle_embedding_circuit(
     n_layers:
         Number of variational layers L.  Depth = O(n_qubits * n_layers).
     rotation:
-        Pauli axis used by AngleEmbedding: ``"X"`` | ``"Y"`` | ``"Z"``.
+        Pauli axis used by AngleEmbedding: ``"X"`` | ``"Y"``.
+        :func:`build_encoding_qnode` refuses ``"Z"``, a phase on ``|0⟩``.
     entangler:
         ``"ring"`` (steps 2 and 3 above), ``"strongly_entangling"``
         (``qml.StronglyEntanglingLayers``: Rot first, then a CNOT ring of
-        range ``ℓ mod (n-1) + 1``) or ``"brickwork"`` (nearest-neighbour
-        CNOT pairs, no wrap-around, then Rot).  See
-        :func:`apply_variational_layers`.
+        range ``ℓ mod (n-1) + 1``), ``"brickwork"`` (nearest-neighbour
+        CNOT pairs, no wrap-around, then Rot) or ``"hardware_efficient"`` (a
+        CZ ladder, then ``RY``; ``weights`` of shape ``(n_layers, n_qubits)``).
+        See :func:`apply_variational_layers`.
     readout:
         ``"all"`` (step 4 above) or ``"first"`` (``[⟨Z_0⟩]`` only, as in the
         published SHNN).
@@ -477,42 +281,6 @@ def _make_angle_embedding_circuit(
 
 
 # ---------------------------------------------------------------------------
-# Batching
-# ---------------------------------------------------------------------------
-
-
-def _expand_batch_dimension(qnode: qml.QNode, diff_method: str) -> qml.QNode:
-    """
-    Make *qnode* accept a batched ``inputs`` tensor of shape ``(batch, n_qubits)``
-    under every supported differentiation method.
-
-    A 2-D ``inputs`` reaches the circuit as a *broadcasted* tape: one tape whose
-    embedding gates carry a batch of angles.  How that is executed depends on
-    ``diff_method``:
-
-    * ``"backprop"`` differentiates through the simulator, which handles the
-      batch natively as one vectorised state-vector evolution.  This is the fast
-      path and the tape is left broadcasted.
-    * Every other method (``"adjoint"``, ``"parameter-shift"``,
-      ``"finite-diff"``) is a gradient *transform* on the tape, and the
-      parameter-shift and finite-difference transforms refuse a broadcasted
-      tape when the gradient with respect to the broadcasted parameters is
-      requested -- which is exactly the case when a classical encoder upstream
-      needs input gradients.  ``lightning.qubit``'s adjoint path also
-      mis-shapes results for some broadcasted two-qubit rotations.  For these
-      the tape is split into one tape per sample *before* the gradient
-      transform sees it, so each tape is unbroadcasted and the whole batch is
-      still handed to the device as a single list of tapes.
-
-    Either way the QNode's signature and results are unchanged: it returns
-    ``n_qubits`` expectation values, each of shape ``(batch,)``.
-    """
-    if diff_method == "backprop":
-        return qnode
-    return qml.transforms.broadcast_expand(qnode)
-
-
-# ---------------------------------------------------------------------------
 # Public QNode factory
 # ---------------------------------------------------------------------------
 
@@ -521,15 +289,17 @@ def build_encoding_qnode(
     n_qubits: int = 8,
     n_layers: int = 2,
     rotation: RotationAxis = "X",
-    device_name: DeviceName = "lightning.qubit",
-    diff_method: DiffMethod = "adjoint",
+    device_name: DeviceName = "auto",
+    diff_method: DiffMethod = "auto",
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    shots: int | None = None,
+    seed: int | None = None,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the angle-embedding feature map.
 
-    The QNode is bound to the device :func:`_resolve_device` returns for
+    The QNode is bound to the device :func:`resolve_device` returns for
     *device_name* and configured for the specified differentiation method.
 
     Parameters
@@ -541,23 +311,35 @@ def build_encoding_qnode(
         Number of entangling + rotation layers in the VQC ansatz.
         More layers increase expressibility but deepen the circuit.  Default: 2.
     rotation:
-        Pauli rotation axis for AngleEmbedding: ``"X"`` (default), ``"Y"``, or ``"Z"``.
+        Pauli rotation axis for AngleEmbedding: ``"X"`` (default) or ``"Y"``.
+        ``"Z"`` raises: a single ``RZ`` on ``|0⟩`` is only a phase, so the
+        layer would not depend on its inputs.
     device_name:
-        PennyLane device string.  ``"lightning.qubit"`` is strongly preferred for
-        adjoint differentiation.  An unavailable backend falls back along
-        ``lightning.qubit → default.qubit`` with a warning per step.
+        PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
+        12 qubits, ``lightning.qubit`` above (see
+        :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
+        ``lightning.qubit → default.qubit`` with a warning per step when
+        unavailable; any other name (a plugin or hardware) is constructed as
+        given, and PennyLane's error surfaces if it cannot be.  Hardware
+        needs ``shots`` and ``diff_method="parameter-shift"``.
     diff_method:
         Differentiation strategy:
 
-        - ``"adjoint"``         — exact, O(p) memory; requires lightning device.
+        - ``"auto"``            — the default; chosen by device, see
+          :func:`~hqnn_forge.encoding.resolve_backend`.
+        - ``"adjoint"``         — exact, O(p) memory; fastest on lightning.
         - ``"parameter-shift"`` — exact, hardware-compatible, O(p) circuit evals.
         - ``"backprop"``        — auto-diff through simulator; requires default.qubit.
         - ``"finite-diff"``     — approximate; avoid for training.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"`` or ``"brickwork"``;
-        see :func:`apply_variational_layers`.
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` or
+        ``"hardware_efficient"``; see :func:`apply_variational_layers`.
     readout:
         ``"all"`` (default): ⟨Z_i⟩ on every qubit.  ``"first"``: ⟨Z_0⟩ only.
+    shots, seed:
+        Finite-shot sampling and the device seed, as for
+        :class:`QuantumEncodingLayer`.
 
     Returns
     -------
@@ -572,7 +354,8 @@ def build_encoding_qnode(
     ValueError
         If ``n_qubits < 2`` (minimum for a meaningful entangling ring), or if
         ``rotation``, ``entangler`` or ``readout`` is not one of the values
-        above -- all checked here, before the circuit first runs.
+        above, or if ``rotation="Z"`` -- all checked here, before the circuit
+        first runs.
 
     Examples
     --------
@@ -583,8 +366,22 @@ def build_encoding_qnode(
     """
     if n_qubits < 2:
         raise ValueError(f"n_qubits must be ≥ 2 for the CNOT entangling ring; got {n_qubits}.")
+    if rotation == "Z":
+        # The inputs are embedded once, on |0…0⟩, where RZ(x) only multiplies
+        # each wire by a phase: the state entering the ansatz is the same for
+        # every x, so the layer would be a constant.  DataReuploadingLayer
+        # can use "Z" from its second upload on.
+        raise ValueError(
+            'rotation="Z" would make the layer ignore its inputs: a single RZ embedding '
+            "acts on |0…0⟩, where it is only a global phase, so every input gives the same "
+            'state and the input gradients are zero.  Use "X" or "Y", or '
+            'DataReuploadingLayer(rotation="Z", n_layers >= 2).'
+        )
 
-    device = _resolve_device(device_name, n_qubits)
+    device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
+    validate_shots(shots, diff_method)
+    device = resolve_device(device_name, n_qubits, seed=seed)
+    validate_device_shots(device, shots)
     circuit_fn = _make_angle_embedding_circuit(n_qubits, n_layers, rotation, entangler, readout)
 
     qnode = qml.QNode(
@@ -592,8 +389,9 @@ def build_encoding_qnode(
         device=device,
         diff_method=diff_method,
         interface="torch",  # enables PyTorch autograd interop
+        shots=shots,
     )
-    qnode = _expand_batch_dimension(qnode, diff_method)
+    qnode = expand_batch_dimension(qnode, diff_method)
 
     logger.info(
         "QNode built | device=%s | qubits=%d | layers=%d | diff=%s | rotation=%s | "
@@ -614,7 +412,7 @@ def build_encoding_qnode(
 # ---------------------------------------------------------------------------
 
 
-class QuantumEncodingLayer(nn.Module):
+class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
     """
     A PyTorch ``nn.Module`` that wraps the angle-embedding QNode as a fully
     differentiable layer via ``pennylane.qnn.TorchLayer``.
@@ -634,6 +432,9 @@ class QuantumEncodingLayer(nn.Module):
     | ``weights``| ``(n_layers, n_qubits, 3)``       |
     +-----------+------------------------------------+
 
+    ``(n_layers, n_qubits)`` for ``entangler="hardware_efficient"``; see
+    :func:`variational_weight_shape`.
+
     **Important**: Call ``hqnn_forge.initializers.restricted_normal_init_``
     on ``layer.qlayer.weights`` immediately after construction to obtain
     small-angle initial values (see :mod:`hqnn_forge.initializers` for what
@@ -649,44 +450,94 @@ class QuantumEncodingLayer(nn.Module):
         so ``readout="first"`` wants 2 or more; see step 2 of
         :func:`_make_angle_embedding_circuit`.
     rotation:
-        Pauli axis for AngleEmbedding: ``"X"`` | ``"Y"`` | ``"Z"``.
+        Pauli axis for AngleEmbedding: ``"X"`` | ``"Y"``; ``"Z"`` raises, see
+        :func:`build_encoding_qnode`.
     device_name:
-        PennyLane device, one of :data:`DeviceName`.  An unavailable backend
-        falls back along ``lightning.qubit → default.qubit`` with a warning
-        per step.
+        PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
+        12 qubits, ``lightning.qubit`` above (see
+        :func:`~hqnn_forge.encoding.resolve_backend`).  The simulators in
+        :data:`~hqnn_forge.encoding.angle_embedding.KNOWN_DEVICES` fall back along
+        ``lightning.qubit → default.qubit`` with a warning per step when
+        unavailable; any other name (a plugin or hardware) is constructed as
+        given, and PennyLane's error surfaces if it cannot be.  Hardware
+        needs ``shots`` and ``diff_method="parameter-shift"``.
     diff_method:
-        Gradient method.  Use ``"adjoint"`` with ``lightning.qubit`` for
-        exact, efficient gradients during state-vector simulation.
+        ``"auto"`` (default) picks by device: ``"backprop"`` on
+        ``default.qubit``, ``"adjoint"`` on lightning, ``"parameter-shift"``
+        with ``shots`` or on any other device.  Or one of ``"adjoint"``,
+        ``"parameter-shift"``, ``"backprop"``, ``"finite-diff"``.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"`` or ``"brickwork"``;
-        see :func:`apply_variational_layers`.  Same parameter count for all
-        three.
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` (the
+        same parameter count) or ``"hardware_efficient"`` (a third of it: one
+        ``RY`` angle per qubit per layer); see :func:`apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``, the published SHNN readout.
     noise_level:
-        Depolarizing probability applied to the circuit in **train mode**,
-        in ``[0, 0.75]``; ``0`` (default) is the plain noiseless layer.  With
-        ``noise_level > 0`` the train-mode forward pass runs the circuit on
-        ``default.mixed`` with a ``DepolarizingChannel`` inserted, so
-        gradients are computed through the noisy circuit (noise-aware
-        training); eval mode is always noiseless, like dropout.  Backprop
-        keeps a ``batch × 4^n`` density matrix per operation, so this is
-        practical up to about 6 qubits.  See :mod:`hqnn_forge.noise`.
+        Strength of the ``noise_channel`` applied to the circuit in **train
+        mode**: the depolarizing probability in ``[0, 0.75]``, or the damping
+        or flip probability in ``[0, 1]`` for the other channels (the table in
+        :mod:`hqnn_forge.noise`); ``0`` (default) is the plain noiseless layer.
+        With ``noise_level > 0`` the train-mode forward pass runs the circuit
+        on ``default.mixed`` with that channel inserted, so gradients are
+        computed through the noisy circuit (noise-aware training); eval mode
+        is always noiseless, like dropout.  With the
+        default ``noise_method``, backprop keeps a ``batch × 4^n`` density
+        matrix per operation, so this is practical up to about 6 qubits.  See
+        :mod:`hqnn_forge.noise`.
     noise_position:
         ``"all"`` (after every gate, default) or ``"end"`` (before
         measurement), as in :func:`hqnn_forge.noise.apply_depolarizing_noise`.
+    noise_method:
+        ``"density"`` (default): the exact channel on ``default.mixed``.
+        ``"trajectories"``: Pauli-trajectory sampling on this layer's own
+        device and ``diff_method``, at pure-state memory; the train-mode
+        output is then random, and equal to the ``"density"`` output on
+        average.  See :mod:`hqnn_forge.noise`.
+    noise_trajectories:
+        Draws averaged per sample with ``noise_method="trajectories"``.
+        Default 1; must be 1 for ``"density"``.  Use 8 or more at noise of a
+        few percent per gate: with fewer draws some runs on the breast-cancer
+        proxy had not started to train within 30 epochs (#347, #480; see
+        :mod:`hqnn_forge.noise`).
+    noise_channel:
+        The channel ``noise_level`` is the strength of: ``"depolarizing"``
+        (default), ``"amplitude_damping"`` (T1), ``"phase_damping"`` (T2),
+        ``"bit_flip"`` (also a symmetric readout error at ``"end"``) or
+        ``"phase_flip"``; see :mod:`hqnn_forge.noise`.  With
+        ``noise_method="trajectories"``, amplitude damping needs
+        ``diff_method="backprop"``, ``"parameter-shift"`` or ``"finite-diff"``,
+        ``default.qubit`` or ``lightning.qubit``, and no ``shots``.
+    shots:
+        ``None`` (default): exact expectation values.  An ``int``: every
+        readout is estimated from that many samples, as on hardware.  Needs
+        ``diff_method="parameter-shift"``; with training noise, only
+        ``noise_method="trajectories"``.  The samples come from the device's
+        own generator, which ``torch.manual_seed`` does not reach: pass
+        ``seed`` for samples that repeat run to run.  The ``shots`` attribute
+        reads the QNode the layer runs, so it follows
+        :func:`hqnn_forge.noise.apply_shots`.
+    seed:
+        Seed of the device's generator, which draws the shot samples; a
+        non-negative ``int`` (NumPy integers are converted) or ``None``
+        (default: unseeded).  Inert for exact simulation.  Shown in the repr;
+        see :func:`~hqnn_forge.encoding.angle_embedding.resolve_device`.
 
     Attributes
     ----------
     n_qubits : int
+    n_features : int
+        Width of the input, one feature per qubit: ``n_qubits``.
     n_layers : int
     n_outputs : int
         Width of the output: ``n_qubits`` or 1.
     entangler : str
     readout : str
     noise_level : float
+    noise_channel : str
     noise_position : str
+    noise_method : str
+    noise_trajectories : int
     qlayer : pennylane.qnn.TorchLayer
         The underlying differentiable quantum layer.
 
@@ -710,22 +561,26 @@ class QuantumEncodingLayer(nn.Module):
         n_qubits: int = 8,
         n_layers: int = 2,
         rotation: RotationAxis = "X",
-        device_name: DeviceName = "lightning.qubit",
-        diff_method: DiffMethod = "adjoint",
+        device_name: DeviceName = "auto",
+        diff_method: DiffMethod = "auto",
         entangler: Entangler = "ring",
         readout: Readout = "all",
         noise_level: float = 0.0,
         noise_position: Position = "all",
+        noise_method: NoiseMethod = "density",
+        noise_trajectories: int = 1,
+        shots: int | None = None,
+        noise_channel: Channel = "depolarizing",
+        seed: int | None = None,
     ) -> None:
         super().__init__()
 
         self.n_qubits = n_qubits
+        self.n_features = n_qubits
         self.n_layers = n_layers
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
-        self.noise_level = noise_level
-        self.noise_position = noise_position
 
         # Build the QNode ─────────────────────────────────────────────────
         qnode = build_encoding_qnode(
@@ -736,24 +591,35 @@ class QuantumEncodingLayer(nn.Module):
             diff_method=diff_method,
             entangler=entangler,
             readout=readout,
+            shots=shots,
+            seed=seed,
         )
 
         # Declare the trainable weight tensor shape for TorchLayer ─────────
-        # Shape: (n_layers, n_qubits, 3)
+        # Shape: variational_weight_shape(entangler, ...)
         #   dim-0: layer index ℓ ∈ {0, …, n_layers-1}
         #   dim-1: qubit  index i ∈ {0, …, n_qubits-1}
-        #   dim-2: Euler angles (φ, θ, ω) for qml.Rot
+        #   dim-2: Euler angles (φ, θ, ω) for qml.Rot; absent for
+        #          "hardware_efficient", whose RY takes one angle
         weight_shapes: dict[str, tuple[int, ...]] = {
-            "weights": (n_layers, n_qubits, 3),
+            "weights": variational_weight_shape(entangler, n_qubits, n_layers),
         }
 
         # Wrap QNode as an nn.Module with registered Parameters ───────────
         self.qlayer = qml.qnn.TorchLayer(qnode, weight_shapes)
 
-        # Training-time depolarizing noise (see hqnn_forge.noise) ─────────
-        self._training_noise_qnode = _build_training_noise(
-            qnode, n_qubits, noise_level, noise_position
+        # Training-time noise (see hqnn_forge.noise) ──────────────────────
+        self._init_training_noise(
+            qnode,
+            n_qubits,
+            noise_level,
+            noise_position,
+            noise_method,
+            noise_trajectories,
+            shots=shots,
+            noise_channel=noise_channel,
         )
+        self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -803,11 +669,9 @@ class QuantumEncodingLayer(nn.Module):
         # TorchLayer hands the whole batch to the QNode in one call and reshapes
         # the result to (batch, n_qubits).  Whether the batch is executed as one
         # broadcasted tape or split into one tape per sample is decided in
-        # build_encoding_qnode (see _expand_batch_dimension); the outputs and
+        # build_encoding_qnode (see expand_batch_dimension); the outputs and
         # gradients are the same either way.
-        if self.training and self._training_noise_qnode is not None:
-            return run_with_training_noise(self.qlayer, self._training_noise_qnode, x)
-        return self.qlayer(x)
+        return self._run_circuit(x)
 
     # ------------------------------------------------------------------
     # Utility
@@ -819,43 +683,14 @@ class QuantumEncodingLayer(nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
-        if self.noise_level:
-            options += f", noise_level={self.noise_level}, noise_position={self.noise_position!r}"
+        options += (
+            self._noise_repr() + shots_repr(self.shots, self.seed) + backend_repr(self.qlayer)
+        )
         return (
             f"n_qubits={self.n_qubits}, "
             f"n_layers={self.n_layers}, "
-            f"n_params={self.n_layers * self.n_qubits * 3}{options}"
+            f"n_params={sum(p.numel() for p in self.parameters())}{options}"
         )
-
-
-MAX_TRAINING_NOISE_QUBITS = 6
-"""Above this many qubits, a layer built with ``noise_level > 0`` warns."""
-
-
-def _build_training_noise(
-    qnode: qml.QNode, n_qubits: int, noise_level: float, noise_position: Position
-) -> qml.QNode | None:
-    """
-    The train-mode QNode for ``noise_level > 0``, or ``None`` for the
-    noiseless default.  Shared by every encoding layer; validation happens
-    here so a bad ``noise_level`` fails at construction, and a qubit count
-    past what mixed-state backprop can train in practice warns there too.
-    """
-    validate_noise(
-        noise_level, noise_position, p_name="noise_level", position_name="noise_position"
-    )
-    if noise_level == 0.0:
-        return None
-    if n_qubits > MAX_TRAINING_NOISE_QUBITS:
-        warnings.warn(
-            f"noise_level > 0 trains on default.mixed, which keeps a batch × 4^n density "
-            f"matrix per operation for backprop; at n_qubits={n_qubits} (practical limit "
-            f"about {MAX_TRAINING_NOISE_QUBITS}) a training step may run out of memory.  "
-            f"See hqnn_forge.noise and #229.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-    return training_noise_qnode(qnode, n_qubits, noise_level, noise_position)
 
 
 # ---------------------------------------------------------------------------
