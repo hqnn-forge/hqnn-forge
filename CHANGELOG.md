@@ -253,6 +253,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the validation split and applied in `predict_proba`, stored as `calibrator_`. With
   `threshold="optimal"`, `predict` is unchanged and `threshold_` is mapped through the
   calibrator. A split with no finite fit warns and stays uncalibrated (#359)
+- Multiclass calibration: `multiclass_brier_score`, `top_label_ece`, `classwise_ece` and
+  `MulticlassTemperatureScaler` (one temperature shared by the K logits, raising when the
+  cross-entropy has no finite optimum) (#360)
 - `examples/benchmark_batching.py`: inference and training-step time of the per-sample split,
   native broadcasting, `batch_obs` and `default.qubit`/backprop for every encoder, with a
   correctness check, plus a crossover by qubit count with peak memory; the README now says

@@ -419,6 +419,29 @@ class TestMulticlassBrier:
         one_vs_rest = sum(brier_score_loss(y == k, prob[:, k]) for k in range(prob.shape[1]))
         assert multiclass_brier_score(y, prob) == pytest.approx(one_vs_rest)
 
+    @pytest.mark.may_skip  # scikit-learn below 1.7 on the lowest-floors job
+    def test_matches_scikit_learn_on_multiclass_input(self) -> None:
+        import sklearn
+        from sklearn.metrics import brier_score_loss
+
+        if tuple(int(part) for part in sklearn.__version__.split(".")[:2]) < (1, 7):
+            pytest.skip("brier_score_loss takes (n, K) input from scikit-learn 1.7 on")
+        y, prob = _multiclass()
+        assert multiclass_brier_score(y, prob) == pytest.approx(brier_score_loss(y, prob))
+        # Two classes: scikit-learn halves the score unless told not to.
+        y, prob = _multiclass(k=2)
+        ours = multiclass_brier_score(y, prob)
+        assert ours == pytest.approx(brier_score_loss(y, prob, scale_by_half=False))
+        assert ours == pytest.approx(2 * brier_score_loss(y, prob))
+
+    def test_ignores_the_autograd_graph(self) -> None:
+        y, prob = _multiclass(n=20)
+        logits = torch.from_numpy(np.log(prob)).requires_grad_()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            score = multiclass_brier_score(y, torch.softmax(logits, dim=1))
+        assert score == pytest.approx(multiclass_brier_score(y, prob))
+
     def test_known_values(self) -> None:
         k = 4
         y = np.array([0, 1, 2, 3, 1])
@@ -439,6 +462,15 @@ class TestMulticlassECE:
         prob = np.array([[0.9, 0.05, 0.05], [0.9, 0.05, 0.05], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6]])
         y = np.array([0, 1, 1, 2])
         assert top_label_ece(y, prob) == pytest.approx(0.4)
+
+    def test_top_label_with_quantile_bins(self) -> None:
+        # The same four samples in two bins.  Equal-count bins split 0.6 from
+        # 0.9 and give 0.4 again; uniform bins put all four above 0.5, where
+        # the mean confidence 0.75 equals the frequency 3/4.
+        prob = np.array([[0.9, 0.05, 0.05], [0.9, 0.05, 0.05], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6]])
+        y = np.array([0, 1, 1, 2])
+        assert top_label_ece(y, prob, n_bins=2, strategy="quantile") == pytest.approx(0.4)
+        assert top_label_ece(y, prob, n_bins=2) == pytest.approx(0.0)
 
     def test_top_label_is_zero_when_confidence_is_frequency(self) -> None:
         # Two samples at confidence 0.5 in two classes, one right and one wrong.
@@ -505,6 +537,82 @@ class TestMulticlassTemperature:
     def test_needs_two_classes(self) -> None:
         with pytest.raises(ValueError, match="at least two classes"):
             MulticlassTemperatureScaler.fit(np.zeros((4, 3)), np.array([1, 1, 1, 1]))
+
+    def test_call_is_the_softmax_of_the_scaled_logits(self) -> None:
+        z = np.random.default_rng(4).normal(size=(50, 4))
+        calibrated = MulticlassTemperatureScaler(2.5)(z)
+        expected = np.exp(z / 2.5) / np.exp(z / 2.5).sum(1, keepdims=True)
+        assert calibrated.dtype == torch.float64
+        np.testing.assert_allclose(calibrated.numpy(), expected, rtol=1e-12)
+        np.testing.assert_allclose(calibrated.sum(1).numpy(), 1.0, rtol=1e-12)
+
+    def test_call_rejects_a_single_row_without_its_batch_axis(self) -> None:
+        with pytest.raises(ValueError, match=r"logits must have shape \(n, K\)"):
+            MulticlassTemperatureScaler(2.0)(np.array([1.0, 2.0, 3.0]))
+
+    def test_no_finite_temperature_when_every_true_class_has_the_top_logit(self) -> None:
+        # A tie for the top (the last row) counts as not wrong: the NLL falls as T -> 0.
+        z = np.random.default_rng(5).normal(size=(200, 3))
+        z[-1] = [1.0, 1.0, 0.0]
+        with pytest.raises(ValueError, match="top logit"):
+            MulticlassTemperatureScaler.fit(z, z.argmax(1))
+
+    def test_no_finite_temperature_for_logits_no_better_than_chance(self) -> None:
+        z = np.random.default_rng(5).normal(size=(200, 3))
+        with pytest.raises(ValueError, match="no better than chance"):
+            MulticlassTemperatureScaler.fit(z, (z.argmax(1) + 1) % 3)
+        # Exactly chance: every row constant, so the slope at 1/T = 0 is 0.
+        with pytest.raises(ValueError, match="no better than chance"):
+            MulticlassTemperatureScaler.fit(np.ones((4, 3)), np.array([0, 1, 2, 0]))
+
+    def test_one_wrong_sample_is_enough_for_a_finite_temperature(self) -> None:
+        # Both conditions hold by the smallest margin: the fit is interior, and
+        # the slope of the cross-entropy in T vanishes there.
+        z = torch.from_numpy(np.random.default_rng(5).normal(size=(200, 3)))
+        y = z.argmax(1)
+        y[0] = (y[0] + 1) % 3
+        scaler = MulticlassTemperatureScaler.fit(z, y)
+        assert 0 < scaler.temperature < 1
+        t = torch.tensor(scaler.temperature, dtype=torch.float64, requires_grad=True)
+        F.cross_entropy(z / t, y).backward()
+        assert t.grad is not None and abs(t.grad.item()) < 1e-6
+
+    @pytest.mark.parametrize(
+        ("logits", "y", "match"),
+        [
+            (np.array([0.5, -0.5]), np.array([0, 1]), r"logits must have shape \(n, K\)"),
+            (np.array([[0.5], [-0.5]]), np.array([0, 0]), r"logits must have shape \(n, K\)"),
+            (np.array([[np.inf, 0.0], [0.0, 1.0]]), np.array([0, 1]), "logits must be finite"),
+            (np.array([[np.nan, 0.0], [0.0, 1.0]]), np.array([0, 1]), "logits must be finite"),
+            (np.array([[0.5, -0.5]]), np.array([0, 1]), "y_true and logits differ in length"),
+            (np.empty((0, 3)), np.array([]), "y_true is empty"),
+            (np.array([[0.5, -0.5], [0.0, 1.0]]), np.array([0, 2]), "class labels 0 … 1"),
+            (np.array([[0.5, -0.5], [0.0, 1.0]]), np.array([0.0, 0.5]), "integer class labels"),
+        ],
+    )
+    def test_fit_names_the_logits_in_its_errors(
+        self, logits: np.ndarray, y: np.ndarray, match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            MulticlassTemperatureScaler.fit(logits, y)
+
+
+class TestMulticlassDevices:
+    @pytest.mark.may_skip  # no CUDA device on the CI runners
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+    def test_cuda_inputs(self) -> None:
+        labels, prob = _multiclass(seed=6)
+        y, p = torch.from_numpy(labels), torch.from_numpy(prob)
+        for fn in (multiclass_brier_score, top_label_ece, classwise_ece):
+            assert fn(y.cuda(), p.cuda()) == pytest.approx(fn(y, p))
+        logits = p.log() * 2.5
+        on_cpu = MulticlassTemperatureScaler.fit(logits, y).temperature
+        assert MulticlassTemperatureScaler.fit(logits.cuda(), y.cuda()).temperature == (
+            pytest.approx(on_cpu)
+        )
+        assert MulticlassTemperatureScaler.fit(logits.cuda(), labels).temperature == (
+            pytest.approx(on_cpu)
+        )
 
 
 class TestMulticlassValidation:

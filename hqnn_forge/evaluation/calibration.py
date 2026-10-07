@@ -31,11 +31,13 @@ For ``K`` classes, with ``(n, K)`` probabilities whose rows sum to 1 and
 integer labels ``0 … K−1``:
 
 ``multiclass_brier_score``
-    ``mean_i Σ_k (p_ik − y_ik)²`` with ``y`` one-hot: scikit-learn's
-    ``brier_score_loss`` for multiclass input (scikit-learn 1.7 on).  0 is
-    perfect; it ranges up
-    to 2, and a constant ``1/K`` scores ``1 − 1/K``.  Note that for ``K = 2``
-    it is twice the binary ``brier_score``, which counts one class only.
+    ``mean_i Σ_k (p_ik − y_ik)²`` with ``y`` one-hot.  0 is perfect; it
+    ranges up to 2, and a constant ``1/K`` scores ``1 − 1/K``.  For
+    ``K ≥ 3`` it is scikit-learn's ``brier_score_loss`` on ``(n, K)`` input
+    (scikit-learn 1.7 on).  For ``K = 2`` it is twice the binary
+    ``brier_score``, which counts one class only, and twice scikit-learn's
+    default, which halves the two-class score (``scale_by_half="auto"``;
+    ``scale_by_half=False`` gives this value).
 ``top_label_ece``
     The ECE of the confidence ``max_k p_ik`` against whether the top class
     is right, Guo et al.'s definition: does a 70 % prediction come true
@@ -46,7 +48,7 @@ integer labels ``0 … K−1``:
 
 Post-hoc calibration
 --------------------
-Both are fitted on a validation split by minimising the negative
+All three are fitted on a validation split by minimising the negative
 log-likelihood of the labels, and applied to logits:
 
 ``TemperatureScaler``
@@ -158,21 +160,27 @@ def expected_calibration_error(
     return float((counts / counts.sum() * (frequency - confidence).abs()).sum())
 
 
-def _multiclass_pair(y_true: object, prob: object) -> tuple[torch.Tensor, torch.Tensor]:
-    """Integer labels ``(n,)`` and probabilities ``(n, K)``, validated."""
-    p = torch.as_tensor(prob).to(torch.float64)
-    if p.ndim != 2 or p.shape[1] < 2:
-        raise ValueError(f"prob must have shape (n, K) with K ≥ 2; got {tuple(p.shape)}.")
-    y = torch.as_tensor(y_true).reshape(-1)
-    if y.numel() != p.shape[0]:
-        raise ValueError(f"y_true and prob differ in length: {y.numel()} vs {p.shape[0]}.")
+def _class_labels(y_true: object, name: str, n: int, k: int) -> torch.Tensor:
+    """Integer class labels ``(n,)`` in ``0 … k−1`` on the CPU, for ``n`` rows of ``name``."""
+    y = torch.as_tensor(y_true).detach().reshape(-1).cpu()
+    if y.numel() != n:
+        raise ValueError(f"y_true and {name} differ in length: {y.numel()} vs {n}.")
     if y.numel() == 0:
         raise ValueError("y_true is empty.")
     if y.is_floating_point() and not torch.equal(y, y.round()):
         raise ValueError("y_true must hold integer class labels 0 … K−1.")
     y = y.long()
-    if y.min() < 0 or y.max() >= p.shape[1]:
-        raise ValueError(f"y_true must hold class labels 0 … {p.shape[1] - 1}.")
+    if y.min() < 0 or y.max() >= k:
+        raise ValueError(f"y_true must hold class labels 0 … {k - 1}.")
+    return y
+
+
+def _multiclass_pair(y_true: object, prob: object) -> tuple[torch.Tensor, torch.Tensor]:
+    """Integer labels ``(n,)`` and float64 probabilities ``(n, K)`` on the CPU, validated."""
+    p = torch.as_tensor(prob).detach().cpu().to(torch.float64)
+    if p.ndim != 2 or p.shape[1] < 2:
+        raise ValueError(f"prob must have shape (n, K) with K ≥ 2; got {tuple(p.shape)}.")
+    y = _class_labels(y_true, "prob", p.shape[0], p.shape[1])
     if torch.isnan(p).any() or p.min() < 0 or p.max() > 1:
         raise ValueError("prob must hold probabilities in [0, 1].")
     if not torch.allclose(p.sum(1), torch.ones(p.shape[0], dtype=torch.float64), atol=1e-6):
@@ -220,10 +228,8 @@ def _logit_pair(logits: object, y_true: object) -> tuple[torch.Tensor, torch.Ten
     return z, y
 
 
-def _minimise_nll(
-    params: torch.Tensor, scaled: Callable[[], torch.Tensor], y: torch.Tensor
-) -> None:
-    """Minimise ``BCE(scaled(), y)`` over ``params`` in place, by L-BFGS."""
+def _minimise_nll(params: torch.Tensor, nll: Callable[[], torch.Tensor]) -> None:
+    """Minimise ``nll()`` over ``params`` in place, by L-BFGS."""
     optimiser = torch.optim.LBFGS(
         [params],
         lr=1.0,
@@ -235,7 +241,7 @@ def _minimise_nll(
 
     def closure() -> torch.Tensor:
         optimiser.zero_grad()
-        loss = F.binary_cross_entropy_with_logits(scaled(), y)
+        loss = nll()
         loss.backward()
         return loss
 
@@ -273,7 +279,7 @@ class TemperatureScaler:
                 "shrinks to 0; there is no finite fit."
             )
         log_t = torch.zeros((), dtype=torch.float64, requires_grad=True)
-        _minimise_nll(log_t, lambda: z / log_t.exp(), y)
+        _minimise_nll(log_t, lambda: F.binary_cross_entropy_with_logits(z / log_t.exp(), y))
         return cls(float(log_t.detach().exp()))
 
     def __call__(self, logits: object) -> torch.Tensor:
@@ -306,7 +312,7 @@ class PlattScaler:
                 "grows without bound; there is no finite fit."
             )
         ab = torch.tensor([1.0, 0.0], dtype=torch.float64, requires_grad=True)
-        _minimise_nll(ab, lambda: ab[0] * z + ab[1], y)
+        _minimise_nll(ab, lambda: F.binary_cross_entropy_with_logits(ab[0] * z + ab[1], y))
         a, b = ab.detach().tolist()
         return cls(float(a), float(b))
 
@@ -324,31 +330,46 @@ class MulticlassTemperatureScaler:
 
     @classmethod
     def fit(cls, logits: object, y_true: object) -> MulticlassTemperatureScaler:
-        """The temperature minimising the validation cross-entropy (L-BFGS on ``log T``)."""
-        z = torch.as_tensor(logits).detach().to(torch.float64)
-        y, _ = _multiclass_pair(y_true, torch.softmax(z, dim=-1) if z.ndim == 2 else z)
+        """
+        The temperature minimising the validation cross-entropy (L-BFGS on ``log T``).
+
+        The cross-entropy is convex in ``s = 1/T`` with slope
+        ``Σ_i (E_i[z] − z_iy)``, where ``z_iy`` is the true-class logit of
+        sample ``i`` and ``E_i`` the mean of its logits under ``softmax(s·z_i)``.
+        At ``s → 0`` that mean is the plain row mean and at ``s → ∞`` the row
+        maximum, so a finite ``T`` exists only if ``Σ_i (z_iy − mean_k z_ik) > 0``
+        (the logits rank the true class better than chance) and some
+        ``z_iy < max_k z_ik`` (not every true class has the top logit).
+        Otherwise the optimum is ``T → ∞`` or ``T → 0`` and fitting raises
+        ``ValueError``.
+        """
+        z = torch.as_tensor(logits).detach().cpu().to(torch.float64)
+        if z.ndim != 2 or z.shape[1] < 2:
+            raise ValueError(f"logits must have shape (n, K) with K ≥ 2; got {tuple(z.shape)}.")
+        if not torch.isfinite(z).all():
+            raise ValueError("logits must be finite.")
+        y = _class_labels(y_true, "logits", z.shape[0], z.shape[1])
         if torch.unique(y).numel() < 2:
             raise ValueError("fitting a calibration needs at least two classes in y_true.")
+        true = z.gather(1, y[:, None]).squeeze(1)
+        if (true - z.mean(1)).sum() <= 0:
+            raise ValueError(
+                "the logits rank the true class no better than chance (sum of true-class "
+                "logits minus row means <= 0), so the NLL falls as the temperature grows "
+                "without bound; there is no finite fit."
+            )
+        if not (true < z.max(1).values).any():
+            raise ValueError(
+                "every true class has the top logit, so the NLL falls as the temperature "
+                "shrinks to 0; there is no finite fit."
+            )
         log_t = torch.zeros((), dtype=torch.float64, requires_grad=True)
-        optimiser = torch.optim.LBFGS(
-            [log_t],
-            lr=1.0,
-            max_iter=500,
-            tolerance_grad=1e-10,
-            tolerance_change=1e-14,
-            line_search_fn="strong_wolfe",
-        )
-
-        def closure() -> torch.Tensor:
-            optimiser.zero_grad()
-            loss = F.cross_entropy(z / log_t.exp(), y)
-            loss.backward()
-            return loss
-
-        optimiser.step(closure)
+        _minimise_nll(log_t, lambda: F.cross_entropy(z / log_t.exp(), y))
         return cls(float(log_t.detach().exp()))
 
     def __call__(self, logits: object) -> torch.Tensor:
         """Calibrated class probabilities ``(n, K)``, ``float64``."""
         z = torch.as_tensor(logits).detach().to(torch.float64)
+        if z.ndim != 2:
+            raise ValueError(f"logits must have shape (n, K); got {tuple(z.shape)}.")
         return torch.softmax(z / self.temperature, dim=-1)
