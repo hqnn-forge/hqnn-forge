@@ -13,7 +13,7 @@ from the clean validation rows) and under the noise it was trained for
 (threshold re-tuned on the validation rows under that noise, as a model
 deployed on a noisy device would be).
 
-Data: scikit-learn's breast-cancer set (569 samples, 37 % positive), which is
+Data: scikit-learn's breast-cancer set (569 samples, 63 % positive), which is
 bundled, so the study runs offline.  Per seed: a stratified 60/20/20
 train/validation/test split, standardisation and PCA to ``n_qubits`` fitted on
 the training rows, and an ``HybridBinaryClassifier(n_qubits, n_qubits, 2)`` on

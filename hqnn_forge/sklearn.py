@@ -149,10 +149,13 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         ``predict`` / ``predict_proba`` are noiseless.  ``noise_position`` is
         ``"all"`` or ``"end"``; ``noise_method`` is ``"density"`` (exact,
         practical up to about 6 qubits) or ``"trajectories"`` (sampled, at
-        pure-state cost), with ``noise_trajectories`` draws per sample.  The
-        defaults (no noise) train exactly as without these parameters.  Like
-        every other parameter they are validated in ``fit``, so they can be
-        tuned with ``GridSearchCV``.  See :mod:`hqnn_forge.noise`.
+        pure-state cost), with ``noise_trajectories`` draws per sample.  Use
+        8 or more draws at noise of a few percent per gate: with fewer, some
+        runs on the breast-cancer proxy had not started to train within 30
+        epochs (#347, #480).  The defaults (no noise) train exactly as without
+        these parameters.  Like every other parameter they are validated in
+        ``fit``, so they can be tuned with ``GridSearchCV``.  See
+        :mod:`hqnn_forge.noise`.
 
     Attributes
     ----------

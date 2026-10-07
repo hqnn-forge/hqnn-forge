@@ -5,17 +5,18 @@ Can the occasional collapse of trajectory-noise training be prevented?  The
 study behind #347.
 
 ``study_trajectory_noise.py`` (#311) found that training with
-``noise_method="trajectories"`` at ``p = 0.05`` after every gate collapsed in
-3 of 20 runs (test MCC 0.13 to 0.42), with Adam at lr 0.05 for every method,
-while the exact ``"density"`` channel never did.  This script re-runs that
+``noise_method="trajectories"`` at ``p = 0.05`` after every gate left 3 of 20
+runs below a test MCC of 0.5 (0.13 to 0.42) within its 30 epochs, with Adam at
+lr 0.05 for every method, while the exact ``"density"`` channel always
+trained.  This script re-runs that
 setting on the same data, splits and model, over 10 seeds (0 to 4 are the
 original ones), with these changes to the trajectory runs:
 
 * ``lr`` 0.02 and 0.01 instead of 0.05;
 * ``clip``: gradient-norm clipping at 0.1 (lr 0.05).  The median unclipped
-  norm was 0.05 at ``k = 1`` and 0.10 to 0.12 at ``k = 4`` and ``8``, so the
-  bound acted on 7 to 9 % of the steps at ``k = 1`` and about half at ``k = 4``
-  and ``8``;
+  norm was 0.05 at ``k = 1`` and 0.10 to 0.12 at ``k = 4`` and ``8``.  The
+  bound acted on 6.5 to 8.8 % of the steps on average at ``k = 1`` (0 to 20 %
+  per run) and on 43 to 58 % at ``k = 4`` and ``8`` (0.6 to 63 % per run);
 * ``warmup``: the noise ramps linearly from ``p/5`` to ``p`` over the first
   5 epochs (lr 0.05);
 
@@ -24,7 +25,10 @@ trained at every learning rate, so each trajectory run has a density run from
 the same seed and at the same learning rate to be paired with.
 
 A run *collapses* when its test MCC under the training noise is below 0.5; the
-successful runs in #311 all scored at least 0.68.
+successful runs in #311 all scored at least 0.68.  Training is at most 30
+epochs with a patience of 10, as in #311, so a collapse means "had not trained
+within that budget": a run that starts late counts the same as one that never
+trains.  Separating the two is #480.
 
 Writes one JSON line per run to ``--out`` (default
 ``trajectory_collapse_study.jsonl``), in parallel over ``--workers``
