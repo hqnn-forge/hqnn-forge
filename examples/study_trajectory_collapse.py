@@ -14,9 +14,9 @@ original ones), with these changes to the trajectory runs:
 
 * ``lr`` 0.02 and 0.01 instead of 0.05;
 * ``clip``: gradient-norm clipping at 0.1 (lr 0.05).  The median unclipped
-  norm was 0.05 at ``k = 1`` and 0.10 to 0.12 at ``k = 4`` and ``8``, so the
-  bound acted on 7 to 9 % of the steps at ``k = 1`` and about half at ``k = 4``
-  and ``8``;
+  norm was 0.05 at ``k = 1`` and 0.10 to 0.12 at ``k = 4`` and ``8``.  The
+  bound acted on 6.5 to 8.8 % of the steps on average at ``k = 1`` (0 to 20 %
+  per run) and on 43 to 58 % at ``k = 4`` and ``8`` (0.6 to 63 % per run);
 * ``warmup``: the noise ramps linearly from ``p/5`` to ``p`` over the first
   5 epochs (lr 0.05);
 

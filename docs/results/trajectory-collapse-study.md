@@ -26,14 +26,17 @@ one that never trains; see *What a collapse means here*. The control is #480.
   - `lr0.05`: the baseline, as in #311;
   - `lr0.02`, `lr0.01`: a lower learning rate;
   - `clip`: gradient-norm clipping at 0.1 (lr 0.05). The median unclipped norm was 0.05 at
-    k = 1 and 0.10–0.12 at k = 4 and 8, so the bound acted on 7–9 % of steps at k = 1 and
-    about half at k = 4 and 8;
+    k = 1 and 0.10–0.12 at k = 4 and 8. At k = 1 the bound acted on 6.5 % (4 qubits) and
+    8.8 % (6 qubits) of steps on average, between 0 and 20 % per run; at k = 4 on 43 % and
+    51 % (0.6–60 % per run) and at k = 8 on 52 % and 58 % (40–63 % per run);
   - `warmup`: noise ramped linearly from p/5 to p over the first 5 epochs (lr 0.05).
 - **References:** density at all three learning rates, and noiseless training, on the same
   seeds.
-- **Collapse:** test MCC under noise below 0.5. The successful runs in #311 all scored at least
-  0.68, and the collapses here scored 0.05–0.47, so the cut is not borderline. It is a
-  statement about the score at the end of this budget, not about whether the run could train.
+- **Collapse:** test MCC under noise below 0.5. The collapses here scored 0.05–0.47, but the
+  cut does not fall in a gap: 15 trajectory runs scored between 0.50 and 0.68, the lowest
+  0.504 (0.68 was the lowest successful score in #311). *Sensitivity to the cut* gives the
+  counts at other cuts. It is a statement about the score at the end of this budget, not
+  about whether the run could train.
 - **Environment:** PennyLane 0.45.1, torch 2.14, one 16-core CPU, 14 single-threaded worker
   processes.
 
@@ -59,6 +62,28 @@ Collapsed runs of 10, and mean test MCC under noise:
 
 In total, over the five variants and both sizes, k = 1 collapsed in **10 of 100** runs,
 k = 4 in **6 of 100** and k = 8 in **0 of 100**. Density collapsed once in 60, at lr 0.01.
+
+### Sensitivity to the cut
+
+Runs below the cut, of 100 per k (five variants, both sizes) and of 60 for density:
+
+| cut | k = 1 | k = 4 | k = 8 | density |
+|---|---|---|---|---|
+| 0.45 | 10 | 5 | 0 | 1 |
+| 0.50 | 10 | 6 | 0 | 1 |
+| 0.55 | 13 | 7 | 0 | 1 |
+| 0.60 | 15 | 7 | 0 | 2 |
+| 0.65 | 19 | 7 | 1 | 3 |
+| 0.68 | 22 | 7 | 2 | 3 |
+
+The order k = 1 > k = 4 > k = 8 holds at every cut, and k = 8 stays at zero up to 0.60; its
+two lowest runs scored 0.647 and 0.665. The comparisons between variants move more:
+
+- Of the 15 trajectory runs between 0.50 and 0.68, 12 are at k = 1 and 9 at lr 0.01, and 9
+  ran the full 30 epochs. The 4-qubit, k = 1, lr 0.01 cell (0 collapses, mean 0.690) holds
+  six of them, at 0.50–0.63. Over all k, lr 0.01 counts 4 runs below 0.5 and 8 below 0.6.
+- The warm-up counts 1 run below 0.5, 2 below 0.55 and 3 below 0.6, against 4 for the
+  baseline and for clipping at each of those cuts.
 
 ### What a collapse means here
 
@@ -113,7 +138,7 @@ Like #311, everything below was measured on the breast-cancer proxy only: one sm
 that re-run is #414.
 
 1. **At k = 8 every run trained within the budget; no other mitigation achieved that.** k = 8
-   never collapsed, under any variant, at either size. Against k = 1 that is 0 of 100 against
+   never collapsed, under any variant, at either size, at any cut up to 0.60. Against k = 1 that is 0 of 100 against
    10 of 100 (Fisher's exact test p = 0.002), and against k = 4, 0 against 6 (p = 0.03). Both p-values
    pool the five variants, which share seeds and are therefore not independent (k = 1 at
    6 qubits collapsed on seed 0 under every variant), so they overstate the evidence. Read them
@@ -126,12 +151,17 @@ that re-run is #414.
    This does not show that a smaller step fails to prevent stalls. A smaller step also takes
    longer to leave the plateau, and 6 of the 7 collapses at the lower rates were ended by early
    stopping between epochs 14 and 25. Whether they would have trained is #480.
-3. **Clipping and warm-up helped only partly within this budget.** Clipping at 0.1 barely
-   acts at k = 1 (7–9 % of steps) and left its collapses in place. Two of its four collapses
-   are the baseline's runs unchanged, score for score (k = 1, 4 qubits, seed 6, where no step
-   was clipped, and k = 4, 4 qubits, seed 1, where 0.6 % were), so they are not independent
-   evidence. The warm-up removed k = 4's collapses (0 of 20) but not k = 1's (1 of 20).
-4. **k = 8 matches density, and costs a fraction of it.** At lr 0.05, paired over 20 seeds, k = 8
+3. **Clipping did not help within this budget, and the warm-up helped only partly.** Clipping
+   at 0.1 collapsed on exactly the four combinations of size, k and seed on which the baseline
+   did (4 of 60 each). Two are the baseline's runs unchanged, score for score (k = 1,
+   4 qubits, seed 6, where no step was clipped, and k = 4, 4 qubits, seed 1, where 0.6 %
+   were), and two scored lower (k = 1 at 6 qubits: 0.10 against 0.19 on seed 0, 0.23 against
+   0.42 on seed 4). In those four runs the bound acted on at most 1.1 % of steps, so the
+   clipping was all but absent where it was needed. The warm-up removed three of the four,
+   including k = 4's (1 of 60 left, k = 1 at 6 qubits on seed 0), but that margin depends on
+   the cut: below 0.6 it counts 3 runs against the baseline's 4.
+4. **k = 8 matches density, and costs a fraction of it.** At lr 0.05, paired over 20 runs
+   (10 seeds × 2 sizes, so not 20 independent seeds), k = 8
    scored +0.024 MCC above density on average (Wilcoxon p = 0.23, no significant difference).
    It took 1.1× (4 qubits) and 1.4× (6 qubits) the time of k = 1, not 8×, because on
    `default.qubit` with backprop the k draws run as one vectorised batch. At 6 qubits it was
@@ -171,6 +201,9 @@ On the evidence above (breast-cancer proxy, 4 and 6 qubits, backprop; the benchm
   selection on the clean validation rows, and no longer-budget control. A collapse is a run
   that had not trained by then; the study cannot separate late starts from stalls, and that
   weakens the learning-rate and clipping findings most (#480).
+- **The collapse cut.** 0.5 does not separate two groups of runs: 15 trajectory runs scored
+  0.50–0.68. k = 8's zero holds up to a cut of 0.60, but the counts for lr 0.01 and for the
+  warm-up rise with the cut (*Sensitivity to the cut*).
 - 10 seeds per cell. A collapse rate of a few percent at k = 8 cannot be ruled out: 0 of 100
   bounds it below about 3 % (95 %, one-sided), assuming independent runs, and they are not
   fully independent.
