@@ -415,8 +415,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Switched the package build backend from setuptools to `uv_build` and updated the
   package metadata for PEP 639-compatible license handling (#458)
 - `expressibility` and `entangling_capability` run each chunk of sampled states as one
-  broadcast tape instead of tape by tape, with the same draws and bit-identical states for
-  every encoding layer of this package: the default 5000 pairs of a 2-layer angle layer went
+  broadcast tape instead of tape by tape, with the same draws and the same states up to
+  round-off (bit-identical for every encoding layer of this package at 3 qubits, within a
+  few 1e-17 for an IQP layer at 12): the default 5000 pairs of a 2-layer angle layer went
   from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
   take a batch of parameters runs tape by tape as before (#374)
 

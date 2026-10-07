@@ -55,14 +55,16 @@ is then run as one broadcast tape: the tapes differ only in their parameters,
 so stacking those gives one circuit over the whole chunk (#361).  That skips
 PennyLane's per-tape execution overhead, about 3 ms per state on
 ``default.qubit``: the default 5000 pairs of a 2-layer angle layer went from
-35 s to 8 s at 4 qubits and from 78 s to 15 s at 8, the rest being mostly
-the building of the tapes.  A chunk is merged only when its tapes agree in
-everything but the values of their parameters (operations, wires, parameter
-shapes and hyperparameters) and every operation is known to apply a stacked
-parameter as a batch, itself or through its decomposition; the states are then
-bit-identical to running the tapes one by one, which is checked for every
-encoding layer of this package.  Any other chunk, and one whose broadcast run
-raises, runs tape by tape as before.
+35 s to 8 s at 4 qubits and from 78 s to 15 s at 8, the rest being the
+building of the tapes and the comparison of their structure.  A chunk is
+merged only when its tapes agree in everything but the values of their
+parameters (operations, wires, parameter shapes and hyperparameters) and every
+operation is known to apply a stacked parameter as a batch, itself or through
+its decomposition; the states are then those of running the tapes one by one
+up to round-off.  For every encoding layer of this package they are checked to
+be bit-identical at 3 qubits; at 12 qubits an IQP layer's differ by a few
+1e-17.  Any other chunk, and one whose broadcast run raises, runs tape by tape
+as before.
 
 References
 ----------
@@ -279,10 +281,11 @@ def _execute(tapes: list[qml.tape.QuantumScript], device: Any) -> list[torch.Ten
     if merged is not None:
         # An operation can accept a batch when it is built and still fail to
         # run one (GlobalPhase with torch parameters on PennyLane 0.45).  The
-        # tapes then run alone, where a genuine error still surfaces.
+        # tapes then run alone, where a genuine error still surfaces.  So do
+        # they when the result is not one state per tape: the reshape raises.
         with contextlib.suppress(Exception):
             (result,) = qml.execute([merged], device)
-            rows = torch.as_tensor(result).reshape(len(tapes), -1)
+            rows = torch.as_tensor(result).reshape(len(tapes), 2 ** len(device.wires))
             return [r.to(torch.complex128) for r in rows]
     return [torch.as_tensor(r).to(torch.complex128) for r in qml.execute(tapes, device)]
 

@@ -259,19 +259,23 @@ def test_broadcast_states_are_bit_identical_to_tape_by_tape(
         states, _ = expr_module._sample_states(layer, 40, x, gen, "test")
         return states
 
-    merged_calls: list[bool] = []
-    real = expr_module._broadcast
+    # What reaches the simulator, not what _broadcast returns: a merged tape
+    # whose run raises falls back silently, and would compare tape by tape
+    # with itself below.
+    runs: list[tuple[int, int | None]] = []
+    real = qml.execute
 
-    def spy(tapes: Any) -> Any:
-        merged = real(tapes)
-        merged_calls.append(merged is not None)
-        return merged
+    def spy(batch: Any, *args: Any, **kwargs: Any) -> Any:
+        runs.append((len(batch), batch[0].batch_size))
+        return real(batch, *args, **kwargs)
 
-    monkeypatch.setattr(expr_module, "_broadcast", spy)
+    monkeypatch.setattr(qml, "execute", spy)
     broadcast = sample()
-    assert merged_calls == [True, True], "every chunk should run broadcast"
+    assert runs == [(1, 32), (1, 8)], "every chunk should run as one broadcast tape"
+    runs.clear()
     monkeypatch.setattr(expr_module, "_broadcast", lambda tapes: None)
     assert torch.equal(broadcast, sample())
+    assert runs == [(32, None), (8, None)]
 
 
 def _theta(i: int) -> torch.Tensor:
@@ -442,6 +446,30 @@ def test_a_broadcast_run_that_raises_falls_back_to_tape_by_tape(
     monkeypatch.setattr(qml, "execute", execute)
     states = torch.stack(expr_module._execute(tapes, device))
     assert sizes == [1, 3]
+    torch.testing.assert_close(states, expected.to(torch.complex128), rtol=0, atol=0)
+
+
+def test_a_broadcast_result_of_the_wrong_shape_falls_back_to_tape_by_tape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two tapes on two qubits: one unbatched state has 4 amplitudes, which
+    # would also split into two rows of 2 if the width were not checked.
+    tapes = _tapes(lambda i: [qml.RX(_theta(i), 0), qml.RY(_theta(i), 1)], n=2)
+    assert expr_module._broadcast(tapes) is not None
+    device = qml.device("default.qubit", wires=2)
+    expected = torch.stack([torch.as_tensor(r) for r in qml.execute(tapes, device)])
+    real = qml.execute
+    sizes: list[int] = []
+
+    def execute(batch: Any, *args: Any, **kwargs: Any) -> Any:
+        sizes.append(len(batch))
+        if len(batch) == 1:
+            return (torch.zeros(4, dtype=torch.complex128),)
+        return real(batch, *args, **kwargs)
+
+    monkeypatch.setattr(qml, "execute", execute)
+    states = torch.stack(expr_module._execute(tapes, device))
+    assert sizes == [1, 2]
     torch.testing.assert_close(states, expected.to(torch.complex128), rtol=0, atol=0)
 
 
