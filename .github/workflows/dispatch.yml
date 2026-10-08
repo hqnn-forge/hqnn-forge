@@ -1,4 +1,4 @@
-name: Dispatch
+name: Tests (manual)
 
 # Runs the test suite by hand, for main's HEAD when its push run has not
 # appeared: `gh workflow run dispatch.yml --ref main` (#398).
@@ -8,18 +8,26 @@ name: Dispatch
 # can deliver a push event late (3fbfd97's run started about 11 minutes after
 # the merge), and a dispatch next to a late push run repeats the whole suite.
 #
+# Dispatch once. The run list lags a dispatch by a few seconds, and dispatched
+# runs on one commit share a concurrency group (see tests.yml): a second
+# dispatch waits for the first and repeats the suite after it, and a third
+# cancels the waiting second.
+#
 # A dispatch tests the branch HEAD, so it covers only the latest commit: check
 # that `git rev-parse origin/main` is still the commit whose run is missing,
 # or the run is for a later merge. The run's event is `workflow_dispatch`, so
 # `gh run list --event push` never lists it; the same
-# `gh run list --commit <sha>` shows it, as workflow `Dispatch`.
+# `gh run list --commit <sha>` shows it, as workflow `Tests (manual)`.
 #
-# The trigger lives here and not in tests.yml so that it can be refused off
-# main. On a PR's branch a dispatch of tests.yml would test the branch head,
-# not the merge ref, and post `lint` and `test (…)` checks under the names of
-# the PR's own, on the same commit. Here the checks are named `tests / lint`,
-# `tests / test (…)`, and a dispatch on any other ref leaves only a skipped
-# `tests` check, as a title edit does through retarget.yml (#346).
+# The trigger lives here and not in tests.yml so that a dispatch off main can
+# be turned away. On a PR's branch a dispatch of tests.yml would test the
+# branch head, not the merge ref, and post `lint` and `test (…)` checks under
+# the names of the PR's own, on the same commit. Here the checks are named
+# `tests / lint`, `tests / test (…)`, and a dispatch on any other ref fails in
+# `refuse` and leaves `tests` skipped, so a mistyped ref cannot pass for a
+# tested commit. This catches mistakes only: a dispatch runs the dispatched
+# ref's own copy of this file, so a branch that edits the conditions below
+# runs whatever it likes.
 on:
   workflow_dispatch:
 
@@ -27,6 +35,15 @@ permissions:
   contents: read
 
 jobs:
+  refuse:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check the dispatch is on main
+      run: |
+        echo "::error::a dispatch tests main; this run is on $GITHUB_REF."
+        exit 1
+
   tests:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/tests.yml
