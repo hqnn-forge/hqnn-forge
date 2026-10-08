@@ -1,0 +1,32 @@
+name: Dispatch
+
+# Runs the test suite by hand, for main's HEAD when its push run has not
+# appeared: `gh workflow run dispatch.yml --ref main` (#398).
+#
+# Look first with `gh run list --commit <sha>`, giving the full 40-character
+# sha: an abbreviated one matches nothing and returns an empty list. GitHub
+# can deliver a push event late (3fbfd97's run started about 11 minutes after
+# the merge), and a dispatch next to a late push run repeats the whole suite.
+#
+# A dispatch tests the branch HEAD, so it covers only the latest commit: check
+# that `git rev-parse origin/main` is still the commit whose run is missing,
+# or the run is for a later merge. The run's event is `workflow_dispatch`, so
+# `gh run list --event push` never lists it; the same
+# `gh run list --commit <sha>` shows it, as workflow `Dispatch`.
+#
+# The trigger lives here and not in tests.yml so that it can be refused off
+# main. On a PR's branch a dispatch of tests.yml would test the branch head,
+# not the merge ref, and post `lint` and `test (…)` checks under the names of
+# the PR's own, on the same commit. Here the checks are named `tests / lint`,
+# `tests / test (…)`, and a dispatch on any other ref leaves only a skipped
+# `tests` check, as a title edit does through retarget.yml (#346).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/tests.yml

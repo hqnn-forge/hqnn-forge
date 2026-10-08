@@ -13,15 +13,8 @@ on:
   # workflow only when the base changed. An `edited` trigger here would post
   # skipped check runs under these job names for every title or body edit,
   # and the checks page would show those instead of the real results (#346).
+  # dispatch.yml calls it too, to run the suite by hand on main (#398).
   workflow_call:
-  # By hand, for main's HEAD when its push run has not appeared:
-  # `gh workflow run tests.yml --ref main`. Look first with
-  # `gh run list --workflow tests.yml --commit <sha>`: GitHub can deliver a
-  # push event late (3fbfd97's run started about 11 minutes after the merge).
-  # A dispatch tests the branch HEAD, so it covers only the latest commit. It
-  # is meant for main only: on a PR's branch it would post checks for the
-  # branch head, not the merge ref, under the names of the PR's own (#398).
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,12 +26,12 @@ permissions:
 # Pushes to main group per commit: a group holds one running and one pending
 # run, and a third arrival cancels the pending one even without
 # cancel-in-progress, so merges in quick succession would leave main commits
-# without a completed run. A dispatched run has no PR number and no action, so
-# it joins the per-commit group of the commit it tests and cancels nothing in
-# progress; a second dispatch for the same commit would cancel a pending first
-# one, as any third arrival does.
+# without a completed run. A run dispatched by hand (called from dispatch.yml,
+# with the caller's `workflow_dispatch` event context) gets its own group per
+# commit too: in the push run's group, a second dispatch arriving while a late
+# push run is pending would cancel that push run.
 concurrency:
-  group: tests-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && '-retarget' || '' }}
+  group: tests-${{ github.event.pull_request.number || github.sha }}${{ github.event.action == 'edited' && '-retarget' || '' }}${{ github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
