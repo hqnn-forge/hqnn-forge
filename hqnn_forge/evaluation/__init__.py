@@ -32,6 +32,8 @@ brier_score, expected_calibration_error, reliability_curve
                          Calibration of the probabilities (#319).
 TemperatureScaler, PlattScaler
                          Post-hoc calibration fitted on a validation split.
+multiclass_brier_score, top_label_ece, classwise_ece, MulticlassTemperatureScaler
+                         The same for (n, K) probabilities and logits (#360).
 plots                    Submodule: confusion matrix, fold boxplot, efficiency
                          frontier (needs matplotlib; import it explicitly:
                          ``from hqnn_forge.evaluation import plots``).
@@ -43,11 +45,15 @@ from hqnn_forge.evaluation.bootstrap import (
     paired_bootstrap_ci,
 )
 from hqnn_forge.evaluation.calibration import (
+    MulticlassTemperatureScaler,
     PlattScaler,
     TemperatureScaler,
     brier_score,
+    classwise_ece,
     expected_calibration_error,
+    multiclass_brier_score,
     reliability_curve,
+    top_label_ece,
 )
 from hqnn_forge.evaluation.multiclass import (
     MULTICLASS_METRICS,
@@ -85,6 +91,7 @@ __all__: list[str] = [
     "BootstrapResult",
     "ControlComparison",
     "FriedmanResult",
+    "MulticlassTemperatureScaler",
     "PlattScaler",
     "TemperatureScaler",
     "ThresholdSearchResult",
@@ -93,6 +100,7 @@ __all__: list[str] = [
     "balanced_accuracy",
     "bootstrap_ci",
     "brier_score",
+    "classwise_ece",
     "compare_to_control",
     "expected_calibration_error",
     "f1_score",
@@ -103,6 +111,7 @@ __all__: list[str] = [
     "macro_f1_score",
     "matthews_corrcoef",
     "multiclass_balanced_accuracy",
+    "multiclass_brier_score",
     "multiclass_matthews_corrcoef",
     "nemenyi_critical_difference",
     "paired_bootstrap_ci",
@@ -110,5 +119,6 @@ __all__: list[str] = [
     "pr_auc",
     "rank_biserial_correlation",
     "reliability_curve",
+    "top_label_ece",
     "wilcoxon_signed_rank",
 ]

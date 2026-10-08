@@ -622,3 +622,4 @@ APA.
 - Mukhoti et al. (2020) — *Calibrating deep neural networks using focal loss*
 - Spall (1992) — *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation*
 - Spall (1998) — *Implementation of the simultaneous perturbation algorithm for stochastic optimization*
+- Kull et al. (2019) — *Beyond temperature scaling: obtaining well-calibrated multi-class probabilities with Dirichlet calibration*

@@ -238,10 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoints (weight-safe, `"depolarizing"` for older files), selecting
   `"amplitude_damping"` (T1), `"phase_damping"` (T2 dephasing), `"bit_flip"` or
   `"phase_flip"`, each with its own `p` range (`[0, 1]`; depolarizing stays `[0, 0.75]`). A
-  readout error is `"bit_flip"` at `position="end"`, the symmetric case only: an asymmetric
-  one (`p01 ≠ p10`) is not modelled. `noise_method="trajectories"` samples the Pauli channels
-  (depolarizing, bit flip, phase flip), including inside `apply_shots`; the damping channels
-  need `"density"` (#336)
+  symmetric readout error is `"bit_flip"` at `position="end"`; an asymmetric one
+  (`p01 ≠ p10`) is the separate `readout_error` below (#358). `noise_method="trajectories"`
+  samples the Pauli channels (depolarizing, bit flip, phase flip), including inside
+  `apply_shots`; the damping channels need `"density"` (#336)
 - Calibration of binary probabilities in `hqnn_forge.evaluation`: `brier_score`,
   `expected_calibration_error` and `reliability_curve` (uniform or equal-count bins), the
   post-hoc `TemperatureScaler` and `PlattScaler` fitted on a validation split (raising when
@@ -249,6 +249,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TrainingHistory.temperature` for the returned weights, and per-fold `brier`/`ece` with
   `brier_mean`/`ece_mean` in `run_benchmark` (NaN for a fold whose probabilities are not
   finite) (#340)
+- `calibration="temperature"` or `"platt"` on `HybridClassifierEstimator` (two classes): fitted
+  on the validation split and applied in `predict_proba`, stored as `calibrator_`. With
+  `threshold="optimal"`, `predict` is unchanged and `threshold_` is mapped through the
+  calibrator. A split with no finite fit warns and stays uncalibrated (#359)
+- Multiclass calibration: `multiclass_brier_score`, `top_label_ece`, `classwise_ece` and
+  `MulticlassTemperatureScaler` (one temperature shared by the K logits, raising when the
+  cross-entropy has no finite optimum) (#360)
 - `examples/benchmark_batching.py`: inference and training-step time of the per-sample split,
   native broadcasting, `batch_obs` and `default.qubit`/backprop for every encoder, with a
   correctness check, plus a crossover by qubit count with peak memory; the README now says
@@ -281,6 +288,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phase flip it equals, amplitude damping by weighted Kraus branches whose mean is the density
   channel exactly; the latter needs backprop, parameter-shift or finite-diff, `default.qubit` or
   `lightning.qubit`, and exact expectation values (#357)
+- An asymmetric readout error `(p01, p10)`, applied exactly to each ⟨Z⟩ as
+  `(1 − p01 − p10)⟨Z⟩ + (p10 − p01)`: `apply_readout_error` post hoc,
+  `noise_sweep(..., channel="readout")`, and `readout_error=` on the layers and classifiers for
+  training (weight-safe in checkpoints). The map acts on the layer's output: a layer's own
+  `readout_error` is suppressed inside `apply_depolarizing_noise` like its other training
+  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. On a sampled
+  layer the mean is exact but the shot noise is scaled by `|1 − p01 − p10|`, smaller than that
+  of flipped shots (#486). A model trained with `readout_error` learns its offset, and
+  `predict_proba` runs without it unless called inside `apply_readout_error` (#488) (#358)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
@@ -401,6 +417,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of ASCII (#451)
 - Switched the package build backend from setuptools to `uv_build` and updated the
   package metadata for PEP 639-compatible license handling (#458)
+- `expressibility` and `entangling_capability` run each chunk of sampled states as one
+  broadcast tape instead of tape by tape, with the same draws and the same states up to
+  round-off (bit-identical for every encoding layer of this package at 3 qubits, within a
+  few 1e-17 for an IQP layer at 12): the default 5000 pairs of a 2-layer angle layer went
+  from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
+  take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite

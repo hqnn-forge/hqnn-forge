@@ -205,6 +205,7 @@ class QuantumTrunk(nn.Module):
         shots: int | None = None,
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> int:
         """
         Build ``classical_encoder``, ``quantum_layer`` and ``dropout`` on ``self``.
@@ -296,6 +297,7 @@ class QuantumTrunk(nn.Module):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
         elif encoding_type == "iqp":
             self.quantum_layer = IQPEncodingLayer(
@@ -313,6 +315,7 @@ class QuantumTrunk(nn.Module):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
         elif encoding_type == "amplitude":
             self.quantum_layer = AmplitudeEncodingLayer(
@@ -330,6 +333,7 @@ class QuantumTrunk(nn.Module):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
         else:
             self.quantum_layer = DataReuploadingLayer(
@@ -348,6 +352,7 @@ class QuantumTrunk(nn.Module):
                 shots=shots,
                 noise_channel=noise_channel,
                 seed=seed,
+                readout_error=readout_error,
             )
 
         # ── Dropout ───────────────────────────────────────────────────────

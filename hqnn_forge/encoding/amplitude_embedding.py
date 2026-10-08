@@ -373,6 +373,13 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
         or by trajectories (amplitude damping with restrictions).  See
         :mod:`hqnn_forge.noise`.
+    readout_error:
+        A train-mode readout error ``(p01, p10)`` on the outputs, exactly as
+        for :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: train mode
+        only, so evaluation has none unless it runs inside
+        ``apply_readout_error``, and with ``shots`` it rescales the sampled
+        estimate, whose shot noise comes out too small (#486).  Default
+        ``None``.
     shots, seed:
         Finite-shot sampling and the device seed, exactly as for
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
@@ -427,6 +434,7 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         shots: int | None = None,
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
+        readout_error: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
 
@@ -473,6 +481,7 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
             noise_trajectories,
             shots=shots,
             noise_channel=noise_channel,
+            readout_error=readout_error,
         )
         self.seed = validate_seed(seed)
 

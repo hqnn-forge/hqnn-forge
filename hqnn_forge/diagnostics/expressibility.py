@@ -49,9 +49,22 @@ its data and weights), or one fixed vector for every state (Sim et al.'s
 data-free setting: the ansatz's expressibility around that input).  Inputs go
 through the layer's ``prepare_inputs``, and the states are replayed on a
 state-vector simulator exactly as :mod:`hqnn_forge.kernels` does; the layer's
-own weights are left untouched.  Each state is one small tape, and PennyLane's
-per-tape overhead dominates: about 3 ms per state on ``default.qubit``, so the
-default 5000 pairs take roughly half a minute at 4 qubits.
+own weights are left untouched.  Each state's circuit is built as its own
+tape, with its own draws in the same order as ever, and each chunk of tapes
+is then run as one broadcast tape: the tapes differ only in their parameters,
+so stacking those gives one circuit over the whole chunk (#361).  That skips
+PennyLane's per-tape execution overhead, about 3 ms per state on
+``default.qubit``: the default 5000 pairs of a 2-layer angle layer went from
+35 s to 8 s at 4 qubits and from 78 s to 15 s at 8, the rest being the
+building of the tapes and the comparison of their structure.  A chunk is
+merged only when its tapes agree in everything but the values of their
+parameters (operations, wires, parameter shapes and hyperparameters) and every
+operation is known to apply a stacked parameter as a batch, itself or through
+its decomposition; the states are then those of running the tapes one by one
+up to round-off.  For every encoding layer of this package they are checked to
+be bit-identical at 3 qubits; at 12 qubits an IQP layer's differ by a few
+1e-17.  Any other chunk, and one whose broadcast run raises, runs tape by tape
+as before.
 
 References
 ----------
@@ -68,12 +81,15 @@ References
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import pennylane as qml
 import torch
+from pennylane.operation import Operator
+from pennylane.ops.functions import bind_new_parameters
 from torch import nn
 
 from hqnn_forge.kernels import _prepare, _resolve_layer
@@ -255,8 +271,127 @@ def _sample_states(
             # level=0: the circuit as written, as in hqnn_forge.kernels.
             tape = qml.workflow.construct_tape(qlayer.qnode, level=0)(prepared[i], **weights)
             tapes.append(tape.copy(measurements=[qml.state()]))
-        states.extend(torch.as_tensor(r).to(torch.complex128) for r in qml.execute(tapes, device))
+        states.extend(_execute(tapes, device))
     return torch.stack(states).reshape(n_states, 2**n_qubits), n_qubits
+
+
+def _execute(tapes: list[qml.tape.QuantumScript], device: Any) -> list[torch.Tensor]:
+    """The state of every tape: from one broadcast run if they merge, else one by one."""
+    merged = _broadcast(tapes)
+    if merged is not None:
+        # An operation can accept a batch when it is built and still fail to
+        # run one (GlobalPhase with torch parameters on PennyLane 0.45).  The
+        # tapes then run alone, where a genuine error still surfaces.  So do
+        # they when the result is not one state per tape: the reshape raises.
+        with contextlib.suppress(Exception):
+            (result,) = qml.execute([merged], device)
+            rows = torch.as_tensor(result).reshape(len(tapes), 2 ** len(device.wires))
+            return [r.to(torch.complex128) for r in rows]
+    return [torch.as_tensor(r).to(torch.complex128) for r in qml.execute(tapes, device)]
+
+
+def _alike(a: object, b: object) -> bool:
+    """
+    Whether two operations differ in nothing but the values of their parameters.
+
+    Name, wires, parameter shapes and every hyperparameter must agree: a Pauli
+    word, a template's ``rotation`` or ``ranges`` and the like are not stacked,
+    so the merged tape would silently take them from the first tape.  An
+    operation held as a hyperparameter (the base of a controlled operation) is
+    compared the same way; anything that cannot be compared counts as differing.
+    """
+    if a is b:
+        return True
+    if isinstance(a, Operator):
+        return (
+            isinstance(b, Operator)
+            and a.name == b.name
+            and a.wires == b.wires
+            and [qml.math.shape(d) for d in a.data] == [qml.math.shape(d) for d in b.data]
+            and _alike(a.hyperparameters, b.hyperparameters)
+        )
+    if isinstance(a, dict):
+        return (
+            isinstance(b, dict)
+            and a.keys() == b.keys()
+            and all(_alike(v, b[k]) for k, v in a.items())
+        )
+    if isinstance(a, (list, tuple)):
+        return (
+            isinstance(b, (list, tuple))
+            and len(a) == len(b)
+            and all(_alike(x, y) for x, y in zip(a, b, strict=True))
+        )
+    try:
+        return bool(qml.math.shape(a) == qml.math.shape(b) and qml.math.all(a == b))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _as_batch(op: Operator, batch: int) -> list[Operator] | None:
+    """
+    ``op``, holding stacked parameters, as operations that each run ``batch`` circuits.
+
+    That is ``op`` itself when it reports the batch.  A template such as
+    ``StronglyEntanglingLayers`` reports none for a stacked weight tensor but
+    decomposes into gates that do, and is replaced by them.  None when neither
+    holds: PennyLane would then read the stacked parameter as one circuit's
+    (``BasisEmbedding`` of a ``(batch, n)`` tensor) and return wrong states
+    without raising.
+    """
+    if op.batch_size == batch:
+        return [op]
+    if not op.has_decomposition:
+        return None
+    ops: list[Operator] = []
+    parametrised = False
+    for part in op.decomposition():
+        if not part.data:
+            ops.append(part)
+            continue
+        expanded = _as_batch(part, batch)
+        if expanded is None:
+            return None
+        ops.extend(expanded)
+        parametrised = True
+    # Parameters that vanish in the decomposition were not applied per circuit.
+    return ops if parametrised else None
+
+
+def _broadcast(tapes: list[qml.tape.QuantumScript]) -> qml.tape.QuantumScript | None:
+    """
+    One tape running every tape in ``tapes`` as a parameter batch, or None.
+
+    None when there are fewer than two tapes, when they differ in their
+    operations, wires, parameter shapes or hyperparameters, when one is
+    already broadcast, or when an operation does not take a batch of
+    parameters: the caller then runs them one by one.
+    """
+    if len(tapes) < 2 or any(t.batch_size is not None for t in tapes):
+        return None
+    first = tapes[0]
+    for tape in tapes[1:]:
+        if len(tape.operations) != len(first.operations) or not all(
+            _alike(a, b) for a, b in zip(first.operations, tape.operations, strict=True)
+        ):
+            return None
+    ops: list[Operator] = []
+    for k, op in enumerate(first.operations):
+        if not op.data:
+            ops.append(op)
+            continue
+        stacked = [
+            qml.math.stack([t.operations[k].data[j] for t in tapes]) for j in range(len(op.data))
+        ]
+        try:
+            batched = _as_batch(bind_new_parameters(op, stacked), len(tapes))
+        except Exception:  # noqa: BLE001
+            return None
+        if batched is None:
+            return None
+        ops.extend(batched)
+    merged = qml.tape.QuantumScript(ops, [qml.state()])
+    return merged if merged.batch_size == len(tapes) else None
 
 
 def _generator(generator: torch.Generator | None) -> torch.Generator:
