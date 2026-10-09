@@ -240,8 +240,13 @@ with one collapse operator per atom, independent of the others.
   `γ = Ω`), and it stayed strictly decreasing in `Δ_i` at every rate checked numerically
   (`γ/Ω` from 0.03 to 10); that is an observation, not a proof.
 - **Strong dephasing.** The maximally mixed state is stationary. For `Ω > 0` and `γ > 0` every
-  `⟨n_i⟩` tends to ½ whatever the input. For `γ > 4Ω` the approach has the rate
-  `γ/4 − κ ≈ 2Ω²/γ`, which falls as γ grows: reaching ½ needs `Ω²t/γ ≫ 1`, not only `γt ≫ 1`.
+  `⟨n_i⟩` tends to ½ whatever the input; how fast depends on the regime. For one atom at
+  `Δ = 0` the slowest rate is `γ/4` up to `γ = 4Ω` and `γ/4 − κ ≈ 2Ω²/γ` above it, which falls
+  as γ grows: reaching ½ needs both `γt ≫ 1` and `Ω²t/γ ≫ 1`. A detuning in `[0, Δ_max]`
+  lowers the rate by a factor of at most 2.7. Interactions lower it without such a bound: in
+  the blockade the doubly excited states fill at a rate of order `γΩ²/V²` (two atoms,
+  `V ≫ Ω, γ`: `2γΩ²/(3V²)`), and until then `⟨n_i⟩` stays below ½ (two atoms, `γ = Ω`,
+  `Ωt = 40`: 0.372 at `V/Ω = 10` and 0.334 at 100).
 
 Two idealisations are part of this choice:
 
@@ -271,7 +276,7 @@ is checked by the feature map (#499).
 | Blockade | Two atoms, `V ≫ Ω`, `Δ = γ = 0`: `⟨n_1 + n_2⟩ → sin²(√2 Ωt/2)` as `Ω/V → 0`, and the doubly excited population stays below `(Ω/V)²` (its maximum over `Ωt ≤ 20` was 0.57, 0.52 and 0.51 times that at `V/Ω` = 10, 30 and 100) |
 | What γ means | No drive: a single-atom coherence decays as `e^(−γt/2)` and `ρ_ab` as `e^(−γ t d_H(a,b)/2)` |
 | Dephasing against the drive | One atom, `Δ = 0`: the damped oscillation above, in all three cases |
-| Strong dephasing | `γt ≫ 1` and `Ω²t/γ ≫ 1`: every `⟨n_i⟩ → ½` |
+| Strong dephasing | Interactions off, `γt ≫ 1` and `Ω²t/γ ≫ 1`: every `⟨n_i⟩ → ½`; in the blockade also `γΩ²t/V² ≫ 1` |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 
 ## Hardware realism
