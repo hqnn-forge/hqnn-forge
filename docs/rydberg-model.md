@@ -239,14 +239,30 @@ with one collapse operator per atom, independent of the others.
   two equations above for its own `Δ_i`. Its range shrinks with γ (from 0.72 to 0.21 at
   `γ = Ω`), and it stayed strictly decreasing in `Δ_i` at every rate checked numerically
   (`γ/Ω` from 0.03 to 10); that is an observation, not a proof.
-- **Strong dephasing.** The maximally mixed state is stationary. For `Ω > 0` and `γ > 0` every
-  `⟨n_i⟩` tends to ½ whatever the input; how fast depends on the regime. For one atom at
-  `Δ = 0` the slowest rate is `γ/4` up to `γ = 4Ω` and `γ/4 − κ ≈ 2Ω²/γ` above it, which falls
-  as γ grows: reaching ½ needs both `γt ≫ 1` and `Ω²t/γ ≫ 1`. A detuning in `[0, Δ_max]`
-  lowers the rate by a factor of at most 3.5. Interactions lower it without such a bound: in
-  the blockade the doubly excited states fill at a rate of order `γΩ²/V²` (two atoms,
-  `V ≫ Ω, γ`: `2γΩ²/(3V²)`), and until then `⟨n_i⟩` stays below ½ (two atoms, `γ = Ω`,
-  `Ωt = 40`: 0.372 at `V/Ω = 10` and 0.334 at 100).
+- **Strong dephasing.** Every `L_i` is Hermitian, so the generator is unital and the maximally
+  mixed state `1/2^N` is stationary for any `H`. For `Ω > 0` and `γ > 0` it is the only
+  stationary state: an operator that commutes with every `n_i` is diagonal, and a diagonal
+  operator that commutes with `H` is a multiple of the identity, because the drive connects
+  all basis states. So `ρ(t) → 1/2^N`, every `⟨n_i⟩ → ½` and every `⟨n_i n_j⟩ → ¼` as
+  `t → ∞`, whatever the input and the interaction.
+
+    How fast is set by `g`, the smallest nonzero decay rate of the Liouvillian (minus the
+    largest real part among its nonzero eigenvalues): at long times the distance from `1/2^N`
+    falls as `e^(−gt)`, so the limit is reached when `gt ≫ 1`. `γt ≫ 1` does not ensure that.
+    For one atom at `Δ = 0` the closed form above gives `g = γ/4` up to `γ = 4Ω` and
+    `g = γ/4 − κ` above it, exactly. `g` is largest at `γ = 4Ω`, where it equals Ω, and falls
+    as `≈ 2Ω²/γ` beyond: at `γ = 100 Ω` and `Ωt = 10`, `γt = 1000` and `⟨n⟩ = 0.0905`.
+
+    The rest of this item is numerical, from the spectrum and the exponential of the
+    Liouvillian of one to four atoms, and is not derived here. Without interactions `g` is the smallest of the
+    single-atom values; over `Δ ∈ [0, Δ_max]` and `γ/Ω` from 0.01 to 1000 a single-atom `g`
+    was never below 1/3.5 of its `Δ = 0` value (lowest ratio at `γ = 4Ω`, `Δ = Δ_max`, where
+    `g = 0.289 Ω`), and a small detuning can raise it. Strong interactions lower `g` without bound: for `V ≫ Ω, γ` it is of order `γΩ²/V²`
+    (at `Δ = 0`, `0.667 γΩ²/V²` for two atoms and `0.432 γΩ²/V²` for three, within 2.5 % for
+    `V/Ω ≥ 10` and `γ/Ω` from 0.1 to 3), so two atoms at `γ = Ω` and `Ωt = 40` still have
+    `⟨n_i⟩ = 0.372` at `V/Ω = 10` and 0.334 at 100. A point that does reach the limit:
+    `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 puts every element of ρ within `10⁻¹²` of `1/2^N`
+    for one to four atoms, at every set of detunings in `[0, Δ_max]` that was sampled.
 
 Two idealisations are part of this choice:
 
@@ -276,7 +292,7 @@ is checked by the feature map (#499).
 | Blockade | Two atoms, `V ≫ Ω`, `Δ = γ = 0`: `⟨n_1 + n_2⟩ → sin²(√2 Ωt/2)` as `Ω/V → 0`, and the doubly excited population stays below `(Ω/V)²` (its maximum over `Ωt ≤ 20` was 0.57, 0.52 and 0.51 times that at `V/Ω` = 10, 30 and 100) |
 | What γ means | No drive: a single-atom coherence decays as `e^(−γt/2)` and `ρ_ab` as `e^(−γ t d_H(a,b)/2)` |
 | Dephasing against the drive | One atom, `Δ = 0`: the damped oscillation above, in all three cases |
-| Strong dephasing | Interactions off, `γt ≫ 1` and `Ω²t/γ ≫ 1`: every `⟨n_i⟩ → ½`; in the blockade also `γΩ²t/V² ≫ 1` |
+| Strong dephasing | `Ω > 0`, `γ > 0`, any input and any `V`: `ρ → 1/2^N` and every `⟨n_i⟩ → ½` once `gt ≫ 1`, with `g` the smallest nonzero decay rate of the Liouvillian (one atom, `Δ = 0`: `γ/4` up to `γ = 4Ω`, `γ/4 − κ` above). `γt ≫ 1` alone is not sufficient. Reached at `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 
 ## Hardware realism
