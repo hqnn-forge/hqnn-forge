@@ -86,5 +86,6 @@ nav:
       - Utilities: api/utils.md
       - Circuit primitives: api/circuits.md
       - Initialisers: api/initializers.md
+      - Rydberg arrays: api/rydberg.md
       - Benchmark: api/benchmark.md
       - Experiment records: api/experiment.md
