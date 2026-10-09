@@ -297,6 +297,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer the mean is exact but the shot noise is scaled by `|1 − p01 − p10|`, smaller than that
   of flipped shots (#486). A model trained with `readout_error` learns its offset, and
   `predict_proba` runs without it unless called inside `apply_readout_error` (#488) (#358)
+- A model specification page, `docs/rydberg-model.md`, for a simulated Rydberg-atom feature
+  map: units, Hamiltonian and its sign and ordering conventions, chain geometry, the detuning
+  encoding, readout, Markovian dephasing, the closed-form limits each convention is checked
+  against, and which assumptions a current device supports. No code yet (#495, #503)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
