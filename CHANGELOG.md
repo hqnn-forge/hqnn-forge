@@ -315,6 +315,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and requires `n_steps`. `readout(rho, *, pairs=False)` returns `⟨n_i⟩` for every atom and
   optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ. Gradients through `evolve`
   are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
+- `hqnn_forge.rydberg.RydbergFeatureMap(register, encoding, *, c6, gamma, n_steps=None,
+  interactions=True, correlations=False)`: a fixed map from a batch of inputs to the excitation
+  probabilities `⟨n_i⟩` of a Rydberg array (optionally followed by the pair correlations
+  `⟨n_i n_j⟩`), a preprocessing step like `PCANormalizer` and not an encoding layer.
+  `transform(X)` evolves the samples in chunks and returns exact expectation values, or with
+  `shots=S` and a `torch.Generator` estimates from `S` sampled bitstrings; `states(X)` returns
+  the density matrices; `get_config()` records positions, `C6`, Ω, `T`, γ, the detuning bound
+  and the solver steps as JSON-serialisable data that rebuilds the map. `n_steps` is required
+  when `gamma > 0`. `PulseEncoding(n_features, *, omega, t=None, delta_max=None)` is the
+  encoding of `docs/rydberg-model.md`, `Δ_i = Δ_max · σ(x_i)` with one input per atom, and
+  defaults to `ΩT = π` and `Δ_max = √3 Ω` (#499, #508)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
