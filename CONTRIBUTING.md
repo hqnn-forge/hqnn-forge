@@ -21,6 +21,16 @@ and consistent processes lead to better software.
 Adding a dataset loader, an encoding layer or a variational block? The conventions and required
 tests for each are in [`docs/extending.md`](docs/extending.md).
 
+## Roles
+
+*   **Maintainer** (@g8rdier): assigns issues, reviews and merges pull requests, and decides on
+    scope and releases. Questions about who should work on what go to the maintainer.
+*   **Triage collaborators:** contributors with triage access who help keep issues tidy
+    (titles, duplicates, missing information) and work on their own issues. They do not assign
+    work to others or approve merges.
+*   **Contributors:** everyone else who opens issues or pull requests. No special access is
+    needed; see [Issue First](#1-issue-first) for how to pick up an issue.
+
 ## Git Workflow
 
 ### 1. Issue First
