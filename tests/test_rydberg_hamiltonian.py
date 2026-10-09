@@ -187,17 +187,18 @@ class TestBasisOrdering:
         assert n1.diagonal().real.tolist() == [0.0, 1.0, 0.0, 1.0]
 
     def test_a_drive_on_one_atom_flips_that_tensor_factor(self) -> None:
-        """Ω on atom 1 of 3 only: ``1 ⊗ (Ω/2) X ⊗ 1``."""
+        """Ω on atom 0 of 3 only: ``(Ω/2) X ⊗ 1 ⊗ 1``.  An end atom: the middle one
+        would sit on the same factor with the bit order reversed."""
         h = rydberg_hamiltonian(
             AtomRegister.chain(3, 6.0),
-            [0.0, 3.0, 0.0],
+            [3.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
             c6=DEFAULT_C6,
             interactions=False,
         )
         x = torch.tensor([[0.0, 1.5], [1.5, 0.0]], dtype=C128)
         eye = torch.eye(2, dtype=C128)
-        assert torch.equal(h, torch.kron(torch.kron(eye, x), eye))
+        assert torch.equal(h, torch.kron(torch.kron(x, eye), eye))
 
     @pytest.mark.parametrize("interactions", [True, False])
     @pytest.mark.parametrize("shape", ["chain", "ring"])
@@ -426,12 +427,40 @@ class TestValidation:
             [1.0, 2.0],  # neither one value nor one per atom
             [[1.0, 2.0, 3.0]] * 4,  # batch of 4 against a batch of 2
             [[[1.0]]],  # two batch axes
+            [1.0],  # one-dimensional, so per-atom, and two atoms short
+            [[1.0, 2.0, 3.0]],  # batch of 1 against a batch of 2: not broadcast
+            [[1.0]],  # the same for one global omega per sample
         ],
     )
     def test_rejects_an_omega_of_the_wrong_shape(self, omega: object) -> None:
         delta = torch.zeros(2, 3, dtype=torch.float64)
         with pytest.raises(ValueError, match=r"omega must be a scalar.*\(batch, 1\)"):
             rydberg_hamiltonian(self.REGISTER, omega, delta, c6=DEFAULT_C6)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("delta_shape", [(3,), (1, 3)])
+    def test_a_one_long_omega_is_not_a_global_one_even_for_a_batch_of_1(
+        self, delta_shape: tuple[int, ...]
+    ) -> None:
+        """``(batch,)`` with ``batch = 1`` on 3 atoms: refused like any other batch size."""
+        delta = torch.zeros(delta_shape, dtype=torch.float64)
+        with pytest.raises(ValueError, match=r"omega must be a scalar.*\(batch, 1\)"):
+            rydberg_hamiltonian(self.REGISTER, torch.ones(1), delta, c6=DEFAULT_C6)
+
+    def test_a_batch_of_1_delta_is_not_broadcast_to_the_batch_of_omega(self) -> None:
+        delta = torch.zeros(1, 3, dtype=torch.float64)
+        with pytest.raises(ValueError, match=r"omega must be a scalar.*\(batch, 1\)"):
+            rydberg_hamiltonian(self.REGISTER, torch.ones(4, 1), delta, c6=DEFAULT_C6)
+
+    def test_on_one_atom_a_one_long_omega_is_the_per_atom_shape(self) -> None:
+        """``N = 1``: ``(1,)`` is ``(N,)`` and ``(batch, 1)`` is ``(batch, N)``; ``(batch,)`` raises."""
+        one = AtomRegister([[0.0, 0.0]])
+        delta = torch.tensor([[0.5], [0.25]], dtype=torch.float64)
+        shared = rydberg_hamiltonian(one, [2.0], delta, c6=DEFAULT_C6)
+        assert shared.real.tolist() == [[[0.0, 1.0], [1.0, -0.5]], [[0.0, 1.0], [1.0, -0.25]]]
+        per_sample = rydberg_hamiltonian(one, [[2.0], [4.0]], delta, c6=DEFAULT_C6)
+        assert per_sample.real.tolist() == [[[0.0, 1.0], [1.0, -0.5]], [[0.0, 2.0], [2.0, -0.25]]]
+        with pytest.raises(ValueError, match=r"omega must be a scalar.*\(batch, 1\)"):
+            rydberg_hamiltonian(one, [2.0, 4.0], delta, c6=DEFAULT_C6)
 
     def test_a_batch_long_omega_is_not_taken_for_one_value_per_sample(self) -> None:
         """Shape ``(batch,)`` is refused where it cannot be per-atom; ``(batch, 1)`` is meant."""
