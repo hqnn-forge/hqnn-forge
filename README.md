@@ -459,7 +459,8 @@ hqnn_forge/
 │                    eval-mode context manager
 ├── rydberg/         Atom register (positions, C6/r⁶ couplings, blockade radius), the dense
 │                    Rydberg Hamiltonian of a small neutral-atom array, and its time evolution
-│                    under dephasing (Lindblad solver, excitation readout)
+│                    under dephasing (Lindblad solver, excitation readout); a fixed feature map
+│                    from inputs to excitation probabilities, exact or from shots
 ├── kernels.py       Quantum kernel matrices from the encoding layers (QSVM)
 ├── noise.py         Noise channels (depolarizing, damping, flips), post hoc or during training
 └── sklearn.py       scikit-learn estimator wrapper (cross_val_score, GridSearchCV, Pipeline);
