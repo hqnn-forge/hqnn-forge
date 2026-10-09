@@ -257,7 +257,8 @@ Two idealisations are part of this choice:
 
 ## Closed-form limits
 
-Each convention above is fixed by a limit that the tests of #496 and #497 check.
+Each convention above is fixed by a limit that the tests of #496 and #497 check; the last row
+is checked by the feature map (#499).
 
 | Convention | Closed-form check |
 |---|---|
@@ -270,7 +271,7 @@ Each convention above is fixed by a limit that the tests of #496 and #497 check.
 | Blockade | Two atoms, `V ≫ Ω`, `Δ = γ = 0`: `⟨n_1 + n_2⟩ → sin²(√2 Ωt/2)` as `Ω/V → 0`, and the doubly excited population stays below `(Ω/V)²` (its maximum over `Ωt ≤ 20` was 0.57, 0.52 and 0.51 times that at `V/Ω` = 10, 30 and 100) |
 | What γ means | No drive: a single-atom coherence decays as `e^(−γt/2)` and `ρ_ab` as `e^(−γ t d_H(a,b)/2)` |
 | Dephasing against the drive | One atom, `Δ = 0`: the damped oscillation above, in all three cases |
-| Strong dephasing | `Ω²t/γ ≫ 1`: every `⟨n_i⟩ → ½` |
+| Strong dephasing | `γt ≫ 1` and `Ω²t/γ ≫ 1`: every `⟨n_i⟩ → ½` |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 
 ## Hardware realism
