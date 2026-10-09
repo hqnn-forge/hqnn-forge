@@ -243,7 +243,7 @@ with one collapse operator per atom, independent of the others.
   `⟨n_i⟩` tends to ½ whatever the input; how fast depends on the regime. For one atom at
   `Δ = 0` the slowest rate is `γ/4` up to `γ = 4Ω` and `γ/4 − κ ≈ 2Ω²/γ` above it, which falls
   as γ grows: reaching ½ needs both `γt ≫ 1` and `Ω²t/γ ≫ 1`. A detuning in `[0, Δ_max]`
-  lowers the rate by a factor of at most 2.7. Interactions lower it without such a bound: in
+  lowers the rate by a factor of at most 3.5. Interactions lower it without such a bound: in
   the blockade the doubly excited states fill at a rate of order `γΩ²/V²` (two atoms,
   `V ≫ Ω, γ`: `2γΩ²/(3V²)`), and until then `⟨n_i⟩` stays below ½ (two atoms, `γ = Ω`,
   `Ωt = 40`: 0.372 at `V/Ω = 10` and 0.334 at 100).
