@@ -457,8 +457,9 @@ hqnn_forge/
 ├── data/            Dataset loader (Kaggle credit-card fraud)
 ├── utils/           Imbalance-robust losses, checkpoint save/load, quantum-layer ablation,
 │                    eval-mode context manager
-├── rydberg/         Atom register (positions, C6/r⁶ couplings, blockade radius) and the dense
-│                    Rydberg Hamiltonian of a small neutral-atom array
+├── rydberg/         Atom register (positions, C6/r⁶ couplings, blockade radius), the dense
+│                    Rydberg Hamiltonian of a small neutral-atom array, and its time evolution
+│                    under dephasing (Lindblad solver, excitation readout)
 ├── kernels.py       Quantum kernel matrices from the encoding layers (QSVM)
 ├── noise.py         Noise channels (depolarizing, damping, flips), post hoc or during training
 └── sklearn.py       scikit-learn estimator wrapper (cross_val_score, GridSearchCV, Pipeline);

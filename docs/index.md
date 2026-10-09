@@ -42,6 +42,6 @@ reference, generated from the docstrings.
 | [`hqnn_forge.utils`](api/utils.md) | Losses, checkpoints, ablation, evaluation-mode helper |
 | [`hqnn_forge.circuits`](api/circuits.md) | Ansatz primitives |
 | [`hqnn_forge.initializers`](api/initializers.md) | Small-angle weight initialisation |
-| [`hqnn_forge.rydberg`](api/rydberg.md) | Atom register and dense Rydberg Hamiltonian of a small neutral-atom array ([model](rydberg-model.md)) |
+| [`hqnn_forge.rydberg`](api/rydberg.md) | Atom register, dense Rydberg Hamiltonian and dephasing (Lindblad) solver of a small neutral-atom array ([model](rydberg-model.md)) |
 | [`hqnn_forge.benchmark`](api/benchmark.md) | Hybrid model against its matched classical control, on identical folds |
 | [`hqnn_forge.experiment`](api/experiment.md) | JSON experiment records: save, load and rerun a benchmark |
