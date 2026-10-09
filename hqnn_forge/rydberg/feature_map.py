@@ -616,7 +616,7 @@ class RydbergFeatureMap:
           another order for another batch size.  Measured on a CPU, features
           and states of two chunkings do not differ at all up to 4 atoms;
           from 5 atoms on they differ by up to ``1e-15`` at ``gamma = 0`` and
-          by up to ``2e-16`` per solver step with dephasing (``2e-13`` at
+          by up to ``2e-16`` per solver step with dephasing (``3e-13`` at
           2000 steps), the size of the rounding error either result has
           anyway, and orders of magnitude below the splitting error.  The
           same holds for :meth:`states`.  With ``shots`` the drawn bitstrings

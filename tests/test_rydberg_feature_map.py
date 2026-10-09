@@ -578,8 +578,9 @@ class TestChunks:
     #: batched matrix products, which the BLAS may sum in another order for
     #: another batch size.  Measured (MKL, 3 to 7 atoms, ``V/Ω`` of 0.1, 1 and
     #: 10, chunk sizes 1 to 60): 0 up to 4 atoms; from 5 atoms at most 9.4e-16
-    #: at ``γ = 0`` and 1.6e-16 per solver step with dephasing, 4.1e-15 at the
-    #: 25 steps used here.  1e-12 is 250 times that, and far below everything a
+    #: at ``γ = 0`` and 2e-16 per solver step with dephasing (``γ/Ω`` of 0.1,
+    #: 0.5 and 1), 4.6e-15 at the 25 steps used here and 3e-13 at 2000.  1e-12
+    #: is 200 times the former, and far below everything a
     #: wrong chunking produces: a step count taken per chunk moves the
     #: features by 1.8e-9 (the Decision on #506), a sample in the wrong row by
     #: more than 1e-3.
