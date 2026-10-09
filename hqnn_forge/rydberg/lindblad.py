@@ -267,7 +267,9 @@ def evolve(
     * **Cost.**  One eigendecomposition per sample, then two
       ``2^N × 2^N`` matrix products per step and sample.
     * **Gradients.**  Every operation is differentiable and none is in
-      place, so gradients reach the tensors ``hamiltonian`` was built from,
+      place on a tensor that carries a gradient (the only in-place write
+      sets the constant initial state), so gradients reach the tensors
+      ``hamiltonian`` was built from,
       and they match finite differences where the spectrum of ``H`` is not
       degenerate.  They pass through ``torch.linalg.eigh``, whose backward
       pass holds ``1/(E_m − E_k)``: **where two eigenvalues coincide the
@@ -298,8 +300,10 @@ def evolve(
     h = hamiltonian.to(torch.complex128)
     # eigh reads one triangle only: a non-Hermitian matrix would be evolved as
     # another, Hermitian one without any error.
-    scale = float(h.detach().abs().max())
-    asymmetry = float((h - h.mH).detach().abs().max())
+    # An empty batch, which rydberg_hamiltonian returns for no samples, has no
+    # entry to compare (max() of nothing raises) and comes back empty.
+    scale = float(h.detach().abs().max()) if h.numel() else 0.0
+    asymmetry = float((h - h.mH).detach().abs().max()) if h.numel() else 0.0
     if asymmetry > _HERMITIAN_RTOL * scale:
         raise ValueError(
             "hamiltonian must be Hermitian; its largest |H - H†| entry is "

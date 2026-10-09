@@ -335,8 +335,9 @@ class TestDampedRabi:
         """
         ``γ ≪ Ω`` after a π pulse: ``⟨n⟩ ≈ 1 − πγ/(8Ω)``, the envelope
         ``e^(−γt/4)`` of a coherence decaying at ``γ/2``.  A dissipator twice
-        or half as strong (``√γ Z_i``, or the rate read as ``γ`` per
-        coherence) gives a slope of ``π/4`` or ``π/16`` instead of ``π/8``.
+        or half as strong (a coherence decaying at ``γ``, as with
+        ``√(γ/2) Z_i``, or at ``γ/4``) gives a slope of ``π/4`` or ``π/16``
+        instead of ``π/8``; ``√γ Z_i`` is four times as strong.
         """
         g = 0.01
         deficit = 1 - self.n_of_t(g, math.pi)
@@ -733,6 +734,18 @@ class TestBatch:
     def test_a_batch_of_one_keeps_its_batch_axis(self) -> None:
         h = self.hamiltonians()[:1]
         assert checked_evolve(h, 0.9, gamma=1.5, n_steps=5).shape == (1, 8, 8)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (1.5, 5)])
+    def test_an_empty_batch_comes_back_empty(self, gamma: float, n_steps: int | None) -> None:
+        """``rydberg_hamiltonian`` returns ``(0, 2^N, 2^N)`` for no samples; so does this."""
+        h = rydberg_hamiltonian(
+            AtomRegister.chain(self.N, 1.0), 2.0, torch.zeros(0, self.N, dtype=F64), c6=2.0
+        )
+        assert h.shape == (0, 8, 8)
+        rho = evolve(h, 0.9, gamma=gamma, n_steps=n_steps)
+        assert rho.shape == (0, 8, 8)
+        assert rho.dtype == C128
+        assert readout(rho, pairs=True).shape == (0, 6)
 
     def test_a_single_precision_hamiltonian_is_evolved_in_double_precision(self) -> None:
         h = self.hamiltonians()[0]
