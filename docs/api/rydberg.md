@@ -11,6 +11,12 @@ The model these functions implement, with its units and conventions, is specifie
     options:
       members: false
 
+## The master equation, the dissipator and the splitting
+
+::: hqnn_forge.rydberg.lindblad
+    options:
+      members: false
+
 ## The register's two uses
 
 ::: hqnn_forge.rydberg.register

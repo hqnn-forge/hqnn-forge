@@ -307,6 +307,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `2^n × 2^n` Hamiltonian of `docs/rydberg-model.md` as a `complex128` torch tensor, for one
   pulse or a batch, with atom `i` on tensor factor and PennyLane wire `i`. `DEFAULT_C6` is the
   ⁸⁷Rb `70S` value; registers above `MAX_ATOMS` = 10 atoms are refused (#496, #504)
+- `hqnn_forge.rydberg.evolve(hamiltonian, t, *, gamma=0.0, n_steps=None)`: the density matrix
+  `ρ(t)` of a batch of time-independent Hamiltonians, starting with every atom in `|g⟩`, under
+  Markovian dephasing with the local collapse operators `√γ n_i` (a single-atom coherence
+  decays at `γ/2`). `gamma=0` is exact from one eigendecomposition; `gamma>0` uses a
+  symmetric (Strang) splitting with the exact elementwise dissipator, second order in the step,
+  and requires `n_steps`. `readout(rho, *, pairs=False)` returns `⟨n_i⟩` for every atom and
+  optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ. Gradients through `evolve`
+  are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
