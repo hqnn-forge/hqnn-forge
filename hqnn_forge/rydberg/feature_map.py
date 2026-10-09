@@ -266,7 +266,8 @@ class PulseEncoding:
         -----
         ``0 < Δ_i < Δ_max`` holds for every finite input in exact arithmetic.
         In ``float64``, ``σ(x)`` rounds to 1 for ``x`` above about 37 and to
-        0 for ``x`` below about −745, where ``Δ_i`` equals a bound.
+        0 for ``x`` below about −709.8 (where ``e^(−x)`` overflows), where
+        ``Δ_i`` equals a bound.
         """
         n = self._n_features
         x = _finite_tensor(X, "X").detach()
@@ -339,8 +340,8 @@ class RydbergFeatureMap:
         :func:`~hqnn_forge.rydberg.evolve` on how to choose it); not used
         when ``gamma = 0``, where the evolution is exact.  It is passed
         unchanged to every solver call and never derived from the data, so
-        the features of a sample do not depend on which other samples it is
-        processed with.
+        the features of a sample do not depend, beyond rounding, on which
+        other samples it is processed with (see :meth:`transform`).
     interactions:
         ``False`` drops the term ``Σ_{i<j} V_ij n_i n_j`` and nothing else:
         the non-interacting control, in which feature ``i`` depends on input
@@ -364,8 +365,10 @@ class RydbergFeatureMap:
     Raises
     ------
     TypeError
-        If ``encoding`` is neither a :class:`PulseEncoding` nor a mapping, or
-        ``interactions`` or ``correlations`` is not a ``bool``.
+        If ``encoding`` is neither a :class:`PulseEncoding` nor a mapping, is
+        a mapping with a key :class:`PulseEncoding` does not take or without
+        one it requires (``n_features``, ``omega``), or ``interactions`` or
+        ``correlations`` is not a ``bool``.
     ValueError
         If the register has more than
         :data:`~hqnn_forge.rydberg.MAX_ATOMS` atoms or another number of
@@ -576,7 +579,7 @@ class RydbergFeatureMap:
         chunk_size:
             Samples evolved at a time, an integer ``>= 1``.  Default: as
             many as hold ``2^20`` matrix entries, ``max(1, 2^20 / 4^N)``.
-            The result does not depend on it.
+            It changes the result by rounding only (see the Notes).
 
         Returns
         -------
@@ -604,9 +607,22 @@ class RydbergFeatureMap:
           memory is that of one chunk: the solver holds a handful of
           ``complex128`` tensors of ``chunk_size · 4^N`` entries
           (``16 · 4^N`` bytes per sample each; 16 MiB each at the default).
-        * **Chunked and unchunked results are identical.**  Every sample is
-          evolved with the same ``T``, γ and ``n_steps`` whatever the chunk,
-          and bitstrings are drawn sample by sample in order.
+        * **Chunked and unchunked results are equal to rounding, not bit for
+          bit.**  Every sample is evolved with the same ``T``, γ and
+          ``n_steps`` whatever the chunk, and bitstrings are drawn sample by
+          sample in order, so no setting and no random draw depends on
+          ``chunk_size``.  What is left is the rounding of the solver's
+          batched matrix products, which a linear-algebra backend may sum in
+          another order for another batch size.  Measured on a CPU, features
+          and states of two chunkings do not differ at all up to 4 atoms;
+          from 5 atoms on they differ by up to ``1e-15`` at ``gamma = 0`` and
+          by up to ``2e-16`` per solver step with dephasing (``2e-13`` at
+          2000 steps), the size of the rounding error either result has
+          anyway, and orders of magnitude below the splitting error.  The
+          same holds for :meth:`states`.  With ``shots`` the drawn bitstrings
+          were the same in every chunking tried, and the estimates differed
+          by a few ``1e-16``.  For bit-for-bit repeatable features, keep
+          ``chunk_size`` (and the machine) fixed.
         * **Precision.**  ``X`` is converted to ``float64`` whatever its
           dtype.  With ``shots``, a population that rounding left slightly
           below 0 is taken as 0.
@@ -651,9 +667,9 @@ class RydbergFeatureMap:
             Inputs of shape ``(n_samples, n_features_in)``, as for
             :meth:`transform`.
         chunk_size:
-            Samples evolved at a time, as for :meth:`transform`.  It bounds
-            the solver's working memory, not the result, which holds
-            ``n_samples · 4^N`` entries.
+            Samples evolved at a time, as for :meth:`transform`: it changes
+            the states by rounding only.  It bounds the solver's working
+            memory, not the result, which holds ``n_samples · 4^N`` entries.
 
         Returns
         -------

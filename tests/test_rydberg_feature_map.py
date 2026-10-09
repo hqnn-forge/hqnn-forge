@@ -182,6 +182,18 @@ class TestPulseEncoding:
             sigmoid(-20.0), rel=1e-6
         )
 
+    def test_where_float64_rounds_a_detuning_onto_a_bound(self) -> None:
+        """
+        ``σ(x)`` is 0 once ``e^(−x)`` overflows, ``x < −ln(DBL_MAX) = −709.78``,
+        and 1 once ``e^(−x) < 2^(−53)``, ``x > 53 ln 2 = 36.74``.
+        """
+        encoding = PulseEncoding(1, omega=1.0, delta_max=1.0)
+        low, zero, high, one = encoding.detunings([[-709.0], [-711.0], [36.0], [38.0]])[:, 0]
+        assert low.item() == pytest.approx(math.exp(-709.0), rel=1e-12)  # 1.2e-308, not 0
+        assert zero.item() == 0.0
+        assert 1.0 - high.item() == pytest.approx(math.exp(-36.0), rel=0.5)  # 2.3e-16, not 0
+        assert one.item() == 1.0
+
     def test_accepts_numpy_and_float32_inputs_in_double_precision(self) -> None:
         encoding = PulseEncoding(2, omega=1.0, delta_max=1.0)
         from_numpy = encoding.detunings(np.array([[0.3, -1.2]]))
@@ -559,44 +571,113 @@ class TestZeroTime:
 
 
 class TestChunks:
-    """Chunking bounds the working memory and changes no number."""
+    """Chunking bounds the working memory and changes the numbers by rounding only."""
+
+    #: Largest difference between two chunkings of the same inputs.  No setting
+    #: depends on the chunk, so what is left is the rounding of the solver's
+    #: batched matrix products, which the BLAS may sum in another order for
+    #: another batch size.  Measured (MKL, 3 to 7 atoms, ``V/Ω`` of 0.1, 1 and
+    #: 10, chunk sizes 1 to 60): 0 up to 4 atoms; from 5 atoms at most 9.4e-16
+    #: at ``γ = 0`` and 1.6e-16 per solver step with dephasing, 4.1e-15 at the
+    #: 25 steps used here.  1e-12 is 250 times that, and far below everything a
+    #: wrong chunking produces: a step count taken per chunk moves the
+    #: features by 1.8e-9 (the Decision on #506), a sample in the wrong row by
+    #: more than 1e-3.
+    ROUNDING = 1e-12
 
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (OMEGA, 25)])
-    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 6, 7, 50])
-    def test_chunked_and_unchunked_features_are_identical(
-        self, gamma: float, n_steps: int | None, chunk_size: int
+    @pytest.mark.parametrize("n_atoms", [3, 4, 5, 6])
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 6, 7, 50, None])
+    def test_chunked_and_unchunked_results_are_equal_to_rounding(
+        self, n_atoms: int, gamma: float, n_steps: int | None, chunk_size: int | None
     ) -> None:
-        """Bit for bit, also for a last chunk as long as the register (4 of 7 with size 3)."""
+        """
+        Up to 6 atoms, the largest register of the model page.
+
+        Chunks of 3 over the 7 samples are 3, 3 and 1; of 4, 4 and 3; of 6, 6
+        and 1.  A chunk as long as the register (4 samples of 4 atoms, 3 of 3,
+        6 of 6) must not be read along the atoms.  Not ``torch.equal``: from
+        5 atoms on two chunkings differ in the last bits (see ``ROUNDING``).
+        """
         feature_map = RydbergFeatureMap(
-            chain(4),
-            PulseEncoding(4, omega=OMEGA),
+            chain(n_atoms),
+            PulseEncoding(n_atoms, omega=OMEGA),
             c6=DEFAULT_C6,
             gamma=gamma,
             n_steps=n_steps,
             correlations=True,
         )
-        x = inputs(7, 4, seed=6)
+        x = inputs(7, n_atoms, seed=6)
         whole = feature_map.transform(x, chunk_size=7)
-        assert torch.equal(feature_map.transform(x, chunk_size=chunk_size), whole)
-        assert torch.equal(feature_map.transform(x), whole)
-        assert torch.equal(
-            feature_map.states(x, chunk_size=chunk_size), feature_map.states(x, chunk_size=7)
-        )
+        chunked = feature_map.transform(x, chunk_size=chunk_size)
+        assert (chunked - whole).abs().max().item() <= self.ROUNDING
+        states = feature_map.states(x, chunk_size=chunk_size)
+        assert (states - feature_map.states(x, chunk_size=7)).abs().max().item() <= self.ROUNDING
+        # The samples differ by far more than the bound, so it is not met by accident.
+        assert (whole[1:] - whole[:-1]).abs().max(dim=1).values.min().item() > 1e-3
 
-    def test_chunked_and_unchunked_shot_estimates_are_identical(self) -> None:
-        """Bitstrings are drawn sample by sample, so the chunks do not move the stream."""
+    @pytest.mark.parametrize("n_atoms", [5, 6])
+    @pytest.mark.parametrize("chunk_size", [1, 3, 4])
+    def test_every_row_of_a_chunked_result_is_its_own_sample(
+        self, n_atoms: int, chunk_size: int
+    ) -> None:
+        """
+        Row ``b`` against ``exp(−iHT)|g…g⟩`` of sample ``b`` alone, with ``H``
+        from Kronecker products: a reference that knows no batch and no chunk.
+        """
         feature_map = RydbergFeatureMap(
-            chain(3), PulseEncoding(3, omega=OMEGA), c6=DEFAULT_C6, gamma=0.0, correlations=True
+            chain(n_atoms),
+            PulseEncoding(n_atoms, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=0.0,
+            correlations=True,
         )
-        x = inputs(7, 3, seed=7)
+        x = inputs(7, n_atoms, seed=6)
+        positions = [BLOCKADE_RADIUS * i for i in range(n_atoms)]
+        delta_max = math.sqrt(3.0) * OMEGA
+        numbers = [number_operator(i, n_atoms) for i in range(n_atoms)]
+        pairs = [(i, j) for i in range(n_atoms) for j in range(i + 1, n_atoms)]
+        features = feature_map.transform(x, chunk_size=chunk_size)
+        states = feature_map.states(x, chunk_size=chunk_size)
+        for b in range(7):
+            deltas = [delta_max * sigmoid(v) for v in x[b].tolist()]
+            psi = reference_state(positions, OMEGA, deltas, DEFAULT_C6, math.pi / OMEGA)
+            expected = [(psi.conj() @ numbers[i] @ psi).real.item() for i in range(n_atoms)]
+            expected += [
+                (psi.conj() @ numbers[i] @ numbers[j] @ psi).real.item() for i, j in pairs
+            ]
+            assert features[b].tolist() == pytest.approx(expected, abs=1e-11)
+            assert (states[b] - torch.outer(psi, psi.conj())).abs().max().item() < 1e-11
+
+    @pytest.mark.parametrize("n_atoms", [3, 5, 6])
+    def test_chunked_and_unchunked_shot_estimates_come_from_the_same_bitstrings(
+        self, n_atoms: int
+    ) -> None:
+        """
+        Bitstrings are drawn sample by sample, so the chunks do not move the stream.
+
+        ``estimate · shots`` is the number of bitstrings with the atom (or the
+        pair) excited, an integer: the counts are the same in every chunking,
+        and the estimates equal to the rounding of the last division and sum.
+        """
+        shots = 200
+        feature_map = RydbergFeatureMap(
+            chain(n_atoms),
+            PulseEncoding(n_atoms, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=0.0,
+            correlations=True,
+        )
+        x = inputs(7, n_atoms, seed=7)
         whole = feature_map.transform(
-            x, shots=200, generator=torch.Generator().manual_seed(11), chunk_size=7
+            x, shots=shots, generator=torch.Generator().manual_seed(11), chunk_size=7
         )
         for chunk_size in (1, 3):
             chunked = feature_map.transform(
-                x, shots=200, generator=torch.Generator().manual_seed(11), chunk_size=chunk_size
+                x, shots=shots, generator=torch.Generator().manual_seed(11), chunk_size=chunk_size
             )
-            assert torch.equal(chunked, whole)
+            assert torch.equal(torch.round(chunked * shots), torch.round(whole * shots))
+            assert (chunked - whole).abs().max().item() <= self.ROUNDING
 
     @pytest.mark.parametrize("method", ["transform", "states"])
     def test_the_solver_sees_at_most_chunk_size_samples(
@@ -980,6 +1061,23 @@ class TestValidation:
     @pytest.mark.parametrize("encoding", [None, 4, "logistic", [2, 1.0]])
     def test_rejects_another_kind_of_encoding(self, encoding: Any) -> None:
         with pytest.raises(TypeError, match="encoding must be a PulseEncoding"):
+            RydbergFeatureMap(chain(2), encoding, c6=DEFAULT_C6, gamma=0.0)
+
+    @pytest.mark.parametrize(
+        ("encoding", "message"),
+        [
+            (
+                {"n_features": 2, "omega": OMEGA, "scale": 2.0},
+                "unexpected keyword argument 'scale'",
+            ),
+            ({"n_features": 2}, "missing 1 required keyword-only argument: 'omega'"),
+            ({"omega": OMEGA}, "missing 1 required positional argument: 'n_features'"),
+        ],
+    )
+    def test_an_encoding_dict_with_a_wrong_key_is_a_type_error(
+        self, encoding: dict[str, Any], message: str
+    ) -> None:
+        with pytest.raises(TypeError, match=message):
             RydbergFeatureMap(chain(2), encoding, c6=DEFAULT_C6, gamma=0.0)
 
     def test_positions_in_place_of_a_register_are_validated_as_a_register(self) -> None:
