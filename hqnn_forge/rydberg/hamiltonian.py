@@ -128,8 +128,9 @@ def rydberg_hamiltonian(
         per atom with the atoms on the **last** axis.  Accepted shapes are
         ``()``, ``(N,)``, ``(batch, N)`` and ``(batch, 1)``, the last being
         one global Ω per sample.  A one-dimensional ``omega`` is always read
-        along the atoms, never along the batch.  The sign is not restricted;
-        a negative Ω is a drive of phase π.
+        along the atoms, never along the batch, so it has length ``N``: shape
+        ``(batch,)`` raises unless ``batch == N``, also for a batch of 1.  The
+        sign is not restricted; a negative Ω is a drive of phase π.
     delta:
         Detuning Δ_i in rad/µs, one per atom: shape ``(N,)``, or
         ``(batch, N)`` for a batch.
@@ -160,8 +161,9 @@ def rydberg_hamiltonian(
     ValueError
         If the register has more than :data:`MAX_ATOMS` atoms; if ``delta``
         or ``omega`` has another shape than those above or their batch sizes
-        differ; if either holds a NaN or an infinity; or if ``c6`` is not a
-        finite number.
+        differ (a batch of 1 is not broadcast to another batch size); if
+        either holds a NaN or an infinity; or if ``c6`` is not a finite
+        number.
 
     Notes
     -----
@@ -211,11 +213,16 @@ def rydberg_hamiltonian(
             f"delta must have shape ({n},) or (batch, {n}), one detuning per atom; "
             f"got shape {tuple(delta.shape)}."
         )
-    try:
-        shape = torch.broadcast_shapes(omega.shape, delta.shape)
-    except RuntimeError:
-        shape = None
-    if shape is None or len(shape) > 2 or shape[-1] != n:
+    # The accepted shapes are checked one by one, not by broadcasting: that
+    # would also take an omega of shape (1,) for a global one on N > 1 atoms,
+    # and a batch of 1 for any other batch size.
+    batch = {int(tensor.shape[0]) for tensor in (omega, delta) if tensor.ndim == 2}
+    atoms_last = (
+        omega.ndim == 0
+        or (omega.ndim == 1 and omega.shape[0] == n)
+        or (omega.ndim == 2 and omega.shape[1] in (1, n))
+    )
+    if not atoms_last or len(batch) > 1:
         raise ValueError(
             f"omega must be a scalar or have its atoms on the last axis, with shape ({n},), "
             f"(batch, {n}) or (batch, 1), and match the batch of delta "
@@ -223,6 +230,7 @@ def rydberg_hamiltonian(
             f"One global omega per sample has shape (batch, 1)."
         )
     # Both now (*batch, n) with the atoms last; *batch is () or (batch,).
+    shape = (*batch, n)
     omega = omega.to(delta.device).expand(shape)
     delta = delta.expand(shape)
 
