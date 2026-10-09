@@ -457,6 +457,8 @@ hqnn_forge/
 ├── data/            Dataset loader (Kaggle credit-card fraud)
 ├── utils/           Imbalance-robust losses, checkpoint save/load, quantum-layer ablation,
 │                    eval-mode context manager
+├── rydberg/         Atom register (positions, C6/r⁶ couplings, blockade radius) and the dense
+│                    Rydberg Hamiltonian of a small neutral-atom array
 ├── kernels.py       Quantum kernel matrices from the encoding layers (QSVM)
 ├── noise.py         Noise channels (depolarizing, damping, flips), post hoc or during training
 └── sklearn.py       scikit-learn estimator wrapper (cross_val_score, GridSearchCV, Pipeline);
@@ -623,3 +625,6 @@ APA.
 - Spall (1992) — *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation*
 - Spall (1998) — *Implementation of the simultaneous perturbation algorithm for stochastic optimization*
 - Kull et al. (2019) — *Beyond temperature scaling: obtaining well-calibrated multi-class probabilities with Dirichlet calibration*
+- Bernien et al. (2017) — *Probing many-body dynamics on a 51-atom quantum simulator*
+- Wurtz et al. (2023) — *Aquila: QuEra's 256-qubit neutral-atom quantum computer*
+- Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
