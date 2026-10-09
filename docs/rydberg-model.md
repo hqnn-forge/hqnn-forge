@@ -241,25 +241,32 @@ with one collapse operator per atom, independent of the others.
   (`γ/Ω` from 0.03 to 10); that is an observation, not a proof.
 - **Strong dephasing.** Every `L_i` is Hermitian, so the generator is unital and the maximally
   mixed state `1/2^N` is stationary for any `H`. For `Ω > 0` and `γ > 0` it is the only
-  stationary state: an operator that commutes with every `n_i` is diagonal, and a diagonal
-  operator that commutes with `H` is a multiple of the identity, because the drive connects
-  all basis states. So `ρ(t) → 1/2^N`, every `⟨n_i⟩ → ½` and every `⟨n_i n_j⟩ → ¼` as
-  `t → ∞`, whatever the input and the interaction.
+  stationary state. The Hamiltonian part does not change the purity and the dissipator gives
+  `d/dt Tr ρ² = −γ Σ_i ‖[n_i, ρ]‖²` (Hilbert-Schmidt norm), so a stationary state commutes
+  with every `n_i`. An operator that commutes with every `n_i` is diagonal, and the dissipator
+  vanishes on it, so a stationary one also commutes with `H`; a diagonal operator that
+  commutes with `H` is a multiple of the identity, because the drive connects all basis
+  states. So `ρ(t) → 1/2^N`, every `⟨n_i⟩ → ½` and every `⟨n_i n_j⟩ → ¼` as `t → ∞`,
+  whatever the input and the interaction.
 
     How fast is set by `g`, the smallest nonzero decay rate of the Liouvillian (minus the
     largest real part among its nonzero eigenvalues): at long times the distance from `1/2^N`
-    falls as `e^(−gt)`, so the limit is reached when `gt ≫ 1`. `γt ≫ 1` does not ensure that.
-    For one atom at `Δ = 0` the closed form above gives `g = γ/4` up to `γ = 4Ω` and
-    `g = γ/4 − κ` above it, exactly. `g` is largest at `γ = 4Ω`, where it equals Ω, and falls
-    as `≈ 2Ω²/γ` beyond: at `γ = 100 Ω` and `Ωt = 10`, `γt = 1000` and `⟨n⟩ = 0.0905`.
+    falls as `e^(−gt)`, times a power of `t` where that eigenvalue is defective (`t e^(−gt)`
+    at critical damping, `γ = 4Ω` and `Δ = 0`), so the limit is reached when `gt ≫ 1`.
+    `γt ≫ 1` does not ensure that. For one atom at `Δ = 0` the closed form above gives
+    `g = γ/4` up to `γ = 4Ω` and `g = γ/4 − κ` above it, exactly. `g` is largest at `γ = 4Ω`,
+    where it equals Ω, and falls beyond it, approaching `2Ω²/γ` only for `γ ≫ 4Ω` (the exact
+    `γ/4 − κ` is 1.64 times that at `γ = 4.1 Ω`, 1.04 times at `10 Ω`): at `γ = 100 Ω` and
+    `Ωt = 10`, `γt = 1000` and `⟨n⟩ = 0.0905`.
 
     The rest of this item is numerical, from the spectrum and the exponential of the
-    Liouvillian of one to four atoms, and is not derived here. Without interactions `g` is the smallest of the
-    single-atom values; over `Δ ∈ [0, Δ_max]` and `γ/Ω` from 0.01 to 1000 a single-atom `g`
-    was never below 1/3.5 of its `Δ = 0` value (lowest ratio at `γ = 4Ω`, `Δ = Δ_max`, where
-    `g = 0.289 Ω`), and a small detuning can raise it. Strong interactions lower `g` without bound: for `V ≫ Ω, γ` it is of order `γΩ²/V²`
-    (at `Δ = 0`, `0.667 γΩ²/V²` for two atoms and `0.432 γΩ²/V²` for three, within 2.5 % for
-    `V/Ω ≥ 10` and `γ/Ω` from 0.1 to 3), so two atoms at `γ = Ω` and `Ωt = 40` still have
+    Liouvillian of one to four atoms, and is not derived here. Without interactions `g` is the
+    smallest of the single-atom values; over `Δ ∈ [0, Δ_max]` and `γ/Ω` from 0.01 to 1000 a
+    single-atom `g` was never below 1/3.5 of its `Δ = 0` value (lowest ratio at `γ = 4Ω`,
+    `Δ = Δ_max`, where `g = 0.289 Ω`), and a small detuning can raise it. Strong interactions
+    lower `g` without bound: for `V ≫ Ω, γ` it is of order `γΩ²/V²` (at `Δ = 0`,
+    `0.667 γΩ²/V²` for two atoms and `0.432 γΩ²/V²` for three, within 2.5 % for `V/Ω ≥ 10`
+    and `γ/Ω` from 0.1 to 3), so two atoms at `γ = Ω` and `Ωt = 40` still have
     `⟨n_i⟩ = 0.372` at `V/Ω = 10` and 0.334 at 100. A point that does reach the limit:
     `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 puts every element of ρ within `10⁻¹²` of `1/2^N`
     for one to four atoms, at every set of detunings in `[0, Δ_max]` that was sampled.
