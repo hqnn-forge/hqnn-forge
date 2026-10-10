@@ -241,6 +241,76 @@ class TestFisherDiscriminantRatio:
             8.0, abs=1e-13
         )
 
+    def test_unequal_class_sizes_by_hand_and_not_the_other_two_conventions(self) -> None:
+        """
+        Class 0 is ``{−1, 1}`` and class 1 ``{2, 4, 6}``: the means differ by
+        4, the sums of squares within the classes are 2 and 8, the pooled
+        variance is ``(2 + 8)/(5 − 2)`` and the ratio ``16 · 3/10 = 4.8``.
+        The sums themselves in the denominator would give ``16/10 = 1.6``,
+        the sum of the class variances ``16/(2/1 + 8/2) = 2.67``.
+        """
+        features = torch.tensor([[-1.0], [1.0], [2.0], [4.0], [6.0]], dtype=F64)
+        labels = torch.tensor([0, 0, 1, 1, 1])
+        assert fisher_discriminant_ratio(features, labels) == pytest.approx(4.8, abs=1e-13)
+
+    @pytest.mark.parametrize("copies", [1, 2, 10, 1000])
+    def test_repeating_every_sample_approaches_a_limit_instead_of_scaling(
+        self, copies: int
+    ) -> None:
+        """
+        The five points above, each ``k`` times: the means are unchanged, the
+        sums of squares are ``10 k`` and ``M − 2 = 5k − 2``, so the ratio is
+        ``16 (5k − 2)/(10 k)``, which rises from 4.8 to the limit 8 (the
+        ratio with the variance over ``M``).  It is not proportional to
+        ``M`` or to ``1/M``.
+        """
+        features = torch.tensor([[-1.0], [1.0], [2.0], [4.0], [6.0]], dtype=F64).repeat(copies, 1)
+        labels = torch.tensor([0, 0, 1, 1, 1]).repeat(copies)
+        expected = 16.0 * (5 * copies - 2) / (10 * copies)
+        assert fisher_discriminant_ratio(features, labels) == pytest.approx(expected, rel=1e-12)
+
+    def test_unequal_class_covariances_are_weighted_by_class_size(self) -> None:
+        """
+        Class covariances exactly ``σ0² 1`` and ``σ1² 1``: the pooled one is
+        ``((n0 − 1) σ0² + (n1 − 1) σ1²)/(M − 2) · 1``, so the larger class
+        counts for more, and exchanging the two sizes changes the ratio
+        (here by ``825/305``, a factor of 2.7).  With the two covariances summed it would
+        be ``|δ|²/(σ0² + σ1²)`` for both.
+        """
+        delta, norm2 = [1.2, -0.5, 2.0], 1.2**2 + 0.5**2 + 2.0**2
+        values = []
+        for n0, n1 in [(25, 90), (90, 25)]:
+            features = torch.cat(
+                [exact_blob(n0, [0.0] * 3, 1.0, seed=20), exact_blob(n1, delta, 3.0, seed=21)]
+            )
+            labels = torch.tensor([0] * n0 + [1] * n1)
+            pooled = ((n0 - 1) * 1.0 + (n1 - 1) * 9.0) / (n0 + n1 - 2)
+            values.append(fisher_discriminant_ratio(features, labels))
+            assert values[-1] == pytest.approx(norm2 / pooled, rel=1e-10)
+        assert values[1] / values[0] == pytest.approx(825 / 305, rel=1e-10)
+
+    @pytest.mark.parametrize(("n0", "n1", "delta"), [(45, 5, 0.0), (20, 20, 0.0), (45, 5, 1.0)])
+    def test_the_mean_over_gaussian_samples_is_the_documented_one(
+        self, n0: int, n1: int, delta: float
+    ) -> None:
+        """
+        ``E[J] = (M − 2)/(M − d − 3) · (Δ² + d M/(n0 n1))`` for Gaussian
+        classes of covariance 1 whose means differ by ``delta`` along the
+        first of ``d = 4`` features: 0.99 for 45 against 5 samples without
+        any class difference and 0.46 for 20 against 20, not 0.  The mean of
+        3000 samples was within 3.2 % of it over eight seeds in each of the
+        three cases; the tolerance is 6 %, and the factor in front alone is
+        12 % at ``M = 50``.
+        """
+        d, draws = 4, 3000
+        m = n0 + n1
+        expected = (m - 2) / (m - d - 3) * (delta**2 + d * m / (n0 * n1))
+        labels = torch.tensor([0] * n0 + [1] * n1)
+        samples = normal(draws * m, d, seed=22).reshape(draws, m, d)
+        samples[:, n0:, 0] += delta
+        mean = sum(fisher_discriminant_ratio(sample, labels) for sample in samples) / draws
+        assert mean == pytest.approx(expected, rel=6e-2)
+
     @pytest.mark.parametrize(("n0", "n1"), [(40, 40), (25, 90)])
     def test_two_blobs_give_the_squared_distance_in_units_of_sigma(self, n0: int, n1: int) -> None:
         """

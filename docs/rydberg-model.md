@@ -315,7 +315,7 @@ definitions, derivations and edge cases are in that module's docstring.
 |---|---|---|---|
 | State kernel `K(x, x′) = Tr[ρ(x) ρ(x′)]`, and its centred alignment with the labels | `kernel_from_density_matrices`, `kernel_target_alignment` | `K ∈ [0, 1]`, purity on the diagonal; alignment in `[0, 1]` | An upper bound on what any measurement of these states could distinguish (below) |
 | Pairwise feature distances `‖F(x) − F(x′)‖`, within and between classes, and the ratio of the two means | `pairwise_distances` | Distances in `[0, √N]`; ratio in `(0, ∞]`, about 1 without class information | How far apart this readout puts two inputs, in units of excitation probability: the scale to hold against the shot error `≤ 1/(2√S)` of [Readout](#readout) |
-| Fisher discriminant ratio along the best linear direction, `J = δᵀ S_w⁻¹ δ` | `fisher_discriminant_ratio` | `[0, ∞]`, 0 for equal class means | How far apart a linear function of the readout puts the class means, in units of the spread within the classes |
+| Fisher discriminant ratio along the best linear direction, `J = δᵀ S_w⁻¹ δ` with the pooled within-class covariance `S_w` (the squared Mahalanobis distance between the class means) | `fisher_discriminant_ratio` | `[0, ∞]`, 0 for equal class means | How far apart a linear function of the readout puts the class means, in units of the spread within the classes |
 | Effective rank of the feature covariance | `effective_rank` | `[1, min(N, M − 1)]` for `M` samples | In how many directions the readout varies: features collapsing onto fewer directions lower it |
 | Centred alignment of the linear feature kernel `F Fᵀ` with the labels | `linear_feature_kernel`, `kernel_target_alignment` | `[0, 1]`, 1 for features that are affine in the label | How much of the readout's variation is the label, to set beside the alignment of the state kernel |
 
@@ -350,7 +350,11 @@ definitions, derivations and edge cases are in that module's docstring.
   sample with its labels, without held-out data, a model or a threshold. The Fisher ratio and
   the feature alignment see linear structure only, which a nonlinear head is not limited to,
   and both grow on a small sample without any class difference behind them (`J = ∞` with fewer
-  samples than features plus two). The Fisher ratio gives an error rate, `Φ(−√J / 2)`, only
+  samples than features plus two). For `M` samples of `d` features in classes of `n0` and `n1`
+  that do not differ, `J` is about `d · M/(n0 n1)` on average, roughly `d` over the size of
+  the rarer class: values of `J` from sets of different size or class balance compare only
+  where they are large against that level, and with unequal class covariances `J` weights the
+  larger class more. The Fisher ratio gives an error rate, `Φ(−√J / 2)`, only
   for two Gaussian classes of equal covariance and prior, which excitation probabilities are
   not.
 - **Under strong dephasing every distance falls to 0,** since every `⟨n_i⟩ → ½` (see
