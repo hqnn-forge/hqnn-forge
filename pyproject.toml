@@ -77,6 +77,14 @@ dev = [
     # hqnn_forge itself stays pure NumPy. 1.13 is the first release that installs
     # alongside numpy>=2.0. pennylane brings scipy too, but only by coincidence.
     "scipy>=1.13",
+    # Independent reference for the Rydberg solver in tests/test_rydberg_reference.py
+    # (mesolve); hqnn_forge itself never imports it. The test-lowest job installs
+    # these floors next to the newest scipy, which pennylane brings there: 5.1.1 is
+    # the first release that imports with scipy>=1.17 (5.1.0 and older import
+    # scipy.special.sph_harm, removed in 1.17), and it has cp311 to cp313 wheels and
+    # runs on numpy 2.0. First cp314 wheels: 5.2.2.
+    "qutip>=5.1.1; python_version < '3.14'",
+    "qutip>=5.2.2; python_version >= '3.14'",
 ]
 sklearn = [
     # hqnn_forge.sklearn needs validate_data and __sklearn_tags__, both new in 1.6.
