@@ -339,7 +339,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hqnn_forge.models.LinearClassifier(n_input_features, *, init_seed=None)`: one affine map to a
   logit with the classifiers' interface (`predict_proba`, `get_config`, checkpoints), `n + 1`
   parameters; trained with `BCEWithLogitsLoss` it is a logistic regression. It is the linear
-  head `ClassicalBaseline`, which needs a hidden layer, cannot be (#501)
+  head `ClassicalBaseline`, which needs a hidden layer, cannot be (#501, #517)
 - `examples/benchmark_rydberg_features.py`: a benchmark runner for the Rydberg feature map. On
   identical folds, validation splits and seeds it trains a linear and a small MLP head on the
   interacting features (arm A), on the same map with `interactions=False` (B), on the
@@ -352,7 +352,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (scores, feature dimension, parameters, simulation and training seconds, separation
   measures, seeds, fold indices, environment). Arm B is a classical model, so `A − B` measures
   what interaction-induced mixing of inputs adds, not "quantum" against "classical";
-  `--quick` is a smoke test (#501)
+  `--quick` is a smoke test (#501, #517)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
