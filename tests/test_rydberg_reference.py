@@ -284,8 +284,10 @@ class TestReferenceConventions:
 
             ⟨n⟩(t) = ½ − ½ e^(−γt/4) [cos λt + γ/(4λ) · sin λt],    λ = √(Ω² − γ²/16)
 
-        With a collapse operator of rate ``2γ`` or ``γ/2`` (``√γ Z``, or the
-        rate left outside the square root) the envelope would differ.
+        Another collapse operator acts as another rate and the envelope
+        differs: ``√γ Z`` dephases like ``√(4γ) n``, and ``γ n``, the rate left
+        outside the square root, like ``√(γ²) n`` (``γ²`` is 0.36 and 9 here,
+        for ``γ`` = 0.6 and 3).
         """
         omega, t = 2.0, 2.2
         gamma = gamma_over_omega * omega
