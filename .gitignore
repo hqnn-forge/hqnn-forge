@@ -53,5 +53,8 @@ CLAUDE.md
 # Datasets (not redistributable; see hqnn_forge.data)
 data/raw/
 
+# Feature cache of examples/benchmark_rydberg_features.py (its default --cache-dir)
+rydberg_features_cache/
+
 # mkdocs build output
 site/

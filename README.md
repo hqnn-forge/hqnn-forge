@@ -430,6 +430,12 @@ total. A seeded hybrid (`init_seed`) gets a control seeded with the same seed.
 Switching a trained model's circuit off with `disable_quantum_layer` measures something
 else, how much that model depends on the circuit.
 
+`LinearClassifier(n_input_features)` is the smallest model with the same interface: one affine
+map to a logit, `n + 1` parameters, a logistic regression when trained with
+`BCEWithLogitsLoss`. `examples/benchmark_rydberg_features.py` uses it and a small
+`ClassicalBaseline` as the heads of a fixed feature map (the Rydberg map with and without
+interactions, the inputs themselves, a frozen gate-based circuit) on identical folds.
+
 The API reference documents each architecture's constructor and the pieces behind it:
 [models](https://hqnn-forge.github.io/hqnn-forge/api/models/),
 [encoding layers](https://hqnn-forge.github.io/hqnn-forge/api/encoding/),
@@ -448,7 +454,7 @@ hqnn_forge/
 ├── circuits/        Reusable VQC ansatz primitives
 ├── initializers/    Small-angle (restricted-variance) weight initialisation
 ├── preprocessing/   PCA + normalisation, stratified folds, SMOTE (no sklearn runtime dep)
-├── models/          Full hybrid architectures
+├── models/          Full hybrid architectures, their MLP control and a linear classifier
 ├── training/        Train/validate loop with early stopping
 ├── evaluation/      Decision threshold search, confusion metrics, PR-AUC, score per
 │                    parameter, paired Wilcoxon tests, plots (needs matplotlib)
