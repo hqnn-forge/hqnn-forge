@@ -326,6 +326,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when `gamma > 0`. `PulseEncoding(n_features, *, omega, t=None, delta_max=None)` is the
   encoding of `docs/rydberg-model.md`, `Δ_i = Δ_max · σ(x_i)` with one input per atom, and
   defaults to `ΩT = π` and `Δ_max = √3 Ω` (#499, #508)
+- `hqnn_forge.diagnostics.separation_measures(F, y)`: measures of how a fixed feature matrix
+  separates inputs and two classes, without a trained head: the mean pairwise Euclidean
+  distance within and between classes and their ratio (`pairwise_distances` returns the two
+  sets of distances), `fisher_discriminant_ratio` along the best linear direction (the squared
+  Mahalanobis distance between the class means, with the pooled within-class covariance),
+  `effective_rank` of the feature covariance (exponential of the entropy of its normalised
+  eigenvalues), and the alignment of `linear_feature_kernel(F)` = `F Fᵀ` with the labels
+  through `kernel_target_alignment`. An undefined ratio is NaN and perfect separation `inf`.
+  `docs/rydberg-model.md` states which statement each supports for the Rydberg feature map
+  next to its state kernel, and that none predicts the score of a head (#500, #516)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's
