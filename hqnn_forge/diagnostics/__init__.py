@@ -3,6 +3,8 @@ hqnn_forge.diagnostics
 ======================
 Tools for inspecting the quantum side of a hybrid model without reading the
 circuit source: what the circuit costs on hardware, and later, how it trains.
+The separation measures apply to any fixed feature matrix, whatever produced
+it.
 
 Exported symbols
 ----------------
@@ -27,6 +29,13 @@ expressibility                KL divergence of the fidelity distribution from Ha
 entangling_capability         Mean Meyer–Wallach entanglement over sampled states.
 meyer_wallach                 Meyer–Wallach Q of given state vectors.
 ExpressibilityResult, EntanglingCapabilityResult  Their results.
+separation_measures           Every scalar separation measure of a feature matrix and its labels.
+SeparationMeasures            Result of separation_measures.
+pairwise_distances            Pairwise feature distances, within and between classes, and their ratio.
+PairwiseDistances             Result of pairwise_distances.
+fisher_discriminant_ratio     Fisher discriminant ratio along the best linear direction.
+effective_rank                Effective rank of the feature covariance (exponential spectral entropy).
+linear_feature_kernel         The linear kernel F Fᵀ, for kernel_target_alignment.
 """
 
 from hqnn_forge.diagnostics.circuit import (
@@ -58,6 +67,15 @@ from hqnn_forge.diagnostics.gradients import (
     gradient_variance,
     gradient_variance_sweep,
 )
+from hqnn_forge.diagnostics.separation import (
+    PairwiseDistances,
+    SeparationMeasures,
+    effective_rank,
+    fisher_discriminant_ratio,
+    linear_feature_kernel,
+    pairwise_distances,
+    separation_measures,
+)
 
 __all__: list[str] = [
     "LOGICAL_GATE_SET",
@@ -67,18 +85,25 @@ __all__: list[str] = [
     "ExpressibilityResult",
     "FisherSpectrum",
     "GradientVarianceResult",
+    "PairwiseDistances",
+    "SeparationMeasures",
     "circuit_summary",
     "count_inert_parameters",
     "count_inert_weights",
     "draw_circuit",
     "effective_dimension",
     "effective_dimension_from_spectra",
+    "effective_rank",
     "entangling_capability",
     "expressibility",
+    "fisher_discriminant_ratio",
     "fisher_information_matrix",
     "fisher_information_spectrum",
     "format_sweep",
     "gradient_variance",
     "gradient_variance_sweep",
+    "linear_feature_kernel",
     "meyer_wallach",
+    "pairwise_distances",
+    "separation_measures",
 ]
