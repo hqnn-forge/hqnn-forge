@@ -453,7 +453,8 @@ hqnn_forge/
 ├── evaluation/      Decision threshold search, confusion metrics, PR-AUC, score per
 │                    parameter, paired Wilcoxon tests, plots (needs matplotlib)
 ├── diagnostics/     Circuit cost (depth, gates, inert parameters), gradient variance,
-│                    Fisher information and effective dimension
+│                    Fisher information and effective dimension; separation measures of a
+│                    fixed feature matrix (distances, Fisher ratio, effective rank, alignment)
 ├── data/            Dataset loader (Kaggle credit-card fraud)
 ├── utils/           Imbalance-robust losses, checkpoint save/load, quantum-layer ablation,
 │                    eval-mode context manager
@@ -630,3 +631,5 @@ APA.
 - Bernien et al. (2017) — *Probing many-body dynamics on a 51-atom quantum simulator*
 - Wurtz et al. (2023) — *Aquila: QuEra's 256-qubit neutral-atom quantum computer*
 - Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
+- Fisher (1936) — *The use of multiple measurements in taxonomic problems*
+- Roy & Vetterli (2007) — *The effective rank: a measure of effective dimensionality*

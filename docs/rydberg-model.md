@@ -302,6 +302,72 @@ is checked by the feature map (#499).
 | Strong dephasing | `Ω > 0`, `γ > 0`, any input and any `V`: `ρ → 1/2^N` and every `⟨n_i⟩ → ½` once `gt ≫ 1`, with `g` the smallest nonzero decay rate of the Liouvillian (one atom, `Δ = 0`: `γ/4` up to `γ = 4Ω`, `γ/4 − κ` above). `γt ≫ 1` alone is not sufficient. Reached at `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 
+## Separation measures
+
+A classification score does not say why a fixed feature map helps or fails. The measures below
+are properties of the map on a set of inputs, computed without any trained head: on the states
+`ρ(x)` (`RydbergFeatureMap.states`), or on the feature matrix `F` the head actually sees
+(`RydbergFeatureMap.transform`, one row per sample), with binary labels `y`. The feature
+measures are in `hqnn_forge.diagnostics` (`separation_measures` computes all of them); their
+definitions, derivations and edge cases are in that module's docstring.
+
+| Measure | Computed from | Range | Statement it supports |
+|---|---|---|---|
+| State kernel `K(x, x′) = Tr[ρ(x) ρ(x′)]`, and its centred alignment with the labels | `kernel_from_density_matrices`, `kernel_target_alignment` | `K ∈ [0, 1]`, purity on the diagonal; alignment in `[0, 1]` | An upper bound on what any measurement of these states could distinguish (below) |
+| Pairwise feature distances `‖F(x) − F(x′)‖`, within and between classes, and the ratio of the two means | `pairwise_distances` | Distances in `[0, √N]`; ratio in `(0, ∞]`, about 1 without class information | How far apart this readout puts two inputs, in units of excitation probability: the scale to hold against the shot error `≤ 1/(2√S)` of [Readout](#readout) |
+| Fisher discriminant ratio along the best linear direction, `J = δᵀ S_w⁻¹ δ` with the pooled within-class covariance `S_w` (the squared Mahalanobis distance between the class means) | `fisher_discriminant_ratio` | `[0, ∞]`, 0 for equal class means | How far apart a linear function of the readout puts the class means, in units of the spread within the classes |
+| Effective rank of the feature covariance | `effective_rank` | `[1, min(N, M − 1)]` for `M` samples | In how many directions the readout varies: features collapsing onto fewer directions lower it |
+| Centred alignment of the linear feature kernel `F Fᵀ` with the labels | `linear_feature_kernel`, `kernel_target_alignment` | `[0, 1]`, 1 for features that are affine in the label | How much of the readout's variation is the label, to set beside the alignment of the state kernel |
+
+- **The state kernel bounds what any measurement could distinguish.** Its entries give the
+  Hilbert–Schmidt distance of two states,
+  `‖ρ − ρ′‖² = Tr[(ρ − ρ′)²] = K(x, x) + K(x′, x′) − 2 K(x, x′)` (the diagonal is the purity,
+  not 1). For any observable `A` and any number `c`, because `Tr[ρ − ρ′] = 0` and by the
+  Cauchy–Schwarz inequality, with `‖·‖` the Hilbert–Schmidt norm throughout,
+
+    ```text
+    | Tr[A ρ] − Tr[A ρ′] | = | Tr[(A − c) (ρ − ρ′)] | ≤ ‖A − c‖ · ‖ρ − ρ′‖
+    ```
+
+    For the readout, `n_i − ½ = −Z_i / 2`, and the `Z_i / √(2^N)` are orthonormal in the
+    Hilbert–Schmidt inner product, so the squared feature differences sum to at most the
+    squared norm of `ρ − ρ′` (Bessel's inequality) times `2^N / 4`:
+
+    ```text
+    ‖F(x) − F(x′)‖ ≤ ½ √(2^N) · ‖ρ(x) − ρ(x′)‖
+    ```
+
+    with equality when `ρ − ρ′` is a combination of the `Z_i`, as for one atom and two diagonal
+    states. This holds for the `N` excitation probabilities, not for the appended pair
+    correlations. Two inputs with the same state give the same value of every measurement, and
+    the bound is far from tight in general: the state has `4^N − 1` real parameters, the readout
+    `N`.
+- **The feature measures describe what this readout distinguishes,** and nothing about the
+  state beyond it: the readout can leave a large state distance unused, which the bound
+  allows and the distances show. The alignments of the two kernels are not ordered either: a
+  readout that drops variation unrelated to the label can align better than the state kernel.
+- **None of them predicts the test score of a particular head.** They are computed on one
+  sample with its labels, without held-out data, a model or a threshold. The Fisher ratio and
+  the feature alignment see linear structure only, which a nonlinear head is not limited to,
+  and both grow on a small sample without any class difference behind them (`J = ∞` with fewer
+  samples than features plus two). For `M` samples of `d` features in classes of `n0` and `n1`
+  that do not differ, `J` is about `d · M/(n0 n1)` on average, roughly `d` over the size of
+  the rarer class: values of `J` from sets of different size or class balance compare only
+  where they are large against that level, and with unequal class covariances `J` weights the
+  larger class more. The Fisher ratio gives an error rate, `Φ(−√J / 2)`, only
+  for two Gaussian classes of equal covariance and prior, which excitation probabilities are
+  not.
+- **Under strong dephasing every distance falls to 0,** since every `⟨n_i⟩ → ½` (see
+  [Noise](#noise)). The ratios, the rank and the alignments do not depend on the scale of the
+  features, so a collapse alone does not change them; they change because inputs lose their
+  trace in the state at different rates. On the way to the limit they moved towards their
+  no-information values in the cases tried (`γ = 4Ω`, three atoms, `V/Ω` of 0 and 1: Fisher
+  ratio from 19 and 17 after the π pulse to 1.6 and 1.1 at `Ωt = 30`); that is an observation.
+- **No monotonicity is claimed.** The Hamiltonian depends on the input, so two inputs do not
+  pass through the same channel and the data-processing inequality does not apply to their
+  states directly. Whether dephasing contracts the state or feature distances with γ in this
+  model is an open question, not an assumption of the code.
+
 ## Hardware realism
 
 The comparison is with QuEra's Aquila, an analog device of ⁸⁷Rb atoms using the same Rydberg

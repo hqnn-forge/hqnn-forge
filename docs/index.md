@@ -33,7 +33,7 @@ reference, generated from the docstrings.
 | [`hqnn_forge.models`](api/models.md) | The hybrid classifiers |
 | [`hqnn_forge.noise`](api/noise.md) | Noise channels (depolarizing, amplitude and phase damping, bit and phase flip), post hoc and during training |
 | [`hqnn_forge.kernels`](api/kernels.md) | Quantum fidelity kernels |
-| [`hqnn_forge.diagnostics`](api/diagnostics.md) | Circuit summaries, gradient variance, Fisher spectrum, effective dimension, expressibility, entangling capability |
+| [`hqnn_forge.diagnostics`](api/diagnostics.md) | Circuit summaries, gradient variance, Fisher spectrum, effective dimension, expressibility, entangling capability, separation measures of a fixed feature matrix |
 | [`hqnn_forge.evaluation`](api/evaluation.md) | Metrics, threshold search, statistical tests, [plots](api/evaluation.plots.md) |
 | [`hqnn_forge.training`](api/training.md) | The training loop |
 | [`hqnn_forge.data`](api/data.md) | Dataset loaders |
