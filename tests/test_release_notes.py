@@ -128,7 +128,7 @@ class TestCommandLine:
 
 class TestThisRepository:
     def test_the_changelog_has_an_unreleased_section_the_script_can_read(self) -> None:
-        text = (ROOT / "CHANGELOG.md").read_text()
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         section = release_notes.changelog_section(text, "Unreleased")
         assert section is not None and "### Added" in section
 
@@ -136,7 +136,7 @@ class TestThisRepository:
         # The convention CONTRIBUTING asks for: an entry ends with "(#<PR>)", or
         # "(#<PR>, #<PR>)" for an entry several PRs built, so a release's notes
         # link back. A "#" elsewhere in the entry does not count.
-        text = (ROOT / "CHANGELOG.md").read_text()
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         entries = []
         for line in text.splitlines():
             if line.startswith("- "):
@@ -151,7 +151,7 @@ class TestThisRepository:
         # PyPI renders README.md as the project description without the
         # repository beside it, so a relative link or image there is broken,
         # and so is a "#heading" anchor: PyPI gives headings no ids.
-        readme = (ROOT / "README.md").read_text()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         text = re.sub(r"^```.*?^```", "", readme, flags=re.DOTALL | re.MULTILINE)
         targets = re.findall(r"\]\(\s*<?([^)\s>]+)", text)
         targets += re.findall(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)", text, flags=re.MULTILINE)

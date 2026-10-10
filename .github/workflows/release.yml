@@ -56,10 +56,25 @@ jobs:
           echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main."
           exit 1
         fi
+    - name: Rewrite README.md for PyPI
+      run: python .github/scripts/pypi_readme.py --in-place
     - name: Build the sdist and wheel
       run: uv build
+    - name: Restore README.md
+      run: git checkout -- README.md
     - name: Check the distributions' metadata
       run: uvx twine check --strict dist/*
+    - name: Check the wheel contains no Mermaid fence
+      run: |
+        python -c "
+        import glob, sys, zipfile
+        (whl,) = glob.glob('dist/*.whl')
+        with zipfile.ZipFile(whl) as z:
+            meta = next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))
+            if '```mermaid' in z.read(meta).decode('utf-8'):
+                print('::error::wheel METADATA contains a mermaid fence', file=sys.stderr)
+                sys.exit(1)
+        "
     - name: Check the wheel installs, imports and reports project.version
       run: |
         uv venv /tmp/wheel-check
