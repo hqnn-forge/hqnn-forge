@@ -105,16 +105,46 @@ computed.
   same, no direction has a ratio and ``J`` is NaN.
 * **Reading.**  For two Gaussian classes with a common covariance, the best
   linear rule at equal priors errs with probability ``Φ(−√J / 2)``; for
-  other distributions ``J`` gives no error rate.  ``J`` from a sample
-  overestimates the population value: for classes that do not differ at all
-  it is about ``d · M/(n0 n1)`` on average, not 0 (``n0 n1 J / M`` is
-  Hotelling's ``T²``, close to chi-squared with ``d`` degrees of freedom).
-* **Which normalisation.**  ``S_w`` is the pooled covariance, the within-class
-  sums of squares and products over their ``M − 2`` degrees of freedom, so
-  that ``J`` does not grow with the number of samples.  Two other
-  conventions carry the same name: the sums themselves in the denominator
-  (``J/(M − 2)``), and the sum of the two class covariances
-  (``J/2`` for classes of equal size and covariance).
+  other distributions ``J`` gives no error rate.
+* **Sample size.**  ``δ`` and ``S_w`` estimate the difference of the
+  population means and the within-class covariance whatever ``M`` is, so
+  ``J`` estimates one number, ``Δ² = δᵀ Σ⁻¹ δ`` of the populations, and
+  neither grows nor shrinks in proportion to ``M``.  It does overestimate
+  ``Δ²`` on a finite sample.  ``n0 n1 J / M`` is Hotelling's ``T²``, and for
+  two Gaussian classes with a common covariance ``T² (M − d − 1)/((M − 2) d)``
+  has a noncentral F distribution with ``d`` and ``M − d − 1`` degrees of
+  freedom and noncentrality ``n0 n1 Δ² / M``, whose mean gives, for
+  ``M > d + 3``::
+
+      E[J] = (M − 2)/(M − d − 3) · ( Δ² + d · M/(n0 n1) )
+
+  For classes that do not differ at all (``Δ² = 0``) ``J`` is therefore
+  about ``d · M/(n0 n1)`` on average, not 0: ``4 d / M`` for classes of equal
+  size.  Values of ``J`` from samples of different size are comparable only
+  where they are large against that level.
+* **Class imbalance.**  Swapping the classes changes nothing, and for a
+  common covariance the population value ``Δ²`` does not depend on the class
+  sizes.  Two things do.  The level above is ``d · M/(n0 n1)``, about ``d``
+  over the size of the smaller class when the other is much larger, so a
+  rare class raises ``J`` without any class difference behind it.  And
+  ``S_w`` weights the covariance of each class by its size (by ``n_k − 1``):
+  if the classes have different covariances ``Σ0`` and ``Σ1``, ``S_w`` has
+  the mean ``((n0 − 1) Σ0 + (n1 − 1) Σ1)/(M − 2)``, in which the larger
+  class dominates, so ``J`` changes with the class proportions for the same
+  two populations.
+* **Which normalisation.**  ``S_w`` is the pooled covariance: the
+  within-class sums of squares and products over their ``M − 2`` degrees of
+  freedom, as in the two-sample ``T²``.  Two other conventions carry the
+  same name and give other numbers.  With the sums themselves in the
+  denominator (Fisher 1936, and ``S_W`` in most textbooks) the ratio is
+  ``J/(M − 2)``: the best direction is the same, and the value falls as
+  ``1/M`` for the same populations.  With the sum of the two class
+  covariances, ``S_0 + S_1`` (each over ``n_k − 1``), the ratio is ``J/2``
+  when the two classes have the same size, and otherwise the classes are
+  weighted equally instead of by size, which in general also changes the
+  best direction.  Class 0 ``{−1, 1}`` and class 1 ``{2, 4, 6}`` (``δ = 4``,
+  sums of squares 2 and 8): ``J = 16/(10/3) = 4.8`` here, against
+  ``16/10 = 1.6`` and ``16/(2 + 4) = 2.67``.
 
 Effective rank
 --------------
@@ -329,7 +359,8 @@ class SeparationMeasures:
         about 1 without class information.
     fisher_ratio:
         Fisher discriminant ratio along the best linear direction,
-        ``δᵀ S_w⁻¹ δ``, in ``[0, ∞]``.
+        ``δᵀ S_w⁻¹ δ`` with the pooled within-class covariance (denominator
+        ``n_samples − 2``), in ``[0, ∞]``.
     effective_rank:
         Exponential of the entropy of the normalised eigenvalues of the
         feature covariance, in ``[1, min(d, M − 1)]``.
@@ -513,7 +544,11 @@ def fisher_discriminant_ratio(F: Any, y: Any) -> float:
         ``inf`` when the means differ along a direction in which neither
         class has any spread (features equal to the labels, or fewer samples
         than ``n_features + 2`` in general position); NaN when every row is
-        the same.
+        the same.  It estimates the same population value at every sample
+        size, with an upward bias of about ``n_features · M/(n0 n1)`` (larger
+        for a small sample and for a rare class), and with unequal class
+        covariances it weights the larger class more; see "Sample size" and
+        "Class imbalance" in the module docstring.
 
     Raises
     ------
@@ -539,6 +574,12 @@ def fisher_discriminant_ratio(F: Any, y: Any) -> float:
     >>> from hqnn_forge.diagnostics import fisher_discriminant_ratio
     >>> round(fisher_discriminant_ratio([[-1.0], [1.0], [3.0], [5.0]], [0, 0, 1, 1]), 12)
     8.0
+
+    Unequal class sizes, class 1 ``{2, 4, 6}``: the means differ by 4 again
+    and the pooled variance is ``(2 + 8)/(5 − 2)``.
+
+    >>> round(fisher_discriminant_ratio([[-1.0], [1.0], [2.0], [4.0], [6.0]], [0, 0, 1, 1, 1]), 12)
+    4.8
     """
     features = _features(F)
     return _fisher(features, _classes(y, features.shape[0]))
