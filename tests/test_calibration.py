@@ -131,6 +131,10 @@ class TestMetrics:
             reliability_curve([0, 1], [0.1, 0.9], strategy="log")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="n_bins must be"):
             expected_calibration_error([0, 1], [0.1, 0.9], n_bins=0)
+        with pytest.raises(ValueError, match="n_bins must be"):
+            reliability_curve([0, 1], [0.1, 0.9], n_bins=0)
+        with pytest.raises(ValueError, match="strategy must be"):
+            expected_calibration_error([0, 1], [0.1, 0.9], strategy="log")  # type: ignore[arg-type]
 
 
 def _nll(z: torch.Tensor, y: torch.Tensor) -> float:
@@ -631,3 +635,24 @@ class TestMulticlassValidation:
     def test_bad_input(self, fn: Any, y: np.ndarray, prob: np.ndarray, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             fn(y, prob)
+
+    @pytest.mark.parametrize("fn", [top_label_ece, classwise_ece])
+    def test_bad_bins(self, fn: Any) -> None:
+        y, prob = _multiclass(k=3)
+        with pytest.raises(ValueError, match="n_bins must be"):
+            fn(y, prob, n_bins=0)
+        with pytest.raises(ValueError, match="strategy must be"):
+            fn(y, prob, strategy="log")
+
+    @pytest.mark.parametrize("fn", [top_label_ece, classwise_ece])
+    def test_does_not_repeat_binary_validation(
+        self, fn: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        y, prob = _multiclass(k=3)
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("_pair was unexpectedly invoked")
+
+        monkeypatch.setattr("hqnn_forge.evaluation.calibration._pair", _boom)
+        val = fn(y, prob)
+        assert isinstance(val, float)
