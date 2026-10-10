@@ -229,7 +229,7 @@ References
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -300,10 +300,13 @@ def _ratio(numerator: float, denominator: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class PairwiseDistances:
     """
     The Euclidean distances of every pair of samples, split by class membership.
+
+    Two results are equal when both sets of distances are, element by
+    element; a result is not hashable.
 
     Attributes
     ----------
@@ -316,10 +319,18 @@ class PairwiseDistances:
         same order.
     """
 
-    # Tensor fields are left out of the generated __eq__, which would otherwise
-    # call bool() on an element-wise tensor comparison and raise.
-    within: torch.Tensor = field(compare=False)
-    between: torch.Tensor = field(compare=False)
+    within: torch.Tensor
+    between: torch.Tensor
+
+    # Written out: the generated __eq__ would call bool() on an element-wise
+    # tensor comparison and raise, and with both fields left out of it (the
+    # only fields there are) any two results would compare equal.  Defining
+    # __eq__ without __hash__ makes the class unhashable, as tensors compared
+    # by value have to be.
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PairwiseDistances):
+            return NotImplemented
+        return torch.equal(self.within, other.within) and torch.equal(self.between, other.between)
 
     @property
     def mean_within(self) -> float:

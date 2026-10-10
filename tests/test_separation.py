@@ -197,6 +197,24 @@ class TestPairwiseDistances:
         assert result.between.tolist() == [2.0]
         assert math.isnan(result.mean_within) and math.isnan(result.ratio)
 
+    def test_results_are_equal_only_when_their_distances_are(self) -> None:
+        """
+        Same data, same result; another row, another pair order or the two
+        sets exchanged is a different one.  (With the tensors left out of the
+        comparison every pair of results would be equal.)
+        """
+        result = pairwise_distances(FOUR_POINTS, FOUR_LABELS)
+        assert result == pairwise_distances(FOUR_POINTS.clone(), FOUR_LABELS)
+        moved = FOUR_POINTS.clone()
+        moved[3, 0] += 1.0
+        assert result != pairwise_distances(moved, FOUR_LABELS)
+        assert result != pairwise_distances(FOUR_POINTS, torch.tensor([0, 1, 1, 0]))
+        assert result != PairwiseDistances(within=result.between, between=result.within)
+        assert result != PairwiseDistances(within=result.within.flip(0), between=result.between)
+        assert result != (result.within, result.between)
+        with pytest.raises(TypeError, match="unhashable"):
+            hash(result)
+
     def test_distances_of_nearly_equal_rows_keep_their_relative_precision(self) -> None:
         """
         Rows ``½ + ε g`` with ``ε = 1e-12``: the distances are ``ε`` times
