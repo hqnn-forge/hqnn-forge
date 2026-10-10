@@ -199,6 +199,12 @@ jobs:
   # without a floor, to the scikit-learn already covered by sklearn. pytest is
   # installed afterwards at its normal resolution, using the spec from the dev
   # extra, which leaves the runtime pins untouched.
+  #
+  # qutip is the one dev dependency resolved lowest as well: it is the
+  # reference of tests/test_rydberg_reference.py, nothing else brings it, and
+  # without it that module would skip, which fails here. Its floors are
+  # installed after the runtime floors, so they are tested next to the numpy
+  # floor and the scipy that pennylane resolved.
   test-lowest:
     runs-on: ubuntu-latest
     # One leg per set of floors: pyproject.toml gives torch, numpy and
@@ -227,6 +233,8 @@ jobs:
         uv pip install --resolution lowest-direct -e ".[lightning,sklearn]"
         PYTEST_SPEC=$(uv run --no-sync python -c 'import re, tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"pytest\s*[<>=!~]", d)))')
         uv pip install "$PYTEST_SPEC"
+        uv run --no-sync python -c 'import re, tomllib; print("\n".join(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"qutip\s*[<>=!~]", d)))' > qutip-floors.txt
+        uv pip install --resolution lowest-direct -r qutip-floors.txt
 
     # The resolver silently installs a newer version when another dependency
     # requires one, so an unreachable floor would otherwise still go green
