@@ -401,6 +401,39 @@ class TestCircuitArm:
         assert rep.n_frozen_parameters == 2 * 3 * 3
         assert rep.config["config"]["circuit_seed"] == seed
 
+    def test_sampled_features_depend_on_the_inputs_and_the_seed_alone(self) -> None:
+        """
+        With shots, a matrix is drawn from the start of the ``shot_seed``
+        stream whatever was sampled before it: the cache key (inputs and
+        config) then determines the features, also when a run is resumed.
+        """
+        settings = bench.Settings(n_atoms=3, circuit_layers=2, shots=64)
+        (rep,) = [
+            r for r in bench.representations(_replace(settings, arms=("D",))) if r.arm == "D"
+        ]
+        seeds = bench.run_seeds(settings.random_state)
+        assert rep.config["shots"] == 64
+        assert rep.config["shot_seed"] == seeds["shot_seed"]
+        X = np.random.default_rng(6).uniform(-math.pi, math.pi, size=(7, 3))
+        first = rep.compute(X)
+        rep.compute(X[:3])  # another matrix in between moves no stream
+        np.testing.assert_array_equal(rep.compute(X), first)
+        # by hand: a circuit built here, evaluated once
+        fresh = bench.frozen_circuit(settings, seeds["circuit_seed"])
+        with torch.no_grad():
+            by_hand = fresh(torch.from_numpy(X)).double().numpy()
+            again = fresh(torch.from_numpy(X)).double().numpy()
+        np.testing.assert_array_equal(first, by_hand)
+        assert not np.array_equal(again, by_hand)  # the stream of one circuit does run on
+        # ⟨Z⟩ from 64 shots: (64 − 2k)/64, within the binomial error of the exact value
+        np.testing.assert_allclose((first + 1) * 32, np.round((first + 1) * 32), atol=1e-9)
+        (exact_rep,) = [
+            r
+            for r in bench.representations(_replace(settings, arms=("D",), shots=None))
+            if r.arm == "D"
+        ]
+        assert 0 < np.abs(first - exact_rep.compute(X)).max() < 5 / math.sqrt(64)
+
     def test_the_hybrid_row_is_a_trained_circuit_on_the_inputs(self) -> None:
         settings = bench.Settings(n_atoms=3, circuit_layers=2)
         reps = bench.representations(_replace(settings, arms=("D",)))
@@ -977,6 +1010,115 @@ class TestTuning:
             assert not (set(fit.tolist()) | set(val.tolist())) & set(fold.test_idx.tolist())
             held_out += val.tolist()
         assert sorted(held_out) == fold.train_part.tolist()
+
+    @pytest.mark.slow
+    def test_every_arm_is_fitted_on_the_same_rows_with_the_same_seeds_and_settings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        What each of the nine models of a fold is handed, arm D and the
+        hybrid row included: the same split object, initialisation seed,
+        batch seed and loss for the final fit, and the same tuning folds,
+        candidates, seed and training settings for every trial.
+        """
+        settings = QUICK
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        fold = _fold_by_hand(X, y, settings, 0)
+
+        seed_of: dict[int, int] = {}
+        fits: list[SimpleNamespace] = []
+        tunes: list[SimpleNamespace] = []
+        tuning = [False]
+        original_build, original_fit, original_tune = (
+            bench.build_model,
+            bench.fit_and_score,
+            bench.tune,
+        )
+
+        def spy_build(head: str, n_features: int, settings_: Any, seed: int) -> Any:
+            model = original_build(head, n_features, settings_, seed)
+            seed_of[id(model)] = seed
+            return model
+
+        def spy_fit(model: Any, features: Any, split: Any, config: Any, **kw: Any) -> Any:
+            fits.append(
+                SimpleNamespace(
+                    model=model,  # kept alive, so that no id is reused
+                    init_seed=seed_of[id(model)],
+                    n_rows=features.shape[0],
+                    split=split,
+                    config=dict(config),
+                    loss=kw["loss"],
+                    batch_seed=kw["batch_seed"],
+                    tuning=tuning[0],
+                )
+            )
+            return original_fit(model, features, split, config, **kw)
+
+        def spy_tune(
+            head: str, splits: Any, features: Any, candidates: Any, settings_: Any, seed: int
+        ) -> Any:
+            tunes.append(
+                SimpleNamespace(splits=list(splits), candidates=list(candidates), seed=seed)
+            )
+            tuning[0] = True
+            try:
+                return original_tune(head, splits, features, candidates, settings_, seed)
+            finally:
+                tuning[0] = False
+
+        monkeypatch.setattr(bench, "build_model", spy_build)
+        monkeypatch.setattr(bench, "fit_and_score", spy_fit)
+        monkeypatch.setattr(bench, "tune", spy_tune)
+        records = list(
+            bench.run_dataset(
+                "positive-control", X, y, settings, bench.FeatureCache(None), data_seed=data_seed
+            )
+        )
+        assert [(r["arm"], r["head"]) for r in records] == ROWS
+
+        # The final fit of every line.
+        final = [f for f in fits if not f.tuning]
+        assert len(final) == len(ROWS)
+        stacked = np.concatenate(
+            [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+        )
+        np.testing.assert_array_equal(final[0].split.inputs, stacked)
+        for fit, record in zip(final, records, strict=True):
+            row = (record["arm"], record["head"])
+            assert fit.split is final[0].split, row
+            assert fit.n_rows == stacked.shape[0], row
+            assert fit.init_seed == fold.seeds["init_seed"], row
+            assert fit.batch_seed == fold.seeds["batch_seed"], row
+            assert fit.loss == settings.loss, row
+            assert fit.config == record["hyperparameters"], row
+
+        # The tuning of every line: the same folds, candidates and seed ...
+        assert len(tunes) == len(ROWS)
+        candidates = [{"lr": 0.01}, {"lr": 0.05}]
+        for tune in tunes:
+            assert len(tune.splits) == settings.inner_folds
+            assert all(a is b for a, b in zip(tune.splits, tunes[0].splits, strict=True))
+            assert tune.candidates == candidates
+            assert tune.seed == fold.seeds["tune_seed"]
+        # ... and every trial of every line with the same settings.
+        trials = [f for f in fits if f.tuning]
+        per_line = len(candidates) * settings.inner_folds
+        assert len(trials) == len(ROWS) * per_line
+        expected = [
+            ({**settings.defaults, **candidate}, split)
+            for candidate in candidates
+            for split in tunes[0].splits
+        ]
+        for start in range(0, len(trials), per_line):
+            for trial, (config, split) in zip(
+                trials[start : start + per_line], expected, strict=True
+            ):
+                assert trial.config == config
+                assert trial.split is split
+                assert trial.init_seed == trial.batch_seed == fold.seeds["tune_seed"]
+                assert trial.loss == settings.loss
+                assert trial.n_rows == split.inputs.shape[0]
 
     def test_the_best_mean_score_wins_and_the_first_wins_a_tie(
         self, monkeypatch: pytest.MonkeyPatch
