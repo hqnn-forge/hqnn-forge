@@ -18,6 +18,7 @@ from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.models import (
     ClassicalBaseline,
     HybridBinaryClassifier,
+    LinearClassifier,
     MulticlassHybridClassifier,
     ParallelHybridClassifier,
 )
@@ -743,11 +744,12 @@ CONSTRUCTOR_ARGS = {
         "dropout_p",
         "init_seed",
     },
+    LinearClassifier: {"n_input_features", "init_seed"},
 }
 
 #: The arguments each class had when checkpoints of it were first written: the
 #: binary classifiers at #120 (31c9879), the multiclass one at #156 (11936cf),
-#: ClassicalBaseline at #250.
+#: ClassicalBaseline at #250, LinearClassifier at #501.
 FIRST_CHECKPOINTED_ARGS = {
     HybridBinaryClassifier: {
         "n_input_features",
@@ -793,6 +795,7 @@ FIRST_CHECKPOINTED_ARGS = {
         "dropout_p",
         "init_seed",
     },
+    LinearClassifier: {"n_input_features", "init_seed"},
 }
 
 

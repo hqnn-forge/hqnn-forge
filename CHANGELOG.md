@@ -336,6 +336,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `kernel_target_alignment`. An undefined ratio is NaN and perfect separation `inf`.
   `docs/rydberg-model.md` states which statement each supports for the Rydberg feature map
   next to its state kernel, and that none predicts the score of a head (#500, #516)
+- `hqnn_forge.models.LinearClassifier(n_input_features, *, init_seed=None)`: one affine map to a
+  logit with the classifiers' interface (`predict_proba`, `get_config`, checkpoints), `n + 1`
+  parameters; trained with `BCEWithLogitsLoss` it is a logistic regression. It is the linear
+  head `ClassicalBaseline`, which needs a hidden layer, cannot be (#501, #517)
+- `examples/benchmark_rydberg_features.py`: a benchmark runner for the Rydberg feature map. On
+  identical folds, validation splits and seeds it trains a linear and a small MLP head on the
+  interacting features (arm A), on the same map with `interactions=False` (B), on the
+  PCA-reduced inputs themselves (C) and on the `⟨Z_i⟩` of a frozen random angle-embedding
+  circuit (D), plus a trained `HybridBinaryClassifier` as a marked, less comparable row, over a
+  grid of `V/Ω` (through the spacing) and `γ/Ω` at fixed `ΩT`, with the same random-search
+  budget for every arm, a feature cache on disk keyed by the data fingerprint and the map's
+  `get_config()`, a UCI loader or a synthetic positive control whose label depends on products
+  of inputs on neighbouring atoms, and one strict-JSON line per arm, head, grid point and fold
+  (scores, feature dimension, parameters, simulation and training seconds, separation
+  measures, seeds, fold indices, environment). Arm B is a classical model, so `A − B` measures
+  what interaction-induced mixing of inputs adds, not "quantum" against "classical";
+  `--quick` is a smoke test (#501, #517)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

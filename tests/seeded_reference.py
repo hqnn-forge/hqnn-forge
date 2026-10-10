@@ -43,6 +43,7 @@ from hqnn_forge.encoding import (
 from hqnn_forge.models import (
     ClassicalBaseline,
     HybridBinaryClassifier,
+    LinearClassifier,
     MulticlassHybridClassifier,
     ParallelHybridClassifier,
 )
@@ -136,6 +137,9 @@ CONFIGS: dict[str, tuple[Callable[[], nn.Module], int]] = {
         lambda: ClassicalBaseline(5, [6, 4], init_seed=INIT_SEED),
         5,
     ),
+    # The linear head (#501), initialised like the other heads.
+    "linear-classifier": (lambda: LinearClassifier(5), 5),
+    "linear-classifier-init-seed": (lambda: LinearClassifier(5, init_seed=INIT_SEED), 5),
     # The encoding layers on their own: TorchLayer's own initialisation.
     "layer-angle": (lambda: QuantumEncodingLayer(**LAYER), 3),
     "layer-iqp": (lambda: IQPEncodingLayer(**LAYER, n_repeats=2), 3),
