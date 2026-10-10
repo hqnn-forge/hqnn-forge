@@ -121,6 +121,7 @@ def brier_score(y_true: object, prob: object) -> float:
 
 
 def _validate_bins(n_bins: int, strategy: BinStrategy) -> None:
+    """Raise ValueError on non-positive bin count or an unrecognised strategy."""
     if n_bins < 1:
         raise ValueError(f"n_bins must be >= 1; got {n_bins}.")
     if strategy not in ("uniform", "quantile"):
@@ -132,8 +133,10 @@ def _bins(p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> torch.Tensor:
     _validate_bins(n_bins, strategy)
     if strategy == "uniform":
         edges = torch.linspace(0.0, 1.0, n_bins + 1, dtype=torch.float64)
-    else:  # strategy == "quantile"
+    elif strategy == "quantile":
         edges = torch.quantile(p, torch.linspace(0.0, 1.0, n_bins + 1, dtype=torch.float64))
+    else:
+        raise AssertionError(strategy)  # _validate_bins and this list are out of sync
     # Right-closed at the top, as sklearn.calibration.calibration_curve does.
     return torch.searchsorted(edges[1:-1], p, right=True)
 
@@ -141,6 +144,10 @@ def _bins(p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> torch.Tensor:
 def _reliability_curve(
     y: torch.Tensor, p: torch.Tensor, n_bins: int, strategy: BinStrategy
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Binned curve of validated float64 CPU tensors; see ``reliability_curve``."""
+    # contiguous: a column of a 2-D tensor (p[:, k]) is a strided view, which
+    # torch.searchsorted in the binning copies with a warning.
+    p = p.contiguous()
     idx = _bins(p, n_bins, strategy)
     counts = torch.bincount(idx, minlength=n_bins).to(torch.float64)
     sum_p = torch.bincount(idx, weights=p, minlength=n_bins)
@@ -163,6 +170,7 @@ def reliability_curve(
 
 
 def _ece(y: torch.Tensor, p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> float:
+    """Expected calibration error of validated float64 CPU tensors."""
     confidence, frequency, counts = _reliability_curve(y, p, n_bins, strategy)
     return float((counts / counts.sum() * (frequency - confidence).abs()).sum())
 
@@ -227,8 +235,7 @@ def classwise_ece(
     y, p = _multiclass_pair(y_true, prob)
     _validate_bins(n_bins, strategy)
     per_class = [
-        _ece((y == k).to(torch.float64), p[:, k].contiguous(), n_bins, strategy)
-        for k in range(p.shape[1])
+        _ece((y == k).to(torch.float64), p[:, k], n_bins, strategy) for k in range(p.shape[1])
     ]
     return float(sum(per_class) / len(per_class))
 
