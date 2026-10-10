@@ -171,7 +171,9 @@ Data
     (and of the inputs) coincide, while those of arm A's features do not:
     arm A can in principle beat arm B there.  It tells a null result on real
     data ("interactions do not help") from a pipeline that could not have
-    shown an effect.
+    shown an effect.  That holds for the ``linear`` head.  An ``mlp`` head
+    can form products of its inputs itself, on arm B's features as on the
+    inputs, so its ``A − B`` on this task is no check of the pipeline.
 ``iranian-churn``, ``taiwanese-bankruptcy``, ``cervical-cancer-risk``
     The UCI loaders of :mod:`hqnn_forge.data`, read from ``--data-path``
     (``--download`` fetches a missing file).
@@ -803,7 +805,9 @@ def frozen_circuit(settings: Settings, circuit_seed: int) -> QuantumEncodingLaye
     identity the circuit would hardly mix the inputs, and this arm is the
     gate-based counterpart of a map that does.  With ``settings.shots`` the
     readout is estimated from that many shots, seeded with the run's
-    ``shot_seed``.
+    ``shot_seed``: the first matrix a circuit evaluates is drawn from the
+    start of that stream and a later one from where the stream then stands,
+    which is why arm D builds a circuit per feature matrix.
     """
     sampling: dict[str, Any] = (
         {"diff_method": "backprop"}
@@ -893,10 +897,15 @@ def _circuit_representation(
     layer = frozen_circuit(settings, circuit_seed)
 
     def compute(inputs: FloatArray) -> FloatArray:
+        # A sampling device draws from one stream that runs on from call to
+        # call.  A circuit built anew starts it at ``shot_seed`` again, so the
+        # features depend on the inputs and the config alone, as their cache
+        # key says, and not on how many matrices were sampled before.
+        circuit = layer if settings.shots is None else frozen_circuit(settings, circuit_seed)
         x = torch.from_numpy(inputs)
         with torch.no_grad():
             chunks = [
-                layer(x[start : start + _CIRCUIT_CHUNK])
+                circuit(x[start : start + _CIRCUIT_CHUNK])
                 for start in range(0, x.shape[0], _CIRCUIT_CHUNK)
             ]
         result: FloatArray = torch.cat(chunks).to(torch.float64).numpy()
