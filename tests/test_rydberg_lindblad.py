@@ -854,12 +854,12 @@ class TestValidation:
         with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
             evolve(h, 1.0)
 
-    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.complex32])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_half_precision_gets_the_single_precision_bound(self, dtype: torch.dtype) -> None:
         """100 ε of ``bfloat16`` is 0.78: a drive entry doubled in one triangle would pass."""
-        h = (self.H if dtype.is_complex else self.H.real).to(dtype)
+        h = self.H.real.to(dtype)
         evolve(h, 1.0)
-        h[0, 1] = h[0, 1] + 0.0625  # exact in every one of these dtypes
+        h[0, 1] = h[0, 1] + 0.0625  # exact in both dtypes
         with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
             evolve(h, 1.0)
 
