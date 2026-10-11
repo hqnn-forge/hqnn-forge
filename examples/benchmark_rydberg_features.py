@@ -118,8 +118,9 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   and the count is not used.
 * **Arms C and D have no grid.**  They are run once per fold, with ``null``
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
-  no interaction term); it is still evaluated at every grid point, with that
-  point's register, so every A line has its B line.
+  no interaction term): its non-interacting features are computed once per
+  dephasing rate and fold and reused across the interaction grid, so every
+  A line has its B line.
 
 Units: ħ = 1, angular frequencies (Ω, γ, ``C6/r⁶``) in rad/µs, lengths in
 µm, times in µs; inputs and features are dimensionless.
@@ -147,8 +148,8 @@ A later request with the same inputs and settings (another head, another
 tuning trial, a repeated run) reads the file; a change in either part of the
 key is a miss.  The inputs are fitted per fold (step 2), so each fold has
 its own entries: "once" is once per grid point and input matrix.  The
-recorded ``feature_seconds`` is the simulation time measured when the
-features were computed, also on a cache hit.
+recorded ``feature_seconds`` describes the actual simulation time measured
+when the features were computed.
 
 Tuning
 ------
@@ -183,15 +184,19 @@ What a line records
 ``arm``, ``head``, ``representation``, ``feature_map_trained``; the grid
 point (``v_over_omega``, ``gamma_over_omega``, ``spacing_um``, ``omega``,
 ``omega_t``, ``evolution_time_us``, ``n_steps``) and the map's
-``get_config()`` (``feature_map``); ``reused_from_v_over_omega``;
-``measurement`` and ``shots``; the fold (``fold``, ``n_splits``,
+``get_config()`` (``feature_map``); ``reused_from_v_over_omega`` (identifying
+the interaction-grid value from which an arm B record was reused across the
+grid, or ``null`` if the record was computed rather than reused; for reused
+records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
+all zero); ``measurement`` and ``shots``; the fold (``fold``, ``n_splits``,
 ``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
 dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
 ``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
 and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
 with their scores; ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
-``feature_seconds`` (simulating the features of the fold's rows),
-``train_seconds`` (the final fit) and ``tuning_seconds``;
+``feature_seconds`` (the actual computation time simulating the fold's
+features, or 0.0 for reused records), ``train_seconds`` (the final fit) and
+``tuning_seconds``;
 ``separation``, the measures of
 :func:`hqnn_forge.diagnostics.separation_measures` on the matrix the head
 receives, for the real rows of the training part (``train``) and for the
@@ -215,7 +220,7 @@ Usage
 ::
 
     python examples/benchmark_rydberg_features.py --quick
-    python examples/benchmark_rydberg_features.py \
+    python examples/benchmark_rydberg_features.py \\
         --dataset positive-control iranian-churn --data-path data/raw --download
 
 ``--quick`` runs one fold of one small grid point on a small positive
@@ -1447,7 +1452,7 @@ def run_dataset(
             arm_b_records: list[dict[str, Any]] = []
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
-                tuning = None
+                tuning: dict[str, Any] | None = None
                 tuning_seconds = 0.0
                 if candidates:
                     start = time.perf_counter()

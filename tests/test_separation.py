@@ -834,6 +834,21 @@ class TestStratifiedSubsampleIndices:
         assert np.array_equal(idx_list, idx_np)
         assert np.array_equal(idx_np, idx_torch)
 
+    def test_stratified_subsample_allocation_case_a(self) -> None:
+        labels = np.array([0] * 100 + [1] * 1900)
+        idx = stratified_subsample_indices(labels, 20, seed=0)
+        assert len(idx) == 20
+        assert np.sum(labels[idx] == 0) == 1
+        assert np.sum(labels[idx] == 1) == 19
+
+    def test_stratified_subsample_allocation_case_b(self) -> None:
+        labels = np.array([0] * 10 + [1] * 30 + [2] * 60)
+        idx = stratified_subsample_indices(labels, 10, seed=0)
+        assert len(idx) == 10
+        assert np.sum(labels[idx] == 0) == 1
+        assert np.sum(labels[idx] == 1) == 3
+        assert np.sum(labels[idx] == 2) == 6
+
 
 # ---------------------------------------------------------------------------
 # On the features and states of the Rydberg feature map

@@ -703,8 +703,10 @@ def stratified_subsample_indices(
     Preserves class proportions as closely as possible via proportional quota
     allocation with largest-remainder rounding. When ``max_rows`` is at least
     the number of classes present, every class with at least one sample is
-    guaranteed representation. The selected indices are returned in sorted order,
-    keeping features and labels aligned.
+    guaranteed representation (any class with zero allocated rows after proportional
+    distribution receives one row transferred from the class with the largest allocation).
+    The selected indices are returned in sorted order, keeping features and labels
+    aligned.
 
     Parameters
     ----------
@@ -750,21 +752,19 @@ def stratified_subsample_indices(
         ]
         return np.sort(np.array(selected, dtype=np.intp))
 
-    alloc = np.minimum(1, counts)
+    quotas = max_rows * counts / n_total
+    alloc = np.floor(quotas).astype(int)
     rem = max_rows - int(alloc.sum())
     if rem > 0:
-        available = counts - alloc
-        total_avail = int(available.sum())
-        if total_avail > 0:
-            q_rem = rem * available / total_avail
-            floor = np.floor(q_rem).astype(int)
-            alloc += floor
-            left = max_rows - int(alloc.sum())
-            if left > 0:
-                frac = q_rem - floor
-                can_take = np.where(alloc < counts)[0]
-                top = can_take[np.argsort(-frac[can_take])[:left]]
-                alloc[top] += 1
+        remainders = quotas - alloc
+        order = np.argsort(-remainders, kind="stable")
+        alloc[order[:rem]] += 1
+
+    zero_classes = np.where(alloc == 0)[0]
+    for c in zero_classes:
+        donor = int(np.argmax(alloc))
+        alloc[donor] -= 1
+        alloc[c] = 1
 
     selected_parts = []
     for c in range(n_classes):

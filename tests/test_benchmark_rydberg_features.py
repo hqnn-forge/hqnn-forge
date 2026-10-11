@@ -1515,7 +1515,7 @@ class TestArmBReuse:
             max_folds=2,
             n_steps=10,
             v_over_omega=(0.5, 1.0, 2.0),
-            gamma_over_omega=(0.1,),
+            gamma_over_omega=(0.0, 0.1),
         )
         rng = np.random.RandomState(42)
         X = rng.randn(40, 2)
@@ -1536,51 +1536,81 @@ class TestArmBReuse:
         read = bench.read_records(out)
         assert len(records) == len(read)
 
-        # 2 folds, 3 V values, 1 gamma:
-        # Arm A must run for every V value: 2 folds * 3 V = 6 times.
-        # Arm B must run only once per (gamma, fold): 2 folds * 1 gamma = 2 times.
-        assert calls.count("A") == 6
-        assert calls.count("B") == 2
+        # 2 folds, 3 V values, 2 gamma values:
+        # Arm A must run for every V and gamma: 2 folds * 2 gammas * 3 V = 12 times.
+        # Arm B must run only once per (gamma, fold): 2 folds * 2 gammas = 4 times.
+        assert calls.count("A") == 12
+        assert calls.count("B") == 4
 
         # Verify output records:
-        # Each fold has 3 V values * 2 arms * 2 heads = 12 records per fold -> 24 records total
-        assert len(records) == 2 * 3 * 2 * 2
+        # Each fold has 2 gammas * 3 V values * 2 arms * 2 heads = 24 records per fold -> 48 records total
+        assert len(records) == 2 * 2 * 3 * 2 * 2
 
         # Arm A records differ across V values (at least for training / separation)
         a_records = [
-            r for r in records if r["arm"] == "A" and r["head"] == "linear" and r["fold"] == 0
+            r
+            for r in records
+            if r["arm"] == "A"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.1
         ]
         assert len(a_records) == 3
         assert [r["v_over_omega"] for r in a_records] == [0.5, 1.0, 2.0]
 
         # Arm B records are yielded for every V value to preserve schema and A/B pairing
-        b_records = [
-            r for r in records if r["arm"] == "B" and r["head"] == "linear" and r["fold"] == 0
+        for gamma in (0.0, 0.1):
+            b_records = [
+                r
+                for r in records
+                if r["arm"] == "B"
+                and r["head"] == "linear"
+                and r["fold"] == 0
+                and r["gamma_over_omega"] == gamma
+            ]
+            assert len(b_records) == 3
+            assert [r["v_over_omega"] for r in b_records] == [0.5, 1.0, 2.0]
+
+            # Each record retains the register of its own grid point
+            reg0 = b_records[0]["feature_map"]["config"]["register"]
+            reg1 = b_records[1]["feature_map"]["config"]["register"]
+            reg2 = b_records[2]["feature_map"]["config"]["register"]
+            assert reg0 != reg1 and reg1 != reg2
+            assert b_records[0]["spacing_um"] != b_records[1]["spacing_um"]
+
+            # First line is original; subsequent lines are marked as reused with zero timings
+            assert b_records[0]["reused_from_v_over_omega"] is None
+            assert b_records[1]["reused_from_v_over_omega"] == 0.5
+            assert b_records[2]["reused_from_v_over_omega"] == 0.5
+            assert b_records[1]["feature_seconds"] == 0.0
+            assert b_records[1]["train_seconds"] == 0.0
+            assert b_records[1]["tuning_seconds"] == 0.0
+            assert b_records[2]["feature_seconds"] == 0.0
+            assert b_records[2]["train_seconds"] == 0.0
+            assert b_records[2]["tuning_seconds"] == 0.0
+
+            # But Arm B results are mathematically identical across all V values for this gamma
+            for k in ("mcc", "pr_auc", "threshold", "separation", "hyperparameters"):
+                assert b_records[0][k] == b_records[1][k] == b_records[2][k]
+
+        # Verify Arm B is not incorrectly reused across different dephasing rates
+        b_g0 = [
+            r
+            for r in records
+            if r["arm"] == "B"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.0
         ]
-        assert len(b_records) == 3
-        assert [r["v_over_omega"] for r in b_records] == [0.5, 1.0, 2.0]
-
-        # Each record retains the register of its own grid point
-        reg0 = b_records[0]["feature_map"]["config"]["register"]
-        reg1 = b_records[1]["feature_map"]["config"]["register"]
-        reg2 = b_records[2]["feature_map"]["config"]["register"]
-        assert reg0 != reg1 and reg1 != reg2
-        assert b_records[0]["spacing_um"] != b_records[1]["spacing_um"]
-
-        # First line is original; subsequent lines are marked as reused with zero timings
-        assert b_records[0]["reused_from_v_over_omega"] is None
-        assert b_records[1]["reused_from_v_over_omega"] == 0.5
-        assert b_records[2]["reused_from_v_over_omega"] == 0.5
-        assert b_records[1]["feature_seconds"] == 0.0
-        assert b_records[1]["train_seconds"] == 0.0
-        assert b_records[1]["tuning_seconds"] == 0.0
-        assert b_records[2]["feature_seconds"] == 0.0
-        assert b_records[2]["train_seconds"] == 0.0
-        assert b_records[2]["tuning_seconds"] == 0.0
-
-        # But Arm B results are mathematically identical across all V values
-        for k in ("mcc", "pr_auc", "threshold", "separation", "hyperparameters"):
-            assert b_records[0][k] == b_records[1][k] == b_records[2][k]
+        b_g1 = [
+            r
+            for r in records
+            if r["arm"] == "B"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.1
+        ]
+        assert b_g0[0]["separation"] != b_g1[0]["separation"]
 
     def test_arm_b_features_independent_of_spacing(self) -> None:
         """Non-interacting features (Arm B) do not depend on atom spacing or V/Omega."""
@@ -1675,7 +1705,7 @@ class TestArmBReuse:
             n_trials=0,
             n_splits=2,
             n_steps=10,
-            v_over_omega=(0.5,),
+            v_over_omega=(2.0,),
             gamma_over_omega=(0.1,),
         )
         r_single = bench.run(data, s_single, tmp_path / "s.jsonl", cache_dir=tmp_path / "cs")
@@ -1692,13 +1722,19 @@ class TestArmBReuse:
         )
         r_multi = bench.run(data, s_multi, tmp_path / "m.jsonl", cache_dir=tmp_path / "cm")
 
-        # For V=0.5, every result matches exactly
-        matching = [r for r in r_multi if r["v_over_omega"] == 0.5]
+        # For V=2.0 in multi-grid, Arm B was reused from V=0.5 and matches single-grid run exactly
+        matching = [r for r in r_multi if r["v_over_omega"] == 2.0]
         assert len(matching) == len(r_single)
         for r1, r2 in zip(r_single, matching, strict=True):
+            assert r2["reused_from_v_over_omega"] == 0.5
+            assert r2["feature_seconds"] == 0.0
+            assert r2["train_seconds"] == 0.0
+            assert r2["tuning_seconds"] == 0.0
             assert r1["mcc"] == r2["mcc"]
-            assert r1["pr_auc"] == r2["pr_auc"]
+            assert r1["pr_auc"] == pytest.approx(r2["pr_auc"])
+            assert r1["threshold"] == pytest.approx(r2["threshold"])
             assert r1["separation"] == r2["separation"]
+            assert r1["hyperparameters"] == r2["hyperparameters"]
 
 
 class TestSeparationSubsamplingIntegration:
