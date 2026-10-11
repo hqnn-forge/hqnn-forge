@@ -131,6 +131,8 @@ _HERMITIAN_RTOL = 1e-12
 #: The same bound in units of the machine epsilon of the input's dtype, which
 #: is the larger of the two below double precision: a matrix computed in
 #: ``complex64`` is Hermitian to its own rounding only (``1.2e-5`` relative).
+#: The epsilon is that of single precision at most: with a half-precision
+#: one (``bfloat16``: 100 ε = 0.78) the bound would accept nearly any matrix.
 _HERMITIAN_EPS = 100
 
 
@@ -261,7 +263,7 @@ def evolve(
     * **Hermiticity** is checked per sample: the largest ``|H − H†|`` entry
       may be at most ``1e-12`` of the sample's largest ``|H|`` entry, or 100
       machine epsilons of the input's dtype where that is more (``1.2e-5``
-      for single precision).
+      for single precision, and no more than that below it).
     * **Choosing ``n_steps``.**  Halving ``dt`` divides the error by 4, so
       two runs with ``n_steps`` and ``2 · n_steps`` differ by about 3/4 of
       the coarser run's error.  ``dt`` must be small against ``1/γ`` and
@@ -306,7 +308,8 @@ def evolve(
     # batch would let a sample with a strong interaction hide another's
     # asymmetry.  An empty batch, which rydberg_hamiltonian returns for no
     # samples, has no sample to compare and comes back empty.
-    rtol = max(_HERMITIAN_RTOL, _HERMITIAN_EPS * torch.finfo(hamiltonian.dtype).eps)
+    eps = min(torch.finfo(hamiltonian.dtype).eps, torch.finfo(torch.float32).eps)
+    rtol = max(_HERMITIAN_RTOL, _HERMITIAN_EPS * eps)
     scale = h.detach().abs().amax(dim=(-2, -1)).reshape(-1)
     asymmetry = (h - h.mH).detach().abs().amax(dim=(-2, -1)).reshape(-1)
     failed = (asymmetry > rtol * scale).nonzero()
