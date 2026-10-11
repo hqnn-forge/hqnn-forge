@@ -307,7 +307,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rydberg_hamiltonian(register, omega, delta, *, c6, interactions=True)`, the dense
   `2^n × 2^n` Hamiltonian of `docs/rydberg-model.md` as a `complex128` torch tensor, for one
   pulse or a batch, with atom `i` on tensor factor and PennyLane wire `i`. `DEFAULT_C6` is the
-  ⁸⁷Rb `70S` value; registers above `MAX_ATOMS` = 10 atoms are refused (#496, #504)
+  ⁸⁷Rb `70S` value; `rydberg_hamiltonian` refuses registers above `MAX_ATOMS` = 10 atoms, the
+  register itself has no limit (#496, #504)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

@@ -97,7 +97,18 @@ class TestPositions:
             AtomRegister(positions)
         with pytest.raises(ValueError, match="must not require grad"):
             AtomRegister(positions * 2.0)  # a non-leaf of the graph as well
+        with pytest.raises(ValueError, match="must not require grad"):
+            AtomRegister(positions.detach().double().requires_grad_())  # no conversion
+        with pytest.raises(ValueError, match="must not require grad"):
+            AtomRegister(torch.nn.Parameter(positions.detach()))
         assert AtomRegister(positions.detach()).positions.tolist() == [[0.0, 0.0], [5.0, 0.0]]
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_rejects_positions_that_require_grad_under_no_grad(self, dtype: torch.dtype) -> None:
+        """The float64 copy of a float32 tensor made under ``no_grad`` requires none."""
+        positions = torch.tensor([[0.0, 0.0], [5.0, 0.0]], dtype=dtype, requires_grad=True)
+        with torch.no_grad(), pytest.raises(ValueError, match="must not require grad"):
+            AtomRegister(positions)
 
     def test_repr_shows_the_positions(self) -> None:
         assert repr(AtomRegister([[0, 0], [5.5, 0]])) == (
