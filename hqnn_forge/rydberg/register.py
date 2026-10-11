@@ -14,8 +14,11 @@ One register serves both ways of using the array:
   :meth:`AtomRegister.interaction_matrix`;
 * a gate-based entangler connects the pairs closer than the blockade radius
   ``R_b = (C6/Ω)^(1/6)`` (:meth:`AtomRegister.blockade_radius`).  Since
-  ``V_ij ≥ Ω`` exactly when ``|r_i − r_j| ≤ R_b``, that unit-disk graph is the
-  set of pairs with ``V_ij ≥ Ω``: the two views are the same geometry.
+  ``V_ij > Ω`` exactly when ``|r_i − r_j| < R_b``, that unit-disk graph is the
+  set of pairs with ``V_ij > Ω``: the two views are the same geometry.  A
+  pair at exactly ``R_b`` has ``V_ij = Ω`` and lies on the boundary of the
+  graph; which side it falls on is for the entangler (#418) to fix, and the
+  register does not decide it.
 
 A register holds positions and nothing else.  The atomic species (``C6``) and
 the drive (Ω) are arguments of the methods that need them.
@@ -87,7 +90,9 @@ class AtomRegister:
     ----------
     positions:
         Shape ``(n_atoms, 2)``, one ``(x, y)`` row per atom, in µm.  Any
-        real-valued array-like; it is copied and stored as ``float64``.
+        real-valued array-like; it is copied and stored as ``float64``.  The
+        positions are constants: the copy carries no graph, so a tensor that
+        requires grad is refused instead of losing its gradient unnoticed.
 
     Raises
     ------
@@ -95,8 +100,9 @@ class AtomRegister:
         If ``positions`` is complex or boolean.
     ValueError
         If ``positions`` does not have shape ``(n_atoms, 2)`` with at least
-        one atom, holds a NaN or an infinity, or places two atoms at the same
-        point (their coupling ``C6 / 0`` would be infinite).
+        one atom, is a tensor that requires grad, holds a NaN or an infinity,
+        or places two atoms at the same point (their coupling ``C6 / 0``
+        would be infinite).
 
     Notes
     -----
@@ -125,6 +131,11 @@ class AtomRegister:
             )
         if tensor.shape[0] < 1:
             raise ValueError("positions must hold at least one atom; got shape (0, 2).")
+        if tensor.requires_grad:
+            raise ValueError(
+                "positions must not require grad: the register stores them as constants, "
+                "so no gradient would reach them. Pass positions.detach() to use the values."
+            )
         tensor = tensor.detach().to(device="cpu", dtype=torch.float64, copy=True)
         finite = torch.isfinite(tensor).all(dim=1)
         if not bool(finite.all()):
