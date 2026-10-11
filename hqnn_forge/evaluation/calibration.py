@@ -120,18 +120,40 @@ def brier_score(y_true: object, prob: object) -> float:
     return float(((p - y) ** 2).mean())
 
 
-def _bins(p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> torch.Tensor:
-    """Bin index of every probability; the top edge belongs to the last bin."""
+def _validate_bins(n_bins: int, strategy: BinStrategy) -> None:
+    """Raise ValueError on non-positive bin count or an unrecognised strategy."""
     if n_bins < 1:
         raise ValueError(f"n_bins must be >= 1; got {n_bins}.")
+    if strategy not in ("uniform", "quantile"):
+        raise ValueError(f"strategy must be 'uniform' or 'quantile'; got {strategy!r}.")
+
+
+def _bins(p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> torch.Tensor:
+    """Bin index of every probability; the top edge belongs to the last bin."""
+    _validate_bins(n_bins, strategy)
     if strategy == "uniform":
         edges = torch.linspace(0.0, 1.0, n_bins + 1, dtype=torch.float64)
     elif strategy == "quantile":
         edges = torch.quantile(p, torch.linspace(0.0, 1.0, n_bins + 1, dtype=torch.float64))
     else:
-        raise ValueError(f"strategy must be 'uniform' or 'quantile'; got {strategy!r}.")
+        raise AssertionError(strategy)  # _validate_bins and this list are out of sync
     # Right-closed at the top, as sklearn.calibration.calibration_curve does.
     return torch.searchsorted(edges[1:-1], p, right=True)
+
+
+def _reliability_curve(
+    y: torch.Tensor, p: torch.Tensor, n_bins: int, strategy: BinStrategy
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Binned curve of validated float64 CPU tensors; see ``reliability_curve``."""
+    # contiguous: a column of a 2-D tensor (p[:, k]) is a strided view, which
+    # torch.searchsorted in the binning copies with a warning.
+    p = p.contiguous()
+    idx = _bins(p, n_bins, strategy)
+    counts = torch.bincount(idx, minlength=n_bins).to(torch.float64)
+    sum_p = torch.bincount(idx, weights=p, minlength=n_bins)
+    sum_y = torch.bincount(idx, weights=y, minlength=n_bins)
+    keep = counts > 0
+    return sum_p[keep] / counts[keep], sum_y[keep] / counts[keep], counts[keep]
 
 
 def reliability_curve(
@@ -144,20 +166,21 @@ def reliability_curve(
     (which returns the frequency first and the mean probability second).
     """
     y, p = _pair(y_true, prob)
-    idx = _bins(p, n_bins, strategy)
-    counts = torch.bincount(idx, minlength=n_bins).to(torch.float64)
-    sum_p = torch.bincount(idx, weights=p, minlength=n_bins)
-    sum_y = torch.bincount(idx, weights=y, minlength=n_bins)
-    keep = counts > 0
-    return sum_p[keep] / counts[keep], sum_y[keep] / counts[keep], counts[keep]
+    return _reliability_curve(y, p, n_bins, strategy)
+
+
+def _ece(y: torch.Tensor, p: torch.Tensor, n_bins: int, strategy: BinStrategy) -> float:
+    """Expected calibration error of validated float64 CPU tensors."""
+    confidence, frequency, counts = _reliability_curve(y, p, n_bins, strategy)
+    return float((counts / counts.sum() * (frequency - confidence).abs()).sum())
 
 
 def expected_calibration_error(
     y_true: object, prob: object, n_bins: int = 10, strategy: BinStrategy = "uniform"
 ) -> float:
     """``Σ_b (n_b / n) · |frequency_b − mean probability_b|`` over the bins."""
-    confidence, frequency, counts = reliability_curve(y_true, prob, n_bins, strategy)
-    return float((counts / counts.sum() * (frequency - confidence).abs()).sum())
+    y, p = _pair(y_true, prob)
+    return _ece(y, p, n_bins, strategy)
 
 
 def _class_labels(y_true: object, name: str, n: int, k: int) -> torch.Tensor:
@@ -200,10 +223,9 @@ def top_label_ece(
 ) -> float:
     """ECE of the top-class confidence against top-class correctness."""
     y, p = _multiclass_pair(y_true, prob)
+    _validate_bins(n_bins, strategy)
     confidence, predicted = p.max(1)
-    return expected_calibration_error(
-        (predicted == y).to(torch.float64), confidence, n_bins, strategy
-    )
+    return _ece((predicted == y).to(torch.float64), confidence, n_bins, strategy)
 
 
 def classwise_ece(
@@ -211,9 +233,9 @@ def classwise_ece(
 ) -> float:
     """Mean over classes of the one-vs-rest ECE of each class's probability."""
     y, p = _multiclass_pair(y_true, prob)
+    _validate_bins(n_bins, strategy)
     per_class = [
-        expected_calibration_error((y == k).to(torch.float64), p[:, k], n_bins, strategy)
-        for k in range(p.shape[1])
+        _ece((y == k).to(torch.float64), p[:, k], n_bins, strategy) for k in range(p.shape[1])
     ]
     return float(sum(per_class) / len(per_class))
 

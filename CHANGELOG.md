@@ -300,9 +300,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A model specification page, `docs/rydberg-model.md`, for a simulated Rydberg-atom feature
   map: units, Hamiltonian and its sign and ordering conventions, chain geometry, the detuning
   encoding, readout, Markovian dephasing, the closed-form limits each convention is checked
-  against, and which assumptions a current device supports. No code yet (#495, #503)
+  against, and which assumptions a current device supports (#495, #503)
 - `hqnn_forge.rydberg`: `AtomRegister` (atom positions in µm, `chain` and `ring` constructors,
-  the couplings `interaction_matrix(c6)` = `C6/r⁶` and `blockade_radius(c6, omega)`) and
+  the couplings `interaction_matrix(c6)` = `C6/r⁶` and `blockade_radius(c6, omega)`; positions
+  that require grad are refused) and
   `rydberg_hamiltonian(register, omega, delta, *, c6, interactions=True)`, the dense
   `2^n × 2^n` Hamiltonian of `docs/rydberg-model.md` as a `complex128` torch tensor, for one
   pulse or a batch, with atom `i` on tensor factor and PennyLane wire `i`. `DEFAULT_C6` is the
@@ -443,6 +444,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
+- Replace Mermaid diagrams with links to the GitHub repository in the package description at release
+  time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
   shots but `shots=None` was requested, guiding users to pass explicit `shots` and
   `diff_method="parameter-shift"` (#431)

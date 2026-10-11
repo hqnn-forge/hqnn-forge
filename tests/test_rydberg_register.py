@@ -90,6 +90,15 @@ class TestPositions:
         with pytest.raises(TypeError, match="real numbers"):
             AtomRegister(torch.zeros(2, 2, dtype=torch.bool))
 
+    def test_rejects_positions_that_require_grad(self) -> None:
+        """Storing a detached copy would drop the gradient without a word."""
+        positions = torch.tensor([[0.0, 0.0], [5.0, 0.0]], requires_grad=True)
+        with pytest.raises(ValueError, match="must not require grad"):
+            AtomRegister(positions)
+        with pytest.raises(ValueError, match="must not require grad"):
+            AtomRegister(positions * 2.0)  # a non-leaf of the graph as well
+        assert AtomRegister(positions.detach()).positions.tolist() == [[0.0, 0.0], [5.0, 0.0]]
+
     def test_repr_shows_the_positions(self) -> None:
         assert repr(AtomRegister([[0, 0], [5.5, 0]])) == (
             "AtomRegister(positions=[[0.0, 0.0], [5.5, 0.0]])"
@@ -252,7 +261,7 @@ class TestBlockadeRadius:
         assert AtomRegister.blockade_radius(DEFAULT_C6, OMEGA_REF) == pytest.approx(8.69, abs=5e-3)
 
     def test_two_atoms_one_blockade_radius_apart_interact_with_omega(self) -> None:
-        """The definition: ``V(R_b) = Ω``, the edge of the unit-disk graph of #418."""
+        """The definition: ``V(R_b) = Ω``, the boundary of the unit-disk graph of #418."""
         radius = AtomRegister.blockade_radius(DEFAULT_C6, OMEGA_REF)
         v = AtomRegister.chain(2, radius).interaction_matrix(DEFAULT_C6)[0, 1].item()
         assert v == pytest.approx(OMEGA_REF, rel=1e-12)
