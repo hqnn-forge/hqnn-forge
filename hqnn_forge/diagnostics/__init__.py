@@ -36,6 +36,7 @@ PairwiseDistances             Result of pairwise_distances.
 fisher_discriminant_ratio     Fisher discriminant ratio along the best linear direction.
 effective_rank                Effective rank of the feature covariance (exponential spectral entropy).
 linear_feature_kernel         The linear kernel F Fᵀ, for kernel_target_alignment.
+stratified_subsample_indices    Deterministic, class-stratified subsample indices.
 """
 
 from hqnn_forge.diagnostics.circuit import (
@@ -75,6 +76,7 @@ from hqnn_forge.diagnostics.separation import (
     linear_feature_kernel,
     pairwise_distances,
     separation_measures,
+    stratified_subsample_indices,
 )
 
 __all__: list[str] = [
@@ -106,4 +108,5 @@ __all__: list[str] = [
     "meyer_wallach",
     "pairwise_distances",
     "separation_measures",
+    "stratified_subsample_indices",
 ]

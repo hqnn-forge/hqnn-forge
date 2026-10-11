@@ -528,6 +528,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `circuit_summary` raised `AttributeError` on PennyLane 0.46, whose `specs` resources drop
   `num_gates`, `gate_types` and `gate_sizes`; it now counts depth and gates on the decomposed
   tape itself and gives the same summary on 0.45 and 0.46 (#364)
+- `separation_measures` gains `max_rows` and `seed` keywords to bound memory via deterministic
+  stratified subsampling, exported as `stratified_subsample_indices` from
+  `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
+  `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
+  dephasing rate and fold (#520)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

@@ -1183,6 +1183,7 @@ FIELDS = {
     "evolution_time_us",
     "n_steps",
     "feature_map",
+    "reused_from_v_over_omega",
     "measurement",
     "shots",
     "fold",
@@ -1559,9 +1560,55 @@ class TestArmBReuse:
         assert len(b_records) == 3
         assert [r["v_over_omega"] for r in b_records] == [0.5, 1.0, 2.0]
 
+        # Each record retains the register of its own grid point
+        reg0 = b_records[0]["feature_map"]["config"]["register"]
+        reg1 = b_records[1]["feature_map"]["config"]["register"]
+        reg2 = b_records[2]["feature_map"]["config"]["register"]
+        assert reg0 != reg1 and reg1 != reg2
+        assert b_records[0]["spacing_um"] != b_records[1]["spacing_um"]
+
+        # First line is original; subsequent lines are marked as reused with zero timings
+        assert b_records[0]["reused_from_v_over_omega"] is None
+        assert b_records[1]["reused_from_v_over_omega"] == 0.5
+        assert b_records[2]["reused_from_v_over_omega"] == 0.5
+        assert b_records[1]["feature_seconds"] == 0.0
+        assert b_records[1]["train_seconds"] == 0.0
+        assert b_records[1]["tuning_seconds"] == 0.0
+        assert b_records[2]["feature_seconds"] == 0.0
+        assert b_records[2]["train_seconds"] == 0.0
+        assert b_records[2]["tuning_seconds"] == 0.0
+
         # But Arm B results are mathematically identical across all V values
         for k in ("mcc", "pr_auc", "threshold", "separation", "hyperparameters"):
             assert b_records[0][k] == b_records[1][k] == b_records[2][k]
+
+    def test_arm_b_features_independent_of_spacing(self) -> None:
+        """Non-interacting features (Arm B) do not depend on atom spacing or V/Omega."""
+        settings = _replace(QUICK, n_atoms=3)
+        map1 = bench.feature_map(
+            settings, v_over_omega=0.5, gamma_over_omega=0.1, interactions=False
+        )
+        map2 = bench.feature_map(
+            settings, v_over_omega=2.0, gamma_over_omega=0.1, interactions=False
+        )
+        assert map1.register != map2.register
+
+        X = torch.tensor([[-1.0, 0.0, 1.0], [0.5, -0.5, 0.2]], dtype=torch.float64)
+        F1 = map1.transform(X)
+        F2 = map2.transform(X)
+        torch.testing.assert_close(F1, F2, atol=1e-12, rtol=1e-12)
+
+        # Also verify exact noiseless evolution (gamma=0)
+        map_nl1 = bench.feature_map(
+            settings, v_over_omega=0.5, gamma_over_omega=0.0, interactions=False
+        )
+        map_nl2 = bench.feature_map(
+            settings, v_over_omega=2.0, gamma_over_omega=0.0, interactions=False
+        )
+        assert map_nl1.register != map_nl2.register
+        F_nl1 = map_nl1.transform(X)
+        F_nl2 = map_nl2.transform(X)
+        torch.testing.assert_close(F_nl1, F_nl2, atol=1e-12, rtol=1e-12)
 
     def test_increasing_v_grid_does_not_increase_arm_b_computation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1666,10 +1713,44 @@ class TestSeparationSubsamplingIntegration:
         assert args_zero.max_separation_rows == 0
 
     def test_settings_validates_max_separation_rows(self) -> None:
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 1 or None; got 0"):
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 2"):
+            bench.Settings(max_separation_rows=2)
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 0"):
             bench.Settings(max_separation_rows=0)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 1 or None; got -10"):
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got -10"):
             bench.Settings(max_separation_rows=-10)
+
+    def test_quick_respects_separation_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured_settings: list[Any] = []
+
+        def spy_run_dataset(
+            name: str, X: Any, y: Any, settings: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            captured_settings.append(settings)
+            return []
+
+        monkeypatch.setattr(bench, "run_dataset", spy_run_dataset)
+        bench.main(
+            [
+                "--quick",
+                "--max-separation-rows",
+                "50",
+                "--separation-seed",
+                "12",
+                "--out",
+                str(tmp_path / "o1.jsonl"),
+            ]
+        )
+        assert len(captured_settings) == 1
+        assert captured_settings[0].max_separation_rows == 50
+        assert captured_settings[0].separation_seed == 12
+
+        captured_settings.clear()
+        bench.main(["--quick", "--max-separation-rows", "0", "--out", str(tmp_path / "o2.jsonl")])
+        assert len(captured_settings) == 1
+        assert captured_settings[0].max_separation_rows is None
 
     def test_bounded_separation_records_and_training_unaffected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

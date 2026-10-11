@@ -35,8 +35,8 @@ from hqnn_forge.diagnostics import (
     linear_feature_kernel,
     pairwise_distances,
     separation_measures,
+    stratified_subsample_indices,
 )
-from hqnn_forge.diagnostics.separation import stratified_subsample_indices
 from hqnn_forge.kernels import kernel_from_density_matrices, kernel_target_alignment
 from hqnn_forge.rydberg import AtomRegister, PulseEncoding, RydbergFeatureMap, readout
 
@@ -749,21 +749,37 @@ class TestSeparationMeasures:
         assert measures.n_samples == 30
         assert shapes and all(s[0] == 30 for s in shapes)
 
-    def test_rejects_non_positive_max_rows(self) -> None:
+    def test_rejects_invalid_max_rows(self) -> None:
         features, labels = two_blobs(10, 10, [1.0, 0.0], 1.0, seed=34)
-        with pytest.raises(ValueError, match="max_rows must be >= 1; got 0"):
+        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 0"):
             separation_measures(features, labels, max_rows=0)
-        with pytest.raises(ValueError, match="max_rows must be >= 1; got -5"):
+        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got -5"):
+            separation_measures(features, labels, max_rows=-5)
+        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 2"):
+            separation_measures(features, labels, max_rows=2)
+
+    def test_rejects_invalid_max_rows_on_small_inputs_up_front(self) -> None:
+        features = [[1.0], [2.0], [3.0], [4.0]]
+        labels = [0, 0, 1, 1]
+        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 2"):
+            separation_measures(features, labels, max_rows=2)
+        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got -5"):
             separation_measures(features, labels, max_rows=-5)
 
 
 class TestStratifiedSubsampleIndices:
-    def test_returns_all_indices_when_max_rows_at_or_above_total(self) -> None:
+    def test_returns_all_indices_when_max_rows_none_or_at_or_above_total(self) -> None:
         labels = np.array([0] * 30 + [1] * 20)
+        assert np.array_equal(stratified_subsample_indices(labels, None), np.arange(50))
         assert np.array_equal(stratified_subsample_indices(labels, 50), np.arange(50))
         assert np.array_equal(stratified_subsample_indices(labels, 100), np.arange(50))
-        assert np.array_equal(stratified_subsample_indices(labels, 0), np.arange(50))
-        assert np.array_equal(stratified_subsample_indices(labels, -1), np.arange(50))
+
+    def test_rejects_invalid_max_rows(self) -> None:
+        labels = np.array([0] * 30 + [1] * 20)
+        with pytest.raises(ValueError, match=r"max_rows must be >= 1 or None; got 0"):
+            stratified_subsample_indices(labels, 0)
+        with pytest.raises(ValueError, match=r"max_rows must be >= 1 or None; got -1"):
+            stratified_subsample_indices(labels, -1)
 
     def test_returns_exact_count_and_sorted(self) -> None:
         labels = np.array([0] * 60 + [1] * 40)
