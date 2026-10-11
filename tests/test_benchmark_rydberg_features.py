@@ -279,8 +279,14 @@ class TestGrid:
         [
             (dict(n_atoms=0), "n_atoms"),
             (dict(n_atoms=11), "n_atoms"),
+            (dict(n_atoms=11, arms=("B", "C")), "n_atoms"),
+            (dict(n_atoms=0, arms=("C",)), "n_atoms"),
+            (dict(shots=0), "shots"),
+            (dict(shots=-3, arms=("A", "B")), "shots"),
             (dict(hidden=0), "hidden"),
             (dict(circuit_layers=0), "circuit_layers"),
+            (dict(max_epochs=0), "max_epochs"),
+            (dict(patience=0), "patience"),
             (dict(v_over_omega=(1.0, 0.0)), "v_over_omega"),
             (dict(v_over_omega=()), "v_over_omega"),
             (dict(gamma_over_omega=(-0.1,)), "gamma_over_omega"),
@@ -298,6 +304,13 @@ class TestGrid:
     def test_invalid_settings(self, changes: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             bench.Settings(**changes)
+
+    def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
+        """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
+        assert bench.Settings(n_atoms=11, arms=("C", "D")).n_atoms == 11
+        assert bench.Settings(n_atoms=10).n_atoms == 10
+        assert bench.Settings(circuit_layers=0, arms=("A", "C")).circuit_layers == 0
+        assert bench.Settings(shots=1, patience=None, max_epochs=1).shots == 1
 
 
 # ---------------------------------------------------------------------------
@@ -435,22 +448,41 @@ class TestCircuitArm:
         assert rep.config["config"]["circuit_seed"] == seed
         np.testing.assert_allclose(features, _circuit_by_hand(X, seed), rtol=0, atol=1e-9)
 
-    def test_the_recorded_config_is_that_of_the_circuit_built(self) -> None:
-        """The config, which is also the cache key, is read off the layer, not typed again."""
-        settings = bench.Settings(n_atoms=3, circuit_layers=1)
-        (rep,) = [
-            r for r in bench.representations(_replace(settings, arms=("D",))) if r.arm == "D"
-        ]
+    def test_the_recorded_config_is_that_of_the_circuit_built(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Qubits, layers, entangler and readout in the config, which is also the
+        cache key, are read off the layer: a circuit built otherwise is
+        recorded otherwise.
+        """
+        settings = bench.Settings(n_atoms=3, circuit_layers=1, arms=("D",))
         seed = bench.run_seeds(settings.random_state)["circuit_seed"]
-        layer = bench.frozen_circuit(settings, seed)
-        assert (layer.n_qubits, layer.n_layers) == (3, 1)
-        assert (layer.entangler, layer.readout) == ("ring", "all")
+        (rep, _) = bench.representations(settings)
         assert rep.config["config"] == {
             "n_qubits": 3,
             "n_layers": 1,
             "rotation": "X",
             "entangler": "ring",
             "readout": "all",
+            "device_name": "default.qubit",
+            "weights": "uniform(-pi, pi)",
+            "circuit_seed": seed,
+        }
+
+        def other(settings: Any, circuit_seed: int) -> Any:
+            return bench.QuantumEncodingLayer(
+                4, 2, device_name="default.qubit", entangler="brickwork", readout="first"
+            )
+
+        monkeypatch.setattr(bench, "frozen_circuit", other)
+        (rep, _) = bench.representations(settings)
+        assert rep.config["config"] == {
+            "n_qubits": 4,
+            "n_layers": 2,
+            "rotation": "X",
+            "entangler": "brickwork",
+            "readout": "first",
             "device_name": "default.qubit",
             "weights": "uniform(-pi, pi)",
             "circuit_seed": seed,
@@ -729,10 +761,16 @@ class TestCommandLine:
         ("flags", "match"),
         [
             (["--shots", "0"], "shots"),
+            (["--shots", "0", "--arms", "A", "B"], "shots"),
             (["--n-steps", "0"], "n_steps"),
             (["--hidden", "0"], "hidden"),
             (["--circuit-layers", "0"], "circuit_layers"),
             (["--n-atoms", "11"], "n_atoms"),
+            (["--epochs", "0"], "max_epochs"),
+            (["--patience", "0"], "patience"),
+            # refused by the splits, with the data in hand: no record, so no new file
+            (["--folds", "100"], "n_splits"),
+            (["--inner-folds", "100"], "n_splits"),
         ],
     )
     def test_a_refused_setting_leaves_an_earlier_results_file_alone(
@@ -743,6 +781,23 @@ class TestCommandLine:
         with pytest.raises(ValueError, match=match):
             bench.main([*flags, "--samples", "40", "--out", str(out), "--no-cache"])
         assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_a_run_that_fails_later_keeps_the_records_it_wrote(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The file is opened with the first record and holds every record up to the failure."""
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+
+        def run_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            yield {"dataset": name, "mcc": 0.5}
+            raise RuntimeError("the second fold failed")
+
+        monkeypatch.setattr(bench, "run_dataset", run_dataset)
+        with pytest.raises(RuntimeError, match="second fold"):
+            bench.run({"a": (np.zeros((2, 2)), np.zeros(2), None)}, QUICK, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        assert [json.loads(line) for line in lines] == [{"dataset": "a", "mcc": 0.5}]
 
     def test_the_degenerate_pca_warning_is_shown_and_the_others_are_not(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

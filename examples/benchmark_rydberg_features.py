@@ -130,9 +130,11 @@ By default every feature is an exact expectation value
 (``"measurement": "exact"``).  With ``--shots S`` the features of A, B and D
 are estimated from ``S`` sampled bitstrings per sample
 (``"measurement": "shots"``), drawn with the recorded ``shot_seed``.  Every
-feature matrix is drawn from the start of that one stream, so the shot noise
-of two matrices (another arm, grid point or fold) is not independent: these
-are common random numbers.
+feature matrix of A and B is drawn from the start of that one stream, so the
+shot noise of two of them (the other arm, another grid point or fold) is not
+independent: these are common random numbers.  Arm D's device is seeded
+with the same number and starts its own stream anew for every matrix, so
+its noise is shared between D's matrices but not with A and B.
 ``D-hybrid`` is always trained and scored on exact expectation values, and
 arm C has nothing to measure.
 
@@ -225,6 +227,7 @@ control, for a smoke test.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import hashlib
 import itertools
@@ -236,7 +239,7 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, TextIO
 
 import numpy as np
 import numpy.typing as npt
@@ -369,12 +372,22 @@ class Settings:
     random_state: int = 0
 
     def __post_init__(self) -> None:
-        if not 1 <= self.n_atoms <= MAX_ATOMS:
-            raise ValueError(f"n_atoms must lie in [1, {MAX_ATOMS}]; got {self.n_atoms}.")
+        # The limit of the Rydberg maps and arm D's depth bind only where those arms run.
+        most = MAX_ATOMS if {"A", "B"} & set(self.arms) else None
+        if self.n_atoms < 1 or (most is not None and self.n_atoms > most):
+            raise ValueError(
+                f"n_atoms must be >= 1, and <= {MAX_ATOMS} with arm A or B; got {self.n_atoms}."
+            )
+        if self.shots is not None and self.shots < 1:
+            raise ValueError(f"shots must be None or >= 1; got {self.shots}.")
         if self.hidden < 1:
             raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
-        if self.circuit_layers < 1:
+        if "D" in self.arms and self.circuit_layers < 1:
             raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
+        if self.max_epochs < 1:
+            raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
+        if self.patience is not None and self.patience < 1:
+            raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -1539,8 +1552,10 @@ def run(
     settings:
         The run's settings.
     out:
-        The JSON-lines file; overwritten, once every feature map of
-        ``settings`` has been built.
+        The JSON-lines file; overwritten.  It is opened with the first
+        record, so a run that fails before one (a setting or a dataset that
+        a map, the splits or the training refuse) leaves an earlier file as
+        it is.
     cache_dir:
         Directory of the feature cache; ``None`` computes without storing.
 
@@ -1550,11 +1565,13 @@ def run(
         The records as written, before the JSON mapping.
     """
     cache = FeatureCache(cache_dir)
-    representations(settings)  # what a map refuses raises here, before ``out`` is emptied
     records: list[dict[str, Any]] = []
-    with open(out, "w", encoding="utf-8") as fh:
+    with contextlib.ExitStack() as stack:
+        fh: TextIO | None = None
         for name, (X, y, data_seed) in datasets.items():
             for record in run_dataset(name, X, y, settings, cache, data_seed=data_seed):
+                if fh is None:
+                    fh = stack.enter_context(open(out, "w", encoding="utf-8"))
                 records.append(record)
                 fh.write(to_json_line(record) + "\n")
                 fh.flush()
