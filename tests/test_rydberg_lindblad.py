@@ -537,10 +537,10 @@ class TestStrongDephasing:
         assert (rho - mixed).abs().max().item() < 1e-12
         features = readout(rho, pairs=True)
         assert torch.allclose(
-            features[:, :n_atoms], torch.full_like(features[:, :n_atoms], 0.5), atol=1e-10
+            features[:, :n_atoms], torch.full_like(features[:, :n_atoms], 0.5), rtol=0, atol=1e-10
         )
         assert torch.allclose(
-            features[:, n_atoms:], torch.full_like(features[:, n_atoms:], 0.25), atol=1e-10
+            features[:, n_atoms:], torch.full_like(features[:, n_atoms:], 0.25), rtol=0, atol=1e-10
         )
 
     def test_early_in_the_same_evolution_the_state_is_not_mixed(self) -> None:
@@ -752,6 +752,28 @@ class TestBatch:
         rho = checked_evolve(h.to(torch.complex64).to(C128), 0.9)
         assert torch.equal(evolve(h.to(torch.complex64), 0.9), rho)
 
+    def test_a_hamiltonian_computed_in_single_precision_is_accepted(self) -> None:
+        """
+        A basis rotation carried out in ``complex64`` leaves ``H`` Hermitian to
+        single-precision rounding only (here ``1e-7`` of its largest entry),
+        far above the double-precision bound.
+        """
+        h = self.hamiltonians()[0].to(torch.complex64)
+        generator = torch.Generator().manual_seed(0)
+        q, _ = torch.linalg.qr(
+            torch.complex(
+                torch.randn(8, 8, generator=generator), torch.randn(8, 8, generator=generator)
+            )
+        )
+        rotated = q @ h @ q.mH
+        relative = ((rotated - rotated.mH).abs().max() / rotated.abs().max()).item()
+        assert 1e-9 < relative < 1e-6
+        rho = evolve(rotated, 0.9)
+        assert rho.dtype == C128
+        # the same matrix in double precision is held to the double-precision bound
+        with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
+            evolve(rotated.to(C128), 0.9)
+
     def test_a_real_symmetric_matrix_is_accepted(self) -> None:
         h = self.hamiltonians()[0]
         assert torch.equal(evolve(h.real, 0.9), evolve(h, 0.9))
@@ -807,21 +829,57 @@ class TestValidation:
         with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
             evolve(h, 1.0)
 
+    def test_a_large_sample_does_not_hide_another_samples_asymmetry(self) -> None:
+        """
+        The bound is relative to each sample's own largest entry.  Two atoms
+        1.5 µm apart have ``V = 4.8 × 10⁵``: against that scale an asymmetry of
+        ``1e-8`` in another sample would pass, and a batch would not equal a
+        loop over its samples.
+        """
+        strong = rydberg_hamiltonian(AtomRegister.chain(2, 1.5), 2.0, [0.1, 0.2], c6=DEFAULT_C6)
+        assert strong.abs().max().item() == pytest.approx(4.76e5, rel=1e-2)
+        for asymmetry, large in ((1e-8, strong), (0.5, self.H * 1e13)):
+            bad = self.H.clone()
+            bad[0, 1] = bad[0, 1] + asymmetry
+            assert asymmetry < 1e-12 * large.abs().max().item()
+            with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
+                evolve(bad, 1.0)
+            with pytest.raises(ValueError, match=r"\|H - H†\| entry of sample 1 is"):
+                evolve(torch.stack([large, bad]), 1.0)
+
+    def test_single_precision_does_not_excuse_a_real_asymmetry(self) -> None:
+        h = self.H.to(torch.complex64)
+        h[0, 1] = h[0, 1] + 1e-3
+        with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
+            evolve(h, 1.0)
+
     def test_rejects_a_non_finite_matrix(self) -> None:
         h = self.H.clone()
         h[1, 1] = math.nan
         with pytest.raises(ValueError, match="hamiltonian must be finite"):
             evolve(h, 1.0)
 
-    @pytest.mark.parametrize("t", [-0.1, math.nan, math.inf, "1.0", True])
+    @pytest.mark.parametrize("t", [-0.1, math.nan, math.inf, "1.0", True, 10**400])
     def test_rejects_a_bad_time(self, t: object) -> None:
         with pytest.raises(ValueError, match="t must be a finite number >= 0"):
             evolve(self.H, t)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("gamma", [-0.1, math.nan, math.inf, None])
+    @pytest.mark.parametrize("gamma", [-0.1, math.nan, math.inf, None, 10**400])
     def test_rejects_a_bad_rate(self, gamma: object) -> None:
         with pytest.raises(ValueError, match="gamma must be a finite number >= 0"):
             evolve(self.H, 1.0, gamma=gamma, n_steps=10)  # type: ignore[arg-type]
+
+    def test_a_missing_step_count_is_reported_before_the_eigendecomposition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cheapest argument error does not wait for the most expensive operation."""
+
+        def no_eigh(*args: object, **kwargs: object) -> None:
+            raise AssertionError("eigh ran before the arguments were checked")
+
+        monkeypatch.setattr(torch.linalg, "eigh", no_eigh)
+        with pytest.raises(ValueError, match="n_steps is required when gamma > 0"):
+            evolve(self.H, 1.0, gamma=0.5)
 
     def test_dephasing_needs_a_step_count(self) -> None:
         """No default: the step the result is accurate at depends on γ and on ``H``."""
