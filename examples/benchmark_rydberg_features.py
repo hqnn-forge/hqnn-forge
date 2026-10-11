@@ -129,7 +129,10 @@ Measurement
 By default every feature is an exact expectation value
 (``"measurement": "exact"``).  With ``--shots S`` the features of A, B and D
 are estimated from ``S`` sampled bitstrings per sample
-(``"measurement": "shots"``), drawn with the recorded ``shot_seed``.
+(``"measurement": "shots"``), drawn with the recorded ``shot_seed``.  Every
+feature matrix is drawn from the start of that one stream, so the shot noise
+of two matrices (another arm, grid point or fold) is not independent: these
+are common random numbers.
 ``D-hybrid`` is always trained and scored on exact expectation values, and
 arm C has nothing to measure.
 
@@ -148,7 +151,9 @@ tuning trial, a repeated run) reads the file; a change in either part of the
 key is a miss.  The inputs are fitted per fold (step 2), so each fold has
 its own entries: "once" is once per grid point and input matrix.  The
 recorded ``feature_seconds`` is the simulation time measured when the
-features were computed, also on a cache hit.
+features were computed, also on a cache hit.  The key holds neither the
+version of this package nor those of its dependencies: after a change of
+the code or the environment, empty the directory or pass ``--no-cache``.
 
 Tuning
 ------
@@ -229,7 +234,7 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Final, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -253,7 +258,13 @@ from hqnn_forge.models import (
     LinearClassifier,
 )
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
-from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
+from hqnn_forge.rydberg import (
+    DEFAULT_C6,
+    MAX_ATOMS,
+    AtomRegister,
+    PulseEncoding,
+    RydbergFeatureMap,
+)
 from hqnn_forge.training import train_model
 from hqnn_forge.utils import FocalLoss
 
@@ -278,6 +289,8 @@ LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "foca
 TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
+#: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
+_CIRCUIT_ROTATION: Final = "X"
 #: Second entry of the seed sequence of the seeds that belong to the run, not to a fold.
 _RUN_STREAM = 1 << 16
 
@@ -354,6 +367,12 @@ class Settings:
     random_state: int = 0
 
     def __post_init__(self) -> None:
+        if not 1 <= self.n_atoms <= MAX_ATOMS:
+            raise ValueError(f"n_atoms must lie in [1, {MAX_ATOMS}]; got {self.n_atoms}.")
+        if self.hidden < 1:
+            raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
+        if self.circuit_layers < 1:
+            raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -815,7 +834,13 @@ def frozen_circuit(settings: Settings, circuit_seed: int) -> QuantumEncodingLaye
         else {"shots": settings.shots, "seed": run_seeds(settings.random_state)["shot_seed"]}
     )
     layer = QuantumEncodingLayer(
-        settings.n_atoms, settings.circuit_layers, device_name="default.qubit", **sampling
+        settings.n_atoms,
+        settings.circuit_layers,
+        rotation=_CIRCUIT_ROTATION,
+        device_name="default.qubit",
+        entangler="ring",
+        readout="all",
+        **sampling,
     )
     weights = layer.qlayer.weights
     generator = torch.Generator().manual_seed(circuit_seed)
@@ -918,11 +943,11 @@ def _circuit_representation(
         config={
             "feature_map": "QuantumEncodingLayer",
             "config": {
-                "n_qubits": settings.n_atoms,
-                "n_layers": settings.circuit_layers,
-                "rotation": "X",
-                "entangler": "ring",
-                "readout": "all",
+                "n_qubits": layer.n_qubits,
+                "n_layers": layer.n_layers,
+                "rotation": _CIRCUIT_ROTATION,
+                "entangler": layer.entangler,
+                "readout": layer.readout,
                 "device_name": "default.qubit",
                 "weights": "uniform(-pi, pi)",
                 "circuit_seed": circuit_seed,
@@ -1512,7 +1537,8 @@ def run(
     settings:
         The run's settings.
     out:
-        The JSON-lines file; overwritten.
+        The JSON-lines file; overwritten, once every feature map of
+        ``settings`` has been built.
     cache_dir:
         Directory of the feature cache; ``None`` computes without storing.
 
@@ -1522,6 +1548,7 @@ def run(
         The records as written, before the JSON mapping.
     """
     cache = FeatureCache(cache_dir)
+    representations(settings)  # what a map refuses raises here, before ``out`` is emptied
     records: list[dict[str, Any]] = []
     with open(out, "w", encoding="utf-8") as fh:
         for name, (X, y, data_seed) in datasets.items():
@@ -1534,8 +1561,9 @@ def run(
 
 def _parser() -> argparse.ArgumentParser:
     default = Settings()
+    paragraphs = (__doc__ or "").split("\n\n")  # no docstring under ``python -OO``
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n\n")[1],
+        description=paragraphs[1] if len(paragraphs) > 1 else None,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--out", type=Path, default=Path("rydberg_features_benchmark.jsonl"))
@@ -1615,6 +1643,10 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     with warnings.catch_warnings():
         # PennyLane's device fallbacks and PCANormalizer's notes, once per fold and trial.
         warnings.simplefilter("ignore")
+        # Not this one: with degenerate eigenvalues, which component sets which atom is arbitrary.
+        warnings.filterwarnings(
+            "default", message=r"eigenvalues \d+ and \d+ are degenerate", category=RuntimeWarning
+        )
         records = run(
             datasets, settings, args.out, cache_dir=None if args.no_cache else args.cache_dir
         )

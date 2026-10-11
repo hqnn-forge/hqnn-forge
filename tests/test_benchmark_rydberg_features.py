@@ -26,6 +26,7 @@ import importlib.util
 import json
 import math
 import sys
+import warnings
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -128,6 +129,34 @@ def _map_by_hand(n_atoms: int, v: float, gamma_ratio: float, n_steps: int, **kwa
         n_steps=n_steps if gamma_ratio > 0 else None,
         **kwargs,
     )
+
+
+def _circuit_by_hand(X: np.ndarray, circuit_seed: int, n_layers: int = 2) -> np.ndarray:
+    """
+    Arm D's features, gate by gate: ``RX(x_i)`` on qubit ``i``, then per layer
+    a CNOT ring ``i → i+1`` and ``Rot`` on every qubit, then ``⟨Z_i⟩``.  The
+    angles are ``U(−π, π)`` draws of ``circuit_seed``, held in float32.
+    """
+    n = X.shape[1]
+    draw = torch.rand(
+        (n_layers, n, 3),
+        generator=torch.Generator().manual_seed(circuit_seed),
+        dtype=torch.float64,
+    )
+    weights = ((2 * draw - 1) * math.pi).to(torch.float32).double().numpy()
+
+    @qml.qnode(qml.device("default.qubit", wires=n))
+    def circuit(x: np.ndarray) -> Any:
+        for i in range(n):
+            qml.RX(x[i], wires=i)
+        for layer in range(n_layers):
+            for i in range(n):
+                qml.CNOT(wires=[i, (i + 1) % n])
+            for i in range(n):
+                qml.Rot(*weights[layer, i], wires=i)
+        return [qml.expval(qml.PauliZ(i)) for i in range(n)]
+
+    return np.array([[float(v) for v in circuit(row)] for row in X])
 
 
 def _single_atom_feature(x: np.ndarray) -> np.ndarray:
@@ -248,6 +277,10 @@ class TestGrid:
     @pytest.mark.parametrize(
         ("changes", "match"),
         [
+            (dict(n_atoms=0), "n_atoms"),
+            (dict(n_atoms=11), "n_atoms"),
+            (dict(hidden=0), "hidden"),
+            (dict(circuit_layers=0), "circuit_layers"),
             (dict(v_over_omega=(1.0, 0.0)), "v_over_omega"),
             (dict(v_over_omega=()), "v_over_omega"),
             (dict(gamma_over_omega=(-0.1,)), "gamma_over_omega"),
@@ -400,6 +433,28 @@ class TestCircuitArm:
         assert np.abs(features).max() <= 1.0
         assert rep.n_frozen_parameters == 2 * 3 * 3
         assert rep.config["config"]["circuit_seed"] == seed
+        np.testing.assert_allclose(features, _circuit_by_hand(X, seed), rtol=0, atol=1e-9)
+
+    def test_the_recorded_config_is_that_of_the_circuit_built(self) -> None:
+        """The config, which is also the cache key, is read off the layer, not typed again."""
+        settings = bench.Settings(n_atoms=3, circuit_layers=1)
+        (rep,) = [
+            r for r in bench.representations(_replace(settings, arms=("D",))) if r.arm == "D"
+        ]
+        seed = bench.run_seeds(settings.random_state)["circuit_seed"]
+        layer = bench.frozen_circuit(settings, seed)
+        assert (layer.n_qubits, layer.n_layers) == (3, 1)
+        assert (layer.entangler, layer.readout) == ("ring", "all")
+        assert rep.config["config"] == {
+            "n_qubits": 3,
+            "n_layers": 1,
+            "rotation": "X",
+            "entangler": "ring",
+            "readout": "all",
+            "device_name": "default.qubit",
+            "weights": "uniform(-pi, pi)",
+            "circuit_seed": seed,
+        }
 
     def test_sampled_features_depend_on_the_inputs_and_the_seed_alone(self) -> None:
         """
@@ -1356,8 +1411,15 @@ class TestQuick:
         """The arm's features of the training part's real rows and of the test rows, by hand."""
         fold = quick.fold
         real = np.concatenate([fold.train_idx, fold.val_idx])
-        if arm == "C":
+        if arm in ("C", "D-hybrid"):
             return fold.inputs[real], fold.inputs[fold.test_idx], real
+        if arm == "D":
+            seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
+            return (
+                _circuit_by_hand(fold.inputs[real], seed),
+                _circuit_by_hand(fold.inputs[fold.test_idx], seed),
+                real,
+            )
         fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
         return (
             fmap.transform(fold.inputs[real]).numpy(),
@@ -1365,7 +1427,7 @@ class TestQuick:
             real,
         )
 
-    @pytest.mark.parametrize("arm", ["A", "B", "C"])
+    @pytest.mark.parametrize("arm", ["A", "B", "C", "D", "D-hybrid"])
     def test_separation_measures_of_the_matrix_the_head_receives(
         self, quick: Any, arm: str
     ) -> None:
@@ -1374,7 +1436,7 @@ class TestQuick:
             "train": separation_measures(train, quick.y[real]).to_dict(),
             "test": separation_measures(test, quick.y[quick.fold.test_idx]).to_dict(),
         }
-        for head in ("linear", "mlp"):
+        for head in ("hybrid",) if arm == "D-hybrid" else ("linear", "mlp"):
             recorded = _line(quick, arm, head)["separation"]
             assert set(recorded) == {"train", "test"}
             for part in ("train", "test"):
@@ -1402,7 +1464,10 @@ class TestQuick:
         other = _line(quick, "A", "linear")["separation"]["test"]
         assert other["fisher_ratio"] != pytest.approx(expected["fisher_ratio"], rel=1e-3)
 
-    @pytest.mark.parametrize(("arm", "head"), [("C", "linear"), ("A", "mlp"), ("B", "linear")])
+    @pytest.mark.parametrize(
+        ("arm", "head"),
+        [("C", "linear"), ("A", "mlp"), ("B", "linear"), ("D", "linear"), ("D", "mlp")],
+    )
     def test_scores_of_a_model_trained_by_hand(self, quick: Any, arm: str, head: str) -> None:
         """
         MCC, PR-AUC, threshold and epochs of a line, from a model built and
@@ -1419,6 +1484,9 @@ class TestQuick:
         )
         if arm == "C":
             features = torch.from_numpy(stacked.astype(np.float32))
+        elif arm == "D":
+            circuit_seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
+            features = torch.from_numpy(_circuit_by_hand(stacked, circuit_seed)).to(torch.float32)
         else:
             fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
             features = fmap.transform(stacked).to(torch.float32)
@@ -1495,3 +1563,63 @@ class TestShotsRun:
         assert read[0]["separation"]["test"] == pytest.approx(expected, rel=1e-9)
         exact = _map_by_hand(4, 1.0, 0.1, 40).transform(fold.inputs[fold.test_idx]).numpy()
         assert np.abs(test - exact).max() > 0.01  # sampled, not exact
+
+
+# ---------------------------------------------------------------------------
+# The command line: what a failing or noisy run leaves behind
+# ---------------------------------------------------------------------------
+
+
+class TestCommandLine:
+    @pytest.mark.parametrize(
+        ("flags", "match"),
+        [
+            (["--shots", "0"], "shots"),
+            (["--n-steps", "0"], "n_steps"),
+            (["--hidden", "0"], "hidden"),
+            (["--circuit-layers", "0"], "circuit_layers"),
+            (["--n-atoms", "11"], "n_atoms"),
+        ],
+    )
+    def test_a_refused_setting_leaves_an_earlier_results_file_alone(
+        self, tmp_path: Path, flags: list[str], match: str
+    ) -> None:
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=match):
+            bench.main([*flags, "--samples", "40", "--out", str(out), "--no-cache"])
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_the_degenerate_pca_warning_is_shown_and_the_others_are_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The warning ``PCANormalizer`` raises for degenerate eigenvalues says
+        that which component drives which atom is arbitrary; ``main`` hides
+        the repeated notes of a run, but not that one.
+        """
+        cross = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]).repeat(3, axis=0)
+        distinct = cross * np.array([2.0, 1.0])
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            warnings.warn("a device fallback", UserWarning, stacklevel=1)
+            warnings.warn("another runtime note", RuntimeWarning, stacklevel=1)
+            PCANormalizer(n_components=2).fit(distinct)
+            PCANormalizer(n_components=2).fit(cross)  # both eigenvalues are 6/11
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        with pytest.warns(RuntimeWarning) as caught:
+            bench.main(["--quick", "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 1
+        assert "are degenerate" in messages[0]
+        assert "not reproducible" in messages[0]
+
+    def test_the_parser_builds_without_a_docstring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``python -OO`` strips the module docstring the description is taken from."""
+        assert bench._parser().description.startswith("``RydbergFeatureMap``")
+        monkeypatch.setattr(bench, "__doc__", None)
+        parser = bench._parser()
+        assert parser.description is None
+        assert parser.parse_args(["--quick"]).quick is True
