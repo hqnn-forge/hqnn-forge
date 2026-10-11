@@ -36,6 +36,7 @@ from hqnn_forge.diagnostics import (
     pairwise_distances,
     separation_measures,
 )
+from hqnn_forge.diagnostics.separation import stratified_subsample_indices
 from hqnn_forge.kernels import kernel_from_density_matrices, kernel_target_alignment
 from hqnn_forge.rydberg import AtomRegister, PulseEncoding, RydbergFeatureMap, readout
 
@@ -700,6 +701,122 @@ class TestSeparationMeasures:
         assert separation_measures(features.to(torch.float32), labels).fisher_ratio == (
             pytest.approx(expected.fisher_ratio, rel=1e-4)
         )
+
+    def test_subsampling_when_above_limit(self) -> None:
+        features, labels = two_blobs(50, 50, [1.0, 0.5], 1.0, seed=31)
+        full = separation_measures(features, labels)
+        assert full.n_samples == 100
+
+        sub = separation_measures(features, labels, max_rows=30, seed=0)
+        assert sub.n_samples == 30
+        assert sub.n_features == 2
+        assert isinstance(sub, SeparationMeasures)
+
+        # Disabling or passing >= n_samples gives full data
+        assert separation_measures(features, labels, max_rows=100) == full
+        assert separation_measures(features, labels, max_rows=150) == full
+        assert separation_measures(features, labels, max_rows=None) == full
+
+    def test_subsampling_reproducibility(self) -> None:
+        features, labels = two_blobs(50, 50, [1.0, 0.5], 1.0, seed=32)
+        m1 = separation_measures(features, labels, max_rows=40, seed=123)
+        m2 = separation_measures(features, labels, max_rows=40, seed=123)
+        m3 = separation_measures(features, labels, max_rows=40, seed=456)
+        assert m1 == m2
+        assert m1.mean_between_distance != m3.mean_between_distance
+
+    def test_subsampling_preserves_label_alignment(self) -> None:
+        labels = torch.tensor([0, 1] * 50)
+        features = labels.to(F64).unsqueeze(1)
+        measures = separation_measures(features, labels, max_rows=20, seed=7)
+        assert measures.n_samples == 20
+        assert measures.kernel_alignment == pytest.approx(1.0, abs=1e-12)
+        assert measures.mean_between_distance == pytest.approx(1.0, abs=1e-12)
+
+    def test_subsampling_occurs_before_quadratic_matrix_allocation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        features, labels = two_blobs(50, 50, [1.0, 0.0], 1.0, seed=33)
+        shapes: list[tuple[int, ...]] = []
+        orig_cdist = torch.cdist
+
+        def spy_cdist(x1: torch.Tensor, x2: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+            shapes.append(tuple(x1.shape))
+            return orig_cdist(x1, x2, **kwargs)
+
+        monkeypatch.setattr(torch, "cdist", spy_cdist)
+        measures = separation_measures(features, labels, max_rows=30, seed=0)
+        assert measures.n_samples == 30
+        assert shapes and all(s[0] == 30 for s in shapes)
+
+    def test_rejects_non_positive_max_rows(self) -> None:
+        features, labels = two_blobs(10, 10, [1.0, 0.0], 1.0, seed=34)
+        with pytest.raises(ValueError, match="max_rows must be >= 1; got 0"):
+            separation_measures(features, labels, max_rows=0)
+        with pytest.raises(ValueError, match="max_rows must be >= 1; got -5"):
+            separation_measures(features, labels, max_rows=-5)
+
+
+class TestStratifiedSubsampleIndices:
+    def test_returns_all_indices_when_max_rows_at_or_above_total(self) -> None:
+        labels = np.array([0] * 30 + [1] * 20)
+        assert np.array_equal(stratified_subsample_indices(labels, 50), np.arange(50))
+        assert np.array_equal(stratified_subsample_indices(labels, 100), np.arange(50))
+        assert np.array_equal(stratified_subsample_indices(labels, 0), np.arange(50))
+        assert np.array_equal(stratified_subsample_indices(labels, -1), np.arange(50))
+
+    def test_returns_exact_count_and_sorted(self) -> None:
+        labels = np.array([0] * 60 + [1] * 40)
+        idx = stratified_subsample_indices(labels, 35, seed=42)
+        assert len(idx) == 35
+        assert len(set(idx)) == 35
+        assert np.all(np.diff(idx) > 0)
+        assert (idx >= 0).all() and (idx < 100).all()
+
+    def test_deterministic_reproducibility(self) -> None:
+        labels = np.array([0] * 50 + [1] * 50)
+        idx1 = stratified_subsample_indices(labels, 30, seed=99)
+        idx2 = stratified_subsample_indices(labels, 30, seed=99)
+        idx3 = stratified_subsample_indices(labels, 30, seed=100)
+        assert np.array_equal(idx1, idx2)
+        assert not np.array_equal(idx1, idx3)
+
+    def test_preserves_class_proportions(self) -> None:
+        labels = np.array([0] * 80 + [1] * 20)
+        idx = stratified_subsample_indices(labels, 50, seed=1)
+        sub_labels = labels[idx]
+        assert np.sum(sub_labels == 0) == 40
+        assert np.sum(sub_labels == 1) == 10
+
+    def test_guarantees_representation_when_max_rows_ge_n_classes(self) -> None:
+        labels = np.array([0] * 99 + [1] * 1)
+        idx = stratified_subsample_indices(labels, 10, seed=0)
+        assert len(idx) == 10
+        assert 99 in idx  # the single sample from class 1 must be present
+
+    def test_handles_max_rows_less_than_n_classes(self) -> None:
+        labels = np.array([0] * 50 + [1] * 40 + [2] * 30 + [3] * 20 + [4] * 10)
+        idx = stratified_subsample_indices(labels, 3, seed=0)
+        assert len(idx) == 3
+        sub_labels = labels[idx]
+        assert set(sub_labels).issubset({0, 1, 2})
+        assert np.all(np.diff(idx) > 0)
+
+    def test_multiclass_proportions(self) -> None:
+        labels = np.array([0] * 100 + [1] * 50 + [2] * 50)
+        idx = stratified_subsample_indices(labels, 20, seed=5)
+        sub_labels = labels[idx]
+        assert np.sum(sub_labels == 0) == 10
+        assert np.sum(sub_labels == 1) == 5
+        assert np.sum(sub_labels == 2) == 5
+
+    def test_accepts_torch_tensors_numpy_arrays_and_lists(self) -> None:
+        raw = [0, 0, 0, 1, 1, 1, 1, 2, 2]
+        idx_list = stratified_subsample_indices(raw, 4, seed=10)
+        idx_np = stratified_subsample_indices(np.array(raw), 4, seed=10)
+        idx_torch = stratified_subsample_indices(torch.tensor(raw), 4, seed=10)
+        assert np.array_equal(idx_list, idx_np)
+        assert np.array_equal(idx_np, idx_torch)
 
 
 # ---------------------------------------------------------------------------

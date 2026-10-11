@@ -194,7 +194,11 @@ rows), ``train_seconds`` (the final fit) and ``tuning_seconds``;
 ``separation``, the measures of
 :func:`hqnn_forge.diagnostics.separation_measures` on the matrix the head
 receives, for the real rows of the training part (``train``) and for the
-test rows (``test``); the dataset's size and SHA-256; ``settings`` and
+test rows (``test``).  On a training part exceeding
+``--max-separation-rows`` (default 2000), the measures are computed on a
+class-stratified subsample drawn with ``--separation-seed`` (default 0)
+to bound memory; ``separation[part]['n_samples']`` records the actual
+number of rows used; the dataset's size and SHA-256; ``settings`` and
 ``environment``.
 
 **The file is strict JSON.**  A NaN is written as ``null`` (as
@@ -324,6 +328,12 @@ class Settings:
         Samples of the positive control.
     random_state:
         Root seed of every split, draw, initialisation and batch order.
+    max_separation_rows:
+        Maximum rows used to compute separation measures (pairwise distances
+        and linear kernel), or ``None`` to use all rows. Default 2000.
+    separation_seed:
+        Seed for the class-stratified subsample draw when eligible rows
+        exceed ``max_separation_rows``. Default 0.
     """
 
     n_atoms: int = 4
@@ -352,6 +362,8 @@ class Settings:
     )
     n_samples: int = 600
     random_state: int = 0
+    max_separation_rows: int | None = 2000
+    separation_seed: int = 0
 
     def __post_init__(self) -> None:
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
@@ -377,6 +389,10 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
+        if self.max_separation_rows is not None and self.max_separation_rows < 1:
+            raise ValueError(
+                f"max_separation_rows must be >= 1 or None; got {self.max_separation_rows}."
+            )
 
     @property
     def evolution_time(self) -> float:
@@ -866,7 +882,8 @@ class Representation:
 def _rydberg_representation(
     settings: Settings, arm: str, v: float, gamma: float, shot_seed: int
 ) -> Representation:
-    fmap = feature_map(settings, v, gamma, interactions=arm == "A")
+    v_map = settings.v_over_omega[0] if arm == "B" else v
+    fmap = feature_map(settings, v_map, gamma, interactions=arm == "A")
     shots = settings.shots
 
     def compute(inputs: FloatArray) -> FloatArray:
@@ -1388,21 +1405,72 @@ def run_dataset(
             },
         }
 
+        arm_b_cache: dict[float, dict[str, Any]] = {}
         for rep in reps:
+            if (
+                rep.arm == "B"
+                and rep.gamma_over_omega is not None
+                and rep.gamma_over_omega in arm_b_cache
+            ):
+                b_entry = arm_b_cache[rep.gamma_over_omega]
+                for head in rep.heads:
+                    h = b_entry["heads"][head]
+                    sampled = settings.shots is not None
+                    yield {
+                        **data_info,
+                        "arm": rep.arm,
+                        "head": head,
+                        "representation": rep.kind,
+                        "feature_map_trained": False,
+                        **_grid_fields(rep, settings),
+                        "feature_map": rep.config,
+                        "measurement": "shots" if sampled else "exact",
+                        "shots": settings.shots if sampled else None,
+                        **fold_info,
+                        "feature_dim": int(b_entry["matrix"].shape[1]),
+                        "n_parameters": h["model"].count_parameters(),
+                        "n_frozen_parameters": rep.n_frozen_parameters,
+                        "model": {
+                            "class": type(h["model"]).__name__,
+                            "config": h["model"].get_config(),
+                        },
+                        "hyperparameters": h["hyperparameters"],
+                        "tuning": h["tuning"],
+                        "mcc": h["fit"].mcc,
+                        "pr_auc": h["fit"].pr_auc,
+                        "threshold": h["fit"].threshold,
+                        "epochs": h["fit"].epochs,
+                        "feature_seconds": b_entry["cached"].seconds,
+                        "feature_cache_hit": b_entry["cached"].hit,
+                        "train_seconds": h["fit"].seconds,
+                        "tuning_seconds": h["tuning_seconds"],
+                        "separation": b_entry["separation"],
+                        "settings": settings.as_dict(),
+                        "environment": env,
+                    }
+                continue
+
             cached = features_of(rep, split, cache)
             matrix = cached.features
             separation = {
                 "train": separation_measures(
-                    matrix[split.real], split.labels[split.real]
+                    matrix[split.real],
+                    split.labels[split.real],
+                    max_rows=settings.max_separation_rows,
+                    seed=settings.separation_seed,
                 ).to_dict(),
                 "test": separation_measures(
-                    matrix[split.test], split.labels[split.test]
+                    matrix[split.test],
+                    split.labels[split.test],
+                    max_rows=settings.max_separation_rows,
+                    seed=settings.separation_seed,
                 ).to_dict(),
             }
             tuning_features = [features_of(rep, s, cache).features for s in tuning_splits]
+            heads_cache: dict[str, Any] = {}
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
-                tuning: dict[str, Any] | None = None
+                tuning = None
                 tuning_seconds = 0.0
                 if candidates:
                     start = time.perf_counter()
@@ -1431,6 +1499,15 @@ def run_dataset(
                     loss=settings.loss,
                     batch_seed=seeds["batch_seed"],
                 )
+                if rep.arm == "B":
+                    heads_cache[head] = {
+                        "chosen": chosen,
+                        "tuning": tuning,
+                        "tuning_seconds": tuning_seconds,
+                        "hyperparameters": hyperparameters,
+                        "model": model,
+                        "fit": fit,
+                    }
                 sampled = settings.shots is not None and rep.arm in ("A", "B", "D")
                 yield {
                     **data_info,
@@ -1460,6 +1537,13 @@ def run_dataset(
                     "separation": separation,
                     "settings": settings.as_dict(),
                     "environment": env,
+                }
+            if rep.arm == "B" and rep.gamma_over_omega is not None:
+                arm_b_cache[rep.gamma_over_omega] = {
+                    "cached": cached,
+                    "matrix": matrix,
+                    "separation": separation,
+                    "heads": heads_cache,
                 }
 
 
@@ -1569,6 +1653,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=default.patience)
     parser.add_argument("--samples", type=int, default=default.n_samples)
     parser.add_argument("--seed", type=int, default=default.random_state)
+    parser.add_argument(
+        "--max-separation-rows",
+        type=int,
+        default=default.max_separation_rows,
+        help="maximum rows for separation measures (None or int <= 0 for full data)",
+    )
+    parser.add_argument(
+        "--separation-seed",
+        type=int,
+        default=default.separation_seed,
+        help="seed for separation measure subsampling",
+    )
     return parser
 
 
@@ -1585,6 +1681,11 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         settings = dataclasses.replace(QUICK, random_state=args.seed)
         names = ["positive-control"]
     else:
+        max_sep = (
+            None
+            if args.max_separation_rows is not None and args.max_separation_rows <= 0
+            else args.max_separation_rows
+        )
         settings = Settings(
             n_atoms=args.n_atoms,
             v_over_omega=tuple(args.v_over_omega),
@@ -1606,6 +1707,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             inner_folds=args.inner_folds,
             n_samples=args.samples,
             random_state=args.seed,
+            max_separation_rows=max_sep,
+            separation_seed=args.separation_seed,
         )
         names = list(dict.fromkeys(args.dataset))
     datasets = {
