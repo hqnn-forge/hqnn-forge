@@ -146,14 +146,16 @@ under ``--cache-dir``, keyed by the SHA-256 of
   input matrix handed to the map and its labels, and
 * the map's ``get_config()``, with the number of shots and the shot seed.
 
+The key holds neither the version of this package nor those of its
+dependencies: after a change of the code or the environment, empty the
+directory or pass ``--no-cache``.
+
 A later request with the same inputs and settings (another head, another
 tuning trial, a repeated run) reads the file; a change in either part of the
 key is a miss.  The inputs are fitted per fold (step 2), so each fold has
 its own entries: "once" is once per grid point and input matrix.  The
 recorded ``feature_seconds`` is the simulation time measured when the
-features were computed, also on a cache hit.  The key holds neither the
-version of this package nor those of its dependencies: after a change of
-the code or the environment, empty the directory or pass ``--no-cache``.
+features were computed, also on a cache hit.
 
 Tuning
 ------

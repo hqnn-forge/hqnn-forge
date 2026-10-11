@@ -720,6 +720,66 @@ class TestUciData:
 
 
 # ---------------------------------------------------------------------------
+# The command line: what a failing or noisy run leaves behind
+# ---------------------------------------------------------------------------
+
+
+class TestCommandLine:
+    @pytest.mark.parametrize(
+        ("flags", "match"),
+        [
+            (["--shots", "0"], "shots"),
+            (["--n-steps", "0"], "n_steps"),
+            (["--hidden", "0"], "hidden"),
+            (["--circuit-layers", "0"], "circuit_layers"),
+            (["--n-atoms", "11"], "n_atoms"),
+        ],
+    )
+    def test_a_refused_setting_leaves_an_earlier_results_file_alone(
+        self, tmp_path: Path, flags: list[str], match: str
+    ) -> None:
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=match):
+            bench.main([*flags, "--samples", "40", "--out", str(out), "--no-cache"])
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_the_degenerate_pca_warning_is_shown_and_the_others_are_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The warning ``PCANormalizer`` raises for degenerate eigenvalues says
+        that which component drives which atom is arbitrary; ``main`` hides
+        the repeated notes of a run, but not that one.
+        """
+        cross = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]).repeat(3, axis=0)
+        distinct = cross * np.array([2.0, 1.0])
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            warnings.warn("a device fallback", UserWarning, stacklevel=1)
+            warnings.warn("another runtime note", RuntimeWarning, stacklevel=1)
+            PCANormalizer(n_components=2).fit(distinct)
+            PCANormalizer(n_components=2).fit(cross)  # both eigenvalues are 6/11
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        with pytest.warns(RuntimeWarning) as caught:
+            bench.main(["--quick", "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 1
+        assert "are degenerate" in messages[0]
+        assert "not reproducible" in messages[0]
+
+    def test_the_parser_builds_without_a_docstring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``python -OO`` strips the module docstring the description is taken from."""
+        assert bench._parser().description.startswith("``RydbergFeatureMap``")
+        monkeypatch.setattr(bench, "__doc__", None)
+        parser = bench._parser()
+        assert parser.description is None
+        assert parser.parse_args(["--quick"]).quick is True
+
+
+# ---------------------------------------------------------------------------
 # Inputs: fitted on the training rows, oversampled once
 # ---------------------------------------------------------------------------
 
@@ -1563,63 +1623,3 @@ class TestShotsRun:
         assert read[0]["separation"]["test"] == pytest.approx(expected, rel=1e-9)
         exact = _map_by_hand(4, 1.0, 0.1, 40).transform(fold.inputs[fold.test_idx]).numpy()
         assert np.abs(test - exact).max() > 0.01  # sampled, not exact
-
-
-# ---------------------------------------------------------------------------
-# The command line: what a failing or noisy run leaves behind
-# ---------------------------------------------------------------------------
-
-
-class TestCommandLine:
-    @pytest.mark.parametrize(
-        ("flags", "match"),
-        [
-            (["--shots", "0"], "shots"),
-            (["--n-steps", "0"], "n_steps"),
-            (["--hidden", "0"], "hidden"),
-            (["--circuit-layers", "0"], "circuit_layers"),
-            (["--n-atoms", "11"], "n_atoms"),
-        ],
-    )
-    def test_a_refused_setting_leaves_an_earlier_results_file_alone(
-        self, tmp_path: Path, flags: list[str], match: str
-    ) -> None:
-        out = tmp_path / "results.jsonl"
-        out.write_text("an earlier run\n", encoding="utf-8")
-        with pytest.raises(ValueError, match=match):
-            bench.main([*flags, "--samples", "40", "--out", str(out), "--no-cache"])
-        assert out.read_text(encoding="utf-8") == "an earlier run\n"
-
-    def test_the_degenerate_pca_warning_is_shown_and_the_others_are_not(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """
-        The warning ``PCANormalizer`` raises for degenerate eigenvalues says
-        that which component drives which atom is arbitrary; ``main`` hides
-        the repeated notes of a run, but not that one.
-        """
-        cross = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]).repeat(3, axis=0)
-        distinct = cross * np.array([2.0, 1.0])
-
-        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-            warnings.warn("a device fallback", UserWarning, stacklevel=1)
-            warnings.warn("another runtime note", RuntimeWarning, stacklevel=1)
-            PCANormalizer(n_components=2).fit(distinct)
-            PCANormalizer(n_components=2).fit(cross)  # both eigenvalues are 6/11
-            return []
-
-        monkeypatch.setattr(bench, "run", run)
-        with pytest.warns(RuntimeWarning) as caught:
-            bench.main(["--quick", "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
-        messages = [str(w.message) for w in caught]
-        assert len(messages) == 1
-        assert "are degenerate" in messages[0]
-        assert "not reproducible" in messages[0]
-
-    def test_the_parser_builds_without_a_docstring(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``python -OO`` strips the module docstring the description is taken from."""
-        assert bench._parser().description.startswith("``RydbergFeatureMap``")
-        monkeypatch.setattr(bench, "__doc__", None)
-        parser = bench._parser()
-        assert parser.description is None
-        assert parser.parse_args(["--quick"]).quick is True
