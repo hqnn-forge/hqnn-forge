@@ -131,7 +131,9 @@ class AtomRegister:
             )
         if tensor.shape[0] < 1:
             raise ValueError("positions must hold at least one atom; got shape (0, 2).")
-        if tensor.requires_grad:
+        # Asked of the argument, not of the float64 copy: under torch.no_grad() the
+        # conversion of another dtype returns a tensor that no longer requires grad.
+        if isinstance(positions, torch.Tensor) and positions.requires_grad:
             raise ValueError(
                 "positions must not require grad: the register stores them as constants, "
                 "so no gradient would reach them. Pass positions.detach() to use the values."
