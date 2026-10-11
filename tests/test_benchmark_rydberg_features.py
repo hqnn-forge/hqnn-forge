@@ -1020,8 +1020,14 @@ class TestTuning:
         hybrid row included: the same split object, initialisation seed,
         batch seed and loss for the final fit, and the same tuning folds,
         candidates, seed and training settings for every trial.
+
+        The search space holds more configurations than the budget of two
+        trials, so a model that was given one trial more would get a longer
+        list; with the two values of ``QUICK`` every budget of two or more
+        is the whole grid.
         """
-        settings = QUICK
+        space = {"lr": (0.01, 0.02, 0.05, 0.1)}
+        settings = _replace(QUICK, search_space=space)
         X, y, data_seed = bench.load_dataset("positive-control", settings)
         fold = _fold_by_hand(X, y, settings, 0)
 
@@ -1095,7 +1101,8 @@ class TestTuning:
 
         # The tuning of every line: the same folds, candidates and seed ...
         assert len(tunes) == len(ROWS)
-        candidates = [{"lr": 0.01}, {"lr": 0.05}]
+        candidates = _sample_configs(space, settings.n_trials, fold.seeds["tune_seed"])
+        assert len(candidates) == settings.n_trials == 2 < len(space["lr"])
         for tune in tunes:
             assert len(tune.splits) == settings.inner_folds
             assert all(a is b for a, b in zip(tune.splits, tunes[0].splits, strict=True))
