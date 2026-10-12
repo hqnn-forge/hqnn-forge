@@ -501,11 +501,13 @@ def resolve_device(
         Number of qubits to allocate.
     seed:
         Seed of the device's own random generator, which draws the shot
-        samples.  ``None`` leaves PennyLane's default, which seeds from the
-        global NumPy generator: ``torch.manual_seed`` does not reach it, so
-        shot-based results then differ from run to run.  ``default.qubit``,
-        ``default.mixed`` and the lightning devices honour it; a plugin device
-        is passed it as given.  See ``validate_seed``.
+        samples.  ``None`` creates an unseeded private generator, without
+        drawing from NumPy's global RNG.  Neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` controls it: pass ``seed`` for repeatable
+        shot-based results.  ``default.qubit``,
+        ``default.mixed`` and the lightning devices honour it.  Other plugins
+        receive an explicit seed as given, while ``None`` leaves their default
+        unchanged (they need not accept a ``seed`` keyword).  See ``validate_seed``.
 
     Returns
     -------
@@ -532,7 +534,14 @@ def resolve_device(
         itself is broken.
     """
     seed = validate_seed(seed)
-    kwargs: dict[str, object] = {} if seed is None else {"seed": seed}
+    # Omitting seed uses PennyLane's "global" default, which draws a seed
+    # from np.random even for analytic circuits. Explicit None instead uses
+    # the device's private, entropy-seeded generator.
+    kwargs: dict[str, object] = (
+        {"seed": seed}
+        if seed is not None or device_name in (*KNOWN_DEVICES, "default.mixed")
+        else {}
+    )
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits, **kwargs)
         logger.debug("Quantum device initialised: %s (%d qubits)", device_name, n_qubits)

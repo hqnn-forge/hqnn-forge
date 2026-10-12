@@ -2,8 +2,9 @@
 tests/test_init_seed.py
 =======================
 ``init_seed`` on the classifiers and a seeded ``HybridClassifierEstimator.fit``
-(#175): the weights are reproducible from the seed, and the global torch RNG is
-left exactly as the caller had it -- not reseeded, and not advanced either.
+(#175): the weights are reproducible from the seed, and the global torch and
+NumPy RNGs (#417) are left exactly as the caller had them -- not reseeded,
+and not advanced either.
 """
 
 from __future__ import annotations
@@ -58,6 +59,25 @@ class TestInitSeed:
         before = torch.random.get_rng_state()
         _build(cls, extra, init_seed=7)
         assert torch.equal(torch.random.get_rng_state(), before)
+
+    @pytest.mark.parametrize("encoding_type", ["angle", "iqp", "amplitude", "reuploading"])
+    def test_the_global_numpy_rng_is_left_exactly_as_it_was(
+        self, cls: type, extra: dict, encoding_type: str
+    ) -> None:
+        saved = np.random.get_state()
+        try:
+            np.random.seed(123)
+            # Keep a cached Gaussian too: the complete state includes it as
+            # well as the MT19937 keys and their current position.
+            np.random.normal()
+            before = np.random.get_state()
+            _build(cls, extra, init_seed=7, encoding_type=encoding_type)
+            after = np.random.get_state()
+            assert after[0] == before[0]
+            np.testing.assert_array_equal(after[1], before[1])
+            assert after[2:] == before[2:]
+        finally:
+            np.random.set_state(saved)
 
     def test_none_keeps_drawing_from_the_global_rng(self, cls: type, extra: dict) -> None:
         torch.manual_seed(5)

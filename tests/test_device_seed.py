@@ -52,10 +52,35 @@ class TestSeed:
         assert torch.equal(a.quantum_layer.qlayer.weights, b.quantum_layer.qlayer.weights)
         assert not _same(_samples(a), _samples(b))
 
+    @pytest.mark.parametrize("device_name", ["default.qubit", "default.mixed"])
+    def test_unseeded_device_leaves_the_global_numpy_rng_alone(self, device_name: str) -> None:
+        # default.mixed exercises the path outside the fallback chain too.
+        before = np.random.get_state()
+        resolve_device(device_name, 2)
+        after = np.random.get_state()
+        assert after[0] == before[0]
+        np.testing.assert_array_equal(after[1], before[1])
+        assert after[2:] == before[2:]
+
     def test_seed_does_not_touch_the_weights(self) -> None:
         a, b = _model(1), _model(2)
         for (name, p), q in zip(a.state_dict().items(), b.state_dict().values(), strict=True):
             assert torch.equal(p, q), name
+
+    def test_unseeded_plugin_need_not_accept_a_seed_keyword(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pennylane as qml
+
+        real = qml.device
+
+        def plugin(name: str, wires: int):
+            assert name == "plugin.without.seed"
+            return real("default.qubit", wires=wires, seed=11)
+
+        monkeypatch.setattr(qml, "device", plugin)
+        dev = resolve_device("plugin.without.seed", 2)
+        np.testing.assert_array_equal(dev._rng.random(5), np.random.default_rng(11).random(5))
 
     def test_seed_reaches_the_device(self) -> None:
         (rng,) = device_generators(_model(11))
@@ -85,7 +110,10 @@ class TestSeed:
         assert type(model.quantum_layer.seed) is int
         assert _same(_samples(model), _samples(_model(3)))
 
-    def test_seed_is_honoured_after_a_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("seed", [None, 8])
+    def test_seed_is_honoured_after_a_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, seed: int | None
+    ) -> None:
         import pennylane as qml
 
         from hqnn_forge.encoding import angle_embedding as ae
@@ -98,10 +126,18 @@ class TestSeed:
             return real(name, *args, **kwargs)
 
         monkeypatch.setattr(ae.qml, "device", device)
+        before = np.random.get_state()
         with pytest.warns(RuntimeWarning):
-            dev = resolve_device("lightning.qubit", 2, seed=8)
+            dev = resolve_device("lightning.qubit", 2, seed=seed)
         assert dev.name == "default.qubit"
-        assert dev._rng.bit_generator.state == np.random.default_rng(8).bit_generator.state
+        after = np.random.get_state()
+        assert after[0] == before[0]
+        np.testing.assert_array_equal(after[1], before[1])
+        assert after[2:] == before[2:]
+        if seed is not None:
+            np.testing.assert_array_equal(
+                dev._rng.random(5), np.random.default_rng(seed).random(5)
+            )
 
     def test_config_records_the_seed_and_checkpoints_round_trip(self, tmp_path) -> None:
         model = _model(7)
