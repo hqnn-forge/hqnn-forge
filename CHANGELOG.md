@@ -445,6 +445,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
+- Pin PyPI diagram links to their release README, replace tilde-fenced Mermaid blocks, and use
+  GitHub-compatible anchors for whitespace, inline links and repeated headings (#534)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
