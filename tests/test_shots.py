@@ -298,6 +298,60 @@ class TestApplyShots:
 
 
 class TestShotSweep:
+    @pytest.mark.parametrize("n_repeats", [1, 5])
+    @pytest.mark.parametrize("multiclass", [False, True], ids=["binary", "multiclass"])
+    def test_exact_reference_is_evaluated_and_scored_once(
+        self, monkeypatch: pytest.MonkeyPatch, n_repeats: int, multiclass: bool
+    ) -> None:
+        model: Any
+        if multiclass:
+            model = MulticlassHybridClassifier(
+                n_input_features=2, n_qubits=2, n_layers=1, n_classes=3, **EXACT
+            )
+            # Zero head weights give softmax(log(1), log(2), log(5)) = (1, 2, 5) / 8.
+            biases = torch.tensor([0.0, math.log(2), math.log(5)])
+            expected_row = torch.tensor([[0.125, 0.25, 0.625]] * 4)
+            y = torch.tensor([0, 2, 2, 1])
+        else:
+            model = HybridBinaryClassifier(n_input_features=2, n_qubits=2, n_layers=1, **EXACT)
+            # Zero head weights give sigmoid(log(3)) = 3 / (1 + 3).
+            biases = torch.tensor([math.log(3)])
+            expected_row = torch.tensor([0.75] * 4)
+            y = torch.tensor([0, 1, 1, 0])
+        with torch.no_grad():
+            model.head.weight.zero_()
+            model.head.bias.copy_(biases)
+        x = torch.zeros(4, 2)
+        original = model.quantum_layer.qlayer.qnode
+        predict = model.predict_proba
+        predict_counts: list[int | None] = []
+        score_calls = 0
+
+        def counted_predict(inputs: torch.Tensor) -> torch.Tensor:
+            predict_counts.append(model.quantum_layer.shots)
+            return predict(inputs)
+
+        def accuracy(labels: torch.Tensor, probabilities: torch.Tensor) -> float:
+            nonlocal score_calls
+            score_calls += 1
+            predicted = probabilities.argmax(-1) if multiclass else probabilities > 0.5
+            return float(predicted.eq(labels).float().mean())
+
+        monkeypatch.setattr(model, "predict_proba", counted_predict)
+        counts = [40, None, 400, None]
+        points = shot_sweep(model, x, counts, n_repeats=n_repeats, y=y, score_fn=accuracy)
+        assert predict_counts == [40] * n_repeats + [None] + [400] * n_repeats + [None]
+        assert score_calls == 2 * n_repeats + 2
+        assert [point.shots for point in points] == counts
+        for point in points:
+            # Axis 0 is repetition, axis 1 is sample, and multiclass axis 2 is class.
+            torch.testing.assert_close(
+                point.probabilities, torch.stack([expected_row] * n_repeats), rtol=0, atol=1e-7
+            )
+            # Each set of labels contains exactly two correct predictions out of four.
+            assert point.scores == [0.5] * n_repeats
+        assert model.quantum_layer.qlayer.qnode is original
+
     def test_spread_falls_like_one_over_root_shots(self) -> None:
         torch.manual_seed(0)
         model = HybridBinaryClassifier(n_input_features=4, n_qubits=3, n_layers=2, **EXACT)
