@@ -16,7 +16,10 @@ What the numbers are checked against:
   measures of a ``--quick`` run;
 * a circuit written out gate by gate in PennyLane, for arm D;
 * hand computations, for the positive control's labels, the parameter counts
-  and the JSON mapping.
+  and the JSON mapping;
+* ``hashlib`` over files listed with ``os.walk``, for the code digest in the
+  feature cache's key (#522), and ``compare_environment`` for which entries
+  of the environment the key holds.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -37,11 +41,12 @@ import pytest
 import torch
 import torch.nn as nn
 
+import hqnn_forge
 from hqnn_forge.benchmark import _sample_configs, fingerprint
 from hqnn_forge.data import load_iranian_churn
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
-from hqnn_forge.experiment import environment
+from hqnn_forge.experiment import RECORDED_PACKAGES, compare_environment, environment
 from hqnn_forge.models import ClassicalBaseline, HybridBinaryClassifier, LinearClassifier
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
 from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
@@ -954,6 +959,36 @@ class TestInputs:
 # ---------------------------------------------------------------------------
 
 
+def _sources(package: Path) -> list[Path]:
+    """Every ``*.py`` file below ``package``, found with ``os.walk``."""
+    return [
+        Path(directory) / name
+        for directory, _, names in os.walk(package)
+        for name in names
+        if name.endswith(".py")
+    ]
+
+
+def _code_by_hand() -> str:
+    """The code digest of the cache key: file names and content hashes, hashed."""
+    package = Path(hqnn_forge.__file__).parent
+    hashes = {
+        f"hqnn_forge/{p.relative_to(package).as_posix()}": hashlib.sha256(
+            p.read_bytes()
+        ).hexdigest()
+        for p in _sources(package)
+    }
+    script = ROOT / "examples" / "benchmark_rydberg_features.py"
+    hashes[script.name] = hashlib.sha256(script.read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+
+
+def _change_id(change: dict[str, Any]) -> str:
+    packages = change.get("packages", {})
+    names = [*(k for k in change if k != "packages"), *packages]
+    return "-".join(names) + ("-absent" if None in packages.values() else "")
+
+
 class TestCache:
     inputs = np.random.default_rng(8).uniform(-3, 3, size=(12, 4))
     labels = np.array([0, 1] * 6)
@@ -1036,15 +1071,199 @@ class TestCache:
         }
         assert cache.fetch(self.inputs, self.labels, rebuilt, compute).hit is True
 
-    def test_the_key_is_the_hash_of_the_fingerprint_and_the_config(self, tmp_path: Path) -> None:
+    def test_the_key_is_the_hash_of_the_data_the_config_the_versions_and_the_code(
+        self, tmp_path: Path
+    ) -> None:
+        """The key by hand: canonical JSON of the four parts, hashed."""
         config = {"config": _map_by_hand(4, 1.0, 0.5, 50).get_config()}
+        env = environment()
         text = json.dumps(
-            {"data": fingerprint(self.inputs, self.labels), "config": config}, sort_keys=True
+            {
+                "data": fingerprint(self.inputs, self.labels),
+                "config": config,
+                "environment": {
+                    "python": env["python"],
+                    "implementation": env["implementation"],
+                    "hqnn_forge": env["hqnn_forge"],
+                    "packages": env["packages"],
+                },
+                "code": _code_by_hand(),
+            },
+            sort_keys=True,
         )
         expected = hashlib.sha256(text.encode()).hexdigest()
         path = bench.FeatureCache(tmp_path).path(self.inputs, self.labels, config)
         assert path == tmp_path / f"{expected}.npz"
-        assert bench.cache_key(fingerprint(self.inputs, self.labels), config) == expected
+        assert (
+            bench.cache_key(fingerprint(self.inputs, self.labels), config, env, _code_by_hand())
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"hqnn_forge": "0.0.0+other"},
+            {"python": "3.0.0"},
+            {"implementation": "pypy"},
+            *({"packages": {name: "0.0.0+other"}} for name in RECORDED_PACKAGES),
+            {"packages": {"torch": None}},
+            {"code_sha256": "0" * 64},
+        ],
+        ids=_change_id,
+    )
+    def test_an_entry_written_under_another_version_or_other_code_is_a_miss(
+        self, tmp_path: Path, change: dict[str, Any]
+    ) -> None:
+        """
+        Each entry of the environment that ``compare_environment`` compares,
+        and the code digest: features stored under another value are not
+        served, and stay the entry of that other value.
+        """
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        env = environment()
+        other_env = {
+            **env,
+            **{k: v for k, v in change.items() if k not in ("packages", "code_sha256")},
+            "packages": {**env["packages"], **change.get("packages", {})},
+        }
+        other_code = change.get("code_sha256")
+        # the change is one a record's reader would be told about, or one of the code
+        assert bool(compare_environment(other_env)) is (other_code is None)
+
+        def other() -> Any:
+            return bench.FeatureCache(tmp_path, env=other_env, code_sha256=other_code)
+
+        marked = np.full((12, 4), 7.0)
+        assert other().fetch(self.inputs, self.labels, config, lambda x: marked).hit is False
+        here = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (here.hit, calls) == (False, [12])
+        np.testing.assert_array_equal(
+            here.features, _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs)
+        )
+        again = other().fetch(self.inputs, self.labels, config, compute)
+        assert (again.hit, calls) == (True, [12])
+        np.testing.assert_array_equal(again.features, marked)
+        assert len(list(tmp_path.glob("*.npz"))) == 2
+
+    def test_an_entry_under_the_key_without_versions_is_a_miss(self, tmp_path: Path) -> None:
+        """A cache directory filled before #522 (data and config only) is not read."""
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        text = json.dumps(
+            {"data": fingerprint(self.inputs, self.labels), "config": config}, sort_keys=True
+        )
+        old = tmp_path / f"{hashlib.sha256(text.encode()).hexdigest()}.npz"
+        np.savez(old, features=np.full((12, 4), 7.0), seconds=np.float64(1.0))
+        fetched = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (fetched.hit, calls) == (False, [12])
+        np.testing.assert_array_equal(
+            fetched.features, _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs)
+        )
+
+    def test_the_platform_is_not_in_the_key_and_a_hit_says_where_it_was_computed(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        ``compare_environment`` does not compare the platform string and the
+        key does not hold it: such a hit carries the environment of the entry.
+        """
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        env = environment()
+        elsewhere = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        assert compare_environment(elsewhere) == {}
+        first = bench.FeatureCache(tmp_path, env=elsewhere).fetch(
+            self.inputs, self.labels, config, compute
+        )
+        assert (first.hit, first.environment) == (False, elsewhere)
+        second = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (second.hit, calls) == (True, [12])
+        assert second.environment == elsewhere != env
+        # a miss, and a request without a directory, carry the running environment
+        other_config = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
+        third = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, other_config, compute)
+        assert (third.hit, third.environment) == (False, env)
+        fourth = bench.FeatureCache(None).fetch(self.inputs, self.labels, config, compute)
+        assert (fourth.hit, fourth.environment) == (False, env)
+
+    def test_the_code_digest_by_hand(self, tmp_path: Path) -> None:
+        """Every ``*.py`` below the package and the script, by name and content."""
+        package = tmp_path / "pkg"
+        (package / "sub").mkdir(parents=True)
+        (package / "a.py").write_bytes(b"A = 1\n")
+        (package / "sub" / "b.py").write_bytes(b"B = 2\n")
+        (package / "notes.txt").write_bytes(b"not code\n")
+        script = tmp_path / "elsewhere" / "run.py"
+        script.parent.mkdir()
+        script.write_bytes(b"print(1)\n")
+
+        def digest() -> str:
+            return str(bench.code_fingerprint(bench.code_files(package, script)))
+
+        assert bench.code_files(package, script) == {
+            "pkg/a.py": package / "a.py",
+            "pkg/sub/b.py": package / "sub" / "b.py",
+            "run.py": script,
+        }
+        by_hand = {
+            "pkg/a.py": hashlib.sha256(b"A = 1\n").hexdigest(),
+            "pkg/sub/b.py": hashlib.sha256(b"B = 2\n").hexdigest(),
+            "run.py": hashlib.sha256(b"print(1)\n").hexdigest(),
+        }
+        first = digest()
+        assert first == hashlib.sha256(json.dumps(by_hand, sort_keys=True).encode()).hexdigest()
+        # what is not Python source does not enter
+        (package / "notes.txt").write_bytes(b"other notes\n")
+        assert digest() == first
+        # one byte of a module, one byte of the script, a new module, a module that moves
+        seen = {first}
+        (package / "sub" / "b.py").write_bytes(b"B = 3\n")
+        seen.add(digest())
+        script.write_bytes(b"print(2)\n")
+        seen.add(digest())
+        (package / "c.py").write_bytes(b"")
+        seen.add(digest())
+        (package / "a.py").rename(package / "sub" / "a.py")
+        seen.add(digest())
+        assert len(seen) == 5
+
+    def test_the_code_digest_covers_the_package_and_the_script(self) -> None:
+        """The files listed another way, among them the modules the features come from."""
+        package = Path(hqnn_forge.__file__).parent
+        files = bench.code_files()
+        assert files == {
+            **{f"hqnn_forge/{p.relative_to(package).as_posix()}": p for p in _sources(package)},
+            "benchmark_rydberg_features.py": Path(str(bench.__file__)),
+        }
+        hashed = {p.resolve() for p in files.values()}
+        for obj in (RydbergFeatureMap, bench.QuantumEncodingLayer, PCANormalizer, bench):
+            module = obj if isinstance(obj, ModuleType) else sys.modules[obj.__module__]
+            assert module.__file__ is not None
+            assert Path(module.__file__).resolve() in hashed, module.__name__
+        # every module of the package this process has imported
+        loaded = {
+            Path(str(m.__file__)).resolve()
+            for name, m in list(sys.modules.items())
+            if name.split(".")[0] == "hqnn_forge" and getattr(m, "__file__", None)
+        }
+        assert len(loaded) > 20 and loaded <= hashed
+        assert bench.code_fingerprint() == bench.code_fingerprint(files) == _code_by_hand()
+
+    def test_a_package_without_source_files_is_refused_unless_nothing_is_stored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Compiled files only: no digest, so no key; without a directory it still runs."""
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.pyc").write_bytes(b"")
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.pyc"))
+        with pytest.raises(RuntimeError, match="--no-cache"):
+            bench.FeatureCache(tmp_path / "cache")
+        assert not (tmp_path / "cache").exists()
+        compute, calls = self._counting()
+        assert bench.FeatureCache(None).fetch(self.inputs, self.labels, {}, compute).hit is False
+        assert calls == [12]
 
     def test_without_a_directory_every_request_computes(self) -> None:
         compute, calls = self._counting()
@@ -1075,6 +1294,45 @@ class TestCache:
                 before["threshold"],
             )
             assert after["separation"] == before["separation"]
+
+    def test_a_run_under_another_version_computes_and_one_elsewhere_records_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Through ``run``: after a change of a package version no line is a
+        hit; after a change of the platform string alone every line is, and
+        carries the environment its features were computed in.
+        """
+        settings = _replace(QUICK, arms=FAST, n_trials=0)
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        env = environment()
+        first = bench.run(data, settings, tmp_path / "a.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 2  # arms A and B, no tuning folds
+        for record in first:
+            assert record["feature_cache_hit"] is False
+            assert record["feature_environment"] == (None if record["arm"] == "C" else env)
+
+        upgraded = {**env, "packages": {**env["packages"], "torch": "0.0.0+other"}}
+        monkeypatch.setattr(bench, "environment", lambda: upgraded)
+        second = bench.run(data, settings, tmp_path / "b.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 4
+        for record in second:
+            assert record["feature_cache_hit"] is False
+            assert record["environment"] == upgraded
+            assert record["feature_environment"] == (None if record["arm"] == "C" else upgraded)
+
+        moved = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        monkeypatch.setattr(bench, "environment", lambda: moved)
+        third = bench.run(data, settings, tmp_path / "c.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 4
+        for record, line in zip(third, bench.read_records(tmp_path / "c.jsonl"), strict=True):
+            assert record["feature_cache_hit"] is (record["arm"] != "C")
+            assert record["environment"] == moved
+            assert record["feature_environment"] == (None if record["arm"] == "C" else env)
+            assert line["feature_environment"] == record["feature_environment"]
+        for before, after in zip(first, third, strict=True):
+            assert (after["mcc"], after["pr_auc"]) == (before["mcc"], before["pr_auc"])
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +1732,7 @@ FIELDS = {
     "epochs",
     "feature_seconds",
     "feature_cache_hit",
+    "feature_environment",
     "train_seconds",
     "tuning_seconds",
     "separation",
@@ -1534,6 +1793,10 @@ class TestQuick:
             assert record["n_positives"] == int(quick.y.sum())
             assert record["n_raw_features"] == 15
             assert record["environment"] == environment()
+            # computed in this run, in this environment; arms without a fixed map have none
+            assert record["feature_environment"] == (
+                environment() if record["arm"] in ("A", "B", "D") else None
+            )
             assert record["settings"] == json.loads(json.dumps(QUICK.as_dict()))
             assert record["measurement"] == "exact"
             assert record["shots"] is None

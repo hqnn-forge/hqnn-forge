@@ -142,23 +142,47 @@ arm C has nothing to measure.
 Feature cache
 -------------
 A fixed map has nothing to fit, so its features are a function of the input
-matrix and the map's settings alone.  They are computed once and stored
-under ``--cache-dir``, keyed by the SHA-256 of
+matrix, the map's settings and the code that computes them.  They are
+computed once and stored under ``--cache-dir``, keyed by the SHA-256
+(:func:`cache_key`) of four parts:
 
-* the data fingerprint, :func:`hqnn_forge.benchmark.fingerprint` of the
-  input matrix handed to the map and its labels, and
-* the map's ``get_config()``, with the number of shots and the shot seed.
+* ``data``: the data fingerprint, :func:`hqnn_forge.benchmark.fingerprint`
+  of the input matrix handed to the map and its labels;
+* ``config``: the map's ``get_config()``, with the number of shots and the
+  shot seed;
+* ``environment``: the entries of :func:`hqnn_forge.experiment.environment`
+  that :func:`hqnn_forge.experiment.compare_environment` compares, i.e. the
+  Python version and implementation, the version of ``hqnn_forge`` and those
+  of PennyLane, pennylane-lightning, torch, NumPy, scikit-learn and SciPy
+  (:func:`key_environment`);
+* ``code``: a SHA-256 over the name and content of every ``*.py`` file of
+  the installed ``hqnn_forge`` package and of this script
+  (:func:`code_fingerprint`).
 
-The key holds neither the version of this package nor those of its
-dependencies: after a change of the code or the environment, empty the
-directory or pass ``--no-cache``.
+A later request with the same inputs and settings under the same versions
+and code (another head, another tuning trial, a repeated run) reads the
+file; a change in any part of the key is a miss.  A fix in
+``hqnn_forge.rydberg`` or in arm D's circuit and a dependency upgrade
+therefore compute anew, also between two commits of one development
+version, in a working tree with uncommitted edits and without git.  The
+digest does not tell which module a feature depends on: an edit anywhere in
+the package or in this script, a comment included, is a miss.  A package
+without source files cannot be fingerprinted and is refused; ``--no-cache``
+runs there.  Entries of other versions stay in the directory under their
+own names and are not removed.
 
-A later request with the same inputs and settings (another head, another
-tuning trial, a repeated run) reads the file; a change in either part of the
-key is a miss.  The inputs are fitted per fold (step 2), so each fold has
-its own entries: "once" is once per grid point and input matrix.  The
-recorded ``feature_seconds`` is the simulation time measured when the
-features were computed, also on a cache hit; on a reused arm B line it is 0.
+What the key does not see: the platform string (as ``compare_environment``),
+and the packages ``environment()`` does not record, such as a dependency of
+PennyLane or the BLAS behind NumPy.  Every entry therefore also stores the
+full ``environment()`` it was computed in, and each line of an arm with a
+fixed map records it as ``feature_environment``, beside the ``environment``
+of the run that wrote the line.  The two differ only on a hit from another
+platform.
+
+The inputs are fitted per fold (step 2), so each fold has its own entries:
+"once" is once per grid point and input matrix.  The recorded
+``feature_seconds`` is the simulation time measured when the features were
+computed, also on a cache hit; on a reused arm B line it is 0.
 
 Tuning
 ------
@@ -204,8 +228,11 @@ dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
 and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
 with their scores; ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
-features, or 0.0 for reused records), ``train_seconds`` (the final fit) and
-``tuning_seconds``;
+features, or 0.0 for reused records), ``feature_cache_hit`` and
+``feature_environment`` (the ``environment()`` the fold's features were
+computed in, read from the cache entry on a hit; ``null`` for arm C and
+``D-hybrid``, which have no fixed map), ``train_seconds`` (the final fit)
+and ``tuning_seconds``;
 ``separation``, the measures of
 :func:`hqnn_forge.diagnostics.separation_measures` on the matrix the head
 receives, for the real rows of the training part (``train``) and for the
@@ -259,6 +286,7 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 
+import hqnn_forge
 from hqnn_forge.benchmark import fingerprint
 from hqnn_forge.data import (
     load_cervical_cancer_risk,
@@ -1024,44 +1052,191 @@ def representations(settings: Settings) -> list[Representation]:
 # ---------------------------------------------------------------------------
 
 
-def cache_key(data_sha256: str, config: Mapping[str, Any]) -> str:
-    """SHA-256 of the data fingerprint and the feature map's settings, as canonical JSON."""
+def key_environment(env: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    The entries of an :func:`hqnn_forge.experiment.environment` that enter
+    the cache key: ``python``, ``implementation``, ``hqnn_forge`` and
+    ``packages``, the ones
+    :func:`hqnn_forge.experiment.compare_environment` compares.  The
+    ``platform`` string is left out, as it is there.
+    """
+    return {key: env[key] for key in ("python", "implementation", "hqnn_forge", "packages")}
+
+
+def code_files(package: Path | None = None, script: Path | None = None) -> dict[str, Path]:
+    """
+    The source files whose content enters the cache key, by name.
+
+    Parameters
+    ----------
+    package:
+        A package directory.  Default: the directory of the imported
+        ``hqnn_forge``, wherever it is installed.
+    script:
+        A script.  Default: this file.
+
+    Returns
+    -------
+    dict
+        ``"<package directory name>/<path below it, with />"`` → path, for
+        every ``*.py`` file below ``package`` at any depth, and
+        ``"<file name of the script>"`` → ``script``.  Names do not depend
+        on where the package or the script is installed.
+
+    Raises
+    ------
+    RuntimeError
+        If the default package was not imported from a ``*.py`` file below
+        its directory (compiled files only, a zip archive): its code cannot
+        be fingerprinted.
+    """
+    if package is None:
+        origin = Path(hqnn_forge.__file__ or "")
+        package = origin.parent
+        if origin.suffix != ".py" or not origin.is_file():
+            raise RuntimeError(
+                f"hqnn_forge was not imported from Python source files ({origin}), so the "
+                f"feature cache cannot tell which code computed its entries; run with "
+                f"--no-cache (cache_dir=None)."
+            )
+    script = Path(__file__) if script is None else script
+    files = {
+        f"{package.name}/{path.relative_to(package).as_posix()}": path
+        for path in package.rglob("*.py")
+        if path.is_file()
+    }
+    files[script.name] = script
+    return files
+
+
+def code_fingerprint(files: Mapping[str, Path] | None = None) -> str:
+    """
+    SHA-256 over the names and contents of the files that compute features.
+
+    ::
+
+        code = sha256(json({name: sha256(bytes of the file) as hex, ...}))
+
+    with ``json`` the canonical form of :func:`cache_key` (keys sorted) and
+    the names those of :func:`code_files`, the default for ``files``.  A
+    changed byte, a new, removed, renamed or moved file each give another
+    digest.  No attempt is made to find the modules a feature map really
+    uses; the whole package and the script enter.
+    """
+    files = code_files() if files is None else files
+    hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()}
+    return hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+
+
+def cache_key(
+    data_sha256: str, config: Mapping[str, Any], env: Mapping[str, Any], code_sha256: str
+) -> str:
+    """
+    The name of a cache entry.
+
+    ::
+
+        key = sha256(json({"data": data_sha256, "config": config,
+                           "environment": key_environment(env),
+                           "code": code_sha256}))
+
+    with ``json`` the canonical JSON text (keys sorted at every level,
+    Python's default separators, no NaN), UTF-8 encoded, and the digest in
+    hexadecimal.
+
+    Parameters
+    ----------
+    data_sha256:
+        :func:`hqnn_forge.benchmark.fingerprint` of the inputs and labels.
+    config:
+        The feature map's settings (``Representation.config``).
+    env:
+        An :func:`hqnn_forge.experiment.environment`; its
+        :func:`key_environment` enters.
+    code_sha256:
+        :func:`code_fingerprint`.
+    """
     text = json.dumps(
-        {"data": data_sha256, "config": _plain(config)}, sort_keys=True, allow_nan=False
+        {
+            "data": data_sha256,
+            "config": _plain(config),
+            "environment": _plain(key_environment(env)),
+            "code": code_sha256,
+        },
+        sort_keys=True,
+        allow_nan=False,
     )
     return hashlib.sha256(text.encode()).hexdigest()
 
 
 class CachedFeatures(NamedTuple):
-    """Features, the seconds their computation took, and whether they were read from disk."""
+    """
+    Features, the seconds their computation took, whether they were read
+    from disk, and the :func:`hqnn_forge.experiment.environment` they were
+    computed in (``None`` for inputs handed on as they are).
+    """
 
     features: FloatArray
     seconds: float
     hit: bool
+    environment: dict[str, Any] | None = None
 
 
 class FeatureCache:
     """
-    Features on disk, one ``.npz`` file per input matrix and feature-map config.
+    Features on disk, one ``.npz`` file per input matrix, feature-map
+    config, set of versions and state of the code.
 
     The file name is :func:`cache_key` of
-    :func:`hqnn_forge.benchmark.fingerprint` of the inputs and their labels
-    and of the config.  A file holds the features and the seconds their
-    computation took; it is written to a temporary name and renamed, so an
-    interrupted run leaves no partial entry.  With ``directory=None``
-    nothing is stored and every request computes.
+    :func:`hqnn_forge.benchmark.fingerprint` of the inputs and their labels,
+    of the config, of the environment and of the code digest.  A file holds
+    the features, the seconds their computation took, the full environment
+    they were computed in (JSON) and the code digest; it is written to a
+    temporary name and renamed, so an interrupted run leaves no partial
+    entry.  With ``directory=None`` nothing is stored and every request
+    computes.
+
+    Parameters
+    ----------
+    directory:
+        Where the entries are; created if missing.
+    env:
+        The environment of the features computed through this cache.
+        Default: :func:`hqnn_forge.experiment.environment` of the running
+        process.
+    code_sha256:
+        The code digest.  Default: :func:`code_fingerprint`, read once, here:
+        the process computes with the code it has imported, whatever happens
+        to the files during a long run.  Not computed without a directory.
+
+    Raises
+    ------
+    RuntimeError
+        With a directory, if the package has no source files to fingerprint
+        (:func:`code_files`).
     """
 
-    def __init__(self, directory: str | os.PathLike[str] | None) -> None:
+    def __init__(
+        self,
+        directory: str | os.PathLike[str] | None,
+        *,
+        env: Mapping[str, Any] | None = None,
+        code_sha256: str | None = None,
+    ) -> None:
         self.directory = None if directory is None else Path(directory)
+        self.environment: dict[str, Any] = _plain(environment() if env is None else env)
+        self.code_sha256 = code_sha256
         if self.directory is not None:
+            if self.code_sha256 is None:
+                self.code_sha256 = code_fingerprint()
             self.directory.mkdir(parents=True, exist_ok=True)
 
     def path(self, inputs: FloatArray, labels: IntArray, config: Mapping[str, Any]) -> Path | None:
-        """Where the features of these inputs under this config are stored."""
-        if self.directory is None:
+        """Where the features of these inputs under this config, versions and code are stored."""
+        if self.directory is None or self.code_sha256 is None:
             return None
-        return self.directory / f"{cache_key(fingerprint(inputs, labels), config)}.npz"
+        key = cache_key(fingerprint(inputs, labels), config, self.environment, self.code_sha256)
+        return self.directory / f"{key}.npz"
 
     def fetch(
         self,
@@ -1070,7 +1245,10 @@ class FeatureCache:
         config: Mapping[str, Any],
         compute: Callable[[FloatArray], FloatArray],
     ) -> CachedFeatures:
-        """The stored features, or ``compute(inputs)``, timed and stored."""
+        """
+        The stored features with the environment stored beside them, or
+        ``compute(inputs)``, timed and stored with this cache's environment.
+        """
         path = self.path(inputs, labels, config)
         if path is not None and path.exists():
             with np.load(path, allow_pickle=False) as stored:
@@ -1078,6 +1256,7 @@ class FeatureCache:
                     np.asarray(stored["features"], dtype=np.float64),
                     float(stored["seconds"]),
                     True,
+                    json.loads(str(stored["environment"])),
                 )
         start = time.perf_counter()
         features = np.ascontiguousarray(compute(inputs), dtype=np.float64)
@@ -1085,15 +1264,21 @@ class FeatureCache:
         if path is not None:
             partial = path.with_name(f"{path.stem}.{os.getpid()}.part")
             with partial.open("wb") as fh:
-                np.savez(fh, features=features, seconds=np.float64(seconds))
+                np.savez(
+                    fh,
+                    features=features,
+                    seconds=np.float64(seconds),
+                    environment=np.array(json.dumps(self.environment, sort_keys=True)),
+                    code_sha256=np.array(self.code_sha256),
+                )
             os.replace(partial, path)
-        return CachedFeatures(features, seconds, False)
+        return CachedFeatures(features, seconds, False, self.environment)
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
     """The matrix ``rep`` hands to its heads for the rows of ``split``, row for row."""
     if rep.compute is None or rep.config is None:
-        return CachedFeatures(split.inputs, 0.0, False)
+        return CachedFeatures(split.inputs, 0.0, False, None)
     return cache.fetch(split.inputs, split.labels, rep.config, rep.compute)
 
 
@@ -1551,6 +1736,7 @@ def run_dataset(
                     "epochs": fit.epochs,
                     "feature_seconds": cached.seconds,
                     "feature_cache_hit": cached.hit,
+                    "feature_environment": cached.environment,
                     "train_seconds": fit.seconds,
                     "tuning_seconds": tuning_seconds,
                     "separation": separation,
