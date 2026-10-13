@@ -18,8 +18,10 @@ Resolution, for a role in the docstring of object ``obj``:
   ``hqnn_forge.models.HybridBinaryClassifier`` and the class in
   ``hqnn_forge.models.hybrid_classifier`` are one object.
 * a target naming a private object (a component starting with ``_``), or a
-  qualified name outside the package (``torch.nn.Module``), becomes plain code:
-  private objects have no page, and other packages' docs are not linked.
+  dotted name whose first component is absent from every scope or imported
+  from outside the package (``torch.nn.Module``, ``np.ndarray``), becomes plain
+  code: private objects have no page, and other packages' docs are not linked.
+  A missing member of an in-package object is still emitted at ``obj``'s module.
 
 ``~`` shows only the last component, as in Sphinx.
 
@@ -66,7 +68,14 @@ def _scopes(obj: griffe.Object) -> list[str]:
 
 
 def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | None:
-    """The object path ``target`` refers to from ``obj``, or None for plain code."""
+    """The object path ``target`` refers to from ``obj``, or None for plain code.
+
+    Search scopes innermost first. An unresolved dotted target is local when
+    its first component exists in a scope and is not an import from another
+    package. Inspect an alias's import path without resolving it: griffe need
+    not load foreign packages such as NumPy to recognise their aliases.
+    Local missing targets are emitted at ``obj``'s module for autorefs to report.
+    """
     target = target.strip().rstrip("()")
     parts = target.split(".")
     if any(p.startswith("_") and not (p.startswith("__") and p.endswith("__")) for p in parts):
@@ -76,10 +85,21 @@ def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | No
     for scope in _scopes(obj):
         found = _canonical(package, f"{scope}.{target}")
         if found is not None:
-            return found
+            return found if found == PACKAGE or found.startswith(PACKAGE + ".") else None
     if "." in target:
-        # Qualified in another package (torch.nn.Module): not linked.
-        return None
+        for scope in _scopes(obj):
+            try:
+                first = package[f"{scope}.{parts[0]}"[len(PACKAGE) + 1 :]]
+            except KeyError:
+                continue
+            if first.is_alias and not (
+                first.target_path == PACKAGE or first.target_path.startswith(PACKAGE + ".")
+            ):
+                return None
+            break
+        else:
+            # No local root: qualified in another package (torch.nn.Module).
+            return None
     # Unresolvable: emit it anyway, so the strict build reports it.
     return f"{obj.module.path}.{target}"
 
