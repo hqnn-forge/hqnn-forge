@@ -799,31 +799,38 @@ class TestCommandLine:
         lines = out.read_text(encoding="utf-8").splitlines()
         assert [json.loads(line) for line in lines] == [{"dataset": "a", "mcc": 0.5}]
 
-    def test_the_degenerate_pca_warning_is_shown_and_the_others_are_not(
+    def test_main_hides_no_warning_of_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        The warning ``PCANormalizer`` raises for degenerate eigenvalues says
-        that which component drives which atom is arbitrary; ``main`` hides
-        the repeated notes of a run, but not that one.
+        A warning is how a suspect number announces itself: NumPy's
+        invalid-value and overflow notes, and ``PCANormalizer``'s degenerate
+        eigenvalues, after which the component that drives an atom is
+        arbitrary.  ``main`` shows each of them, and a fit with distinct
+        eigenvalues adds none.
         """
         cross = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]).repeat(3, axis=0)
         distinct = cross * np.array([2.0, 1.0])
 
         def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             warnings.warn("a device fallback", UserWarning, stacklevel=1)
-            warnings.warn("another runtime note", RuntimeWarning, stacklevel=1)
+            assert math.isnan(np.log(np.float64(-1.0)))
+            assert math.isinf(np.float64(1e308) * np.float64(10.0))
             PCANormalizer(n_components=2).fit(distinct)
             PCANormalizer(n_components=2).fit(cross)  # both eigenvalues are 6/11
             return []
 
         monkeypatch.setattr(bench, "run", run)
-        with pytest.warns(RuntimeWarning) as caught:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             bench.main(["--quick", "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
-        messages = [str(w.message) for w in caught]
-        assert len(messages) == 1
-        assert "are degenerate" in messages[0]
-        assert "not reproducible" in messages[0]
+        shown = [(w.category, str(w.message)) for w in caught]
+        assert [category for category, _ in shown] == [UserWarning] + [RuntimeWarning] * 3
+        assert shown[0][1] == "a device fallback"
+        assert shown[1][1] == "invalid value encountered in log"
+        assert "overflow encountered" in shown[2][1]
+        assert "are degenerate" in shown[3][1]
+        assert "not reproducible" in shown[3][1]
 
     def test_the_parser_builds_without_a_docstring(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``python -OO`` strips the module docstring the description is taken from."""
@@ -906,6 +913,40 @@ class TestInputs:
         assert tuning.n_test == 0
         assert tuning.test == tuning.val
         assert tuning.inputs.shape[0] == tuning.n_train + 20
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda y: np.where(y == 1, np.where(np.arange(y.size) % 2 == 0, 1.0, 0.9), 0.2),
+            lambda y: np.where(y == 1, 1.0, 0.5),
+            lambda y: 2 * y,
+            lambda y: np.where(np.arange(y.size) == 0, np.nan, y.astype(np.float64)),
+        ],
+        ids=["soft", "one-half", "0-and-2", "nan"],
+    )
+    def test_labels_other_than_0_and_1_are_refused_and_not_truncated(self, change: Any) -> None:
+        """
+        A cast to integers turns 0.9, 0.5 and 0.2 into class 0, and the
+        first of these cases would then run on labels nobody passed.
+        """
+        X, y = self._data()
+        with pytest.raises(ValueError, match="y binary 0/1"):
+            next(
+                bench.run_dataset(
+                    "positive-control", X, change(y), QUICK, bench.FeatureCache(None)
+                )
+            )
+
+    @pytest.mark.parametrize("dtype", [np.float64, np.bool_, np.int8])
+    def test_labels_of_0_and_1_in_another_dtype_are_those_labels(self, dtype: Any) -> None:
+        X, y = self._data()
+        record = next(
+            bench.run_dataset(
+                "positive-control", X, y.astype(dtype), QUICK, bench.FeatureCache(None)
+            )
+        )
+        assert record["data_sha256"] == fingerprint(X, y)
+        assert record["n_positives"] == int(y.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -1081,6 +1122,7 @@ class TestJson:
         record = {
             "arm": "C",
             "v_over_omega": None,
+            "pr_auc": 0.75,
             "separation": {"train": perfect, "test": identical},
         }
         path = tmp_path / "records.jsonl"
@@ -1090,6 +1132,7 @@ class TestJson:
         assert written["separation"]["test"]["fisher_ratio"] is None
         (read,) = bench.read_records(path)
         assert read["v_over_omega"] is None  # "does not apply" stays None
+        assert read["pr_auc"] == 0.75
         for part, original in (("train", perfect), ("test", identical)):
             restored = read["separation"][part]
             assert set(restored) == set(original)
@@ -1099,6 +1142,55 @@ class TestJson:
                     assert math.isnan(restored[key]), key
                 else:
                     assert restored[key] == value, key
+
+    def test_a_pr_auc_that_is_nan_survives_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A model whose probabilities are not finite scores a ``pr_auc`` of
+        NaN, written as ``null``; read back it is NaN again, so the lines of
+        a file summarise as the records ``run`` returned do.
+        """
+        rng = np.random.default_rng(0)
+        labels = np.tile([0, 1], 20)
+        inputs = rng.normal(size=(40, 2)) + labels[:, None]
+        split = bench.Split(
+            inputs=inputs, labels=labels, n_train=20, n_synthetic=0, n_val=10, n_test=10
+        )
+        model = LinearClassifier(2)
+        trained = model.predict_proba
+
+        def predict_proba(x: torch.Tensor) -> torch.Tensor:
+            return torch.full_like(trained(x), math.nan)
+
+        monkeypatch.setattr(model, "predict_proba", predict_proba)
+        fit = bench.fit_and_score(
+            model, split.inputs, split, QUICK.defaults, loss="bce", batch_seed=0
+        )
+        assert math.isnan(fit.pr_auc)
+
+        separation = separation_measures([[0.0], [0.5], [1.0], [1.5]], [0, 0, 1, 1]).to_dict()
+        record = {
+            "dataset": "positive-control",
+            "v_over_omega": None,
+            "gamma_over_omega": None,
+            "arm": "C",
+            "head": "linear",
+            "mcc": fit.mcc,
+            "pr_auc": fit.pr_auc,
+            "feature_dim": 2,
+            "n_parameters": 3,
+            "feature_seconds": 0.0,
+            "train_seconds": fit.seconds,
+            "separation": {"train": separation, "test": separation},
+        }
+        path = tmp_path / "records.jsonl"
+        path.write_text(bench.to_json_line(record) + "\n", encoding="utf-8")
+        assert _strict_loads(path.read_text(encoding="utf-8"))["pr_auc"] is None
+        (read,) = bench.read_records(path)
+        assert math.isnan(read["pr_auc"])
+        assert bench.summarise([read]) == bench.summarise([record])
+        assert " nan " in bench.summarise([read])
 
 
 # ---------------------------------------------------------------------------

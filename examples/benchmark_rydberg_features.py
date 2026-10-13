@@ -210,7 +210,8 @@ test rows (``test``); the dataset's size and SHA-256; ``settings`` and
 :mod:`hqnn_forge.experiment` does) and an infinity as the string ``"inf"``
 or ``"-inf"``; both occur in ``separation``, where a ratio is ``inf`` for
 perfectly separated features and NaN when it is ``0/0``.
-:func:`read_records` turns them back into floats there.
+:func:`read_records` turns them back into floats there, and a ``null`` in
+``pr_auc`` (probabilities that are not finite) back into NaN.
 
 Usage
 -----
@@ -235,7 +236,6 @@ import json
 import math
 import os
 import time
-import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1295,8 +1295,10 @@ def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
 
     In ``separation`` the two float mappings of :func:`to_json_line` are
     undone: ``null`` is NaN and ``"inf"`` is infinity (the two integer
-    fields stay integers).  Elsewhere a ``null`` stays ``None``, because
-    there it also stands for "does not apply" (the grid fields of arm C).
+    fields stay integers).  A ``null`` in ``pr_auc`` is NaN as well, as
+    :func:`fit_and_score` records it for probabilities that are not finite.
+    Elsewhere a ``null`` stays ``None``, because there it also stands for
+    "does not apply" (the grid fields of arm C).
     """
     records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as fh:
@@ -1304,6 +1306,7 @@ def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             record: dict[str, Any] = json.loads(line)
+            record["pr_auc"] = _restore(record["pr_auc"])
             for measures in record["separation"].values():
                 for key, value in measures.items():
                     if key not in ("n_samples", "n_features"):
@@ -1367,9 +1370,11 @@ def run_dataset(
         the inside out; see the module docstring for its fields.
     """
     X = np.ascontiguousarray(X, dtype=np.float64)
-    y = np.asarray(y).astype(np.int64)
-    if X.ndim != 2 or y.shape != (X.shape[0],) or not np.isin(y, (0, 1)).all():
+    labels = np.asarray(y)
+    # Checked before the cast to integers, which would turn a soft label of 0.9 into class 0.
+    if X.ndim != 2 or labels.shape != (X.shape[0],) or not np.isin(labels, (0, 1)).all():
         raise ValueError(f"{name}: X must be (n_samples, n_features) and y binary 0/1.")
+    y = labels.astype(np.int64)
     if X.shape[1] < settings.n_atoms:
         raise ValueError(
             f"{name}: {X.shape[1]} features cannot be reduced to n_atoms={settings.n_atoms}."
@@ -1659,16 +1664,12 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         name: load_dataset(name, settings, path=args.data_path, download=args.download)
         for name in names
     }
-    with warnings.catch_warnings():
-        # PennyLane's device fallbacks and PCANormalizer's notes, once per fold and trial.
-        warnings.simplefilter("ignore")
-        # Not this one: with degenerate eigenvalues, which component sets which atom is arbitrary.
-        warnings.filterwarnings(
-            "default", message=r"eigenvalues \d+ and \d+ are degenerate", category=RuntimeWarning
-        )
-        records = run(
-            datasets, settings, args.out, cache_dir=None if args.no_cache else args.cache_dir
-        )
+    # No warning of the run is hidden: a device fallback is issued once per process, and NumPy's
+    # overflow and invalid-value notes or PCANormalizer's degenerate eigenvalues (which component
+    # sets which atom is then arbitrary) say that a number in the records is suspect.
+    records = run(
+        datasets, settings, args.out, cache_dir=None if args.no_cache else args.cache_dir
+    )
     print(summarise(records))
     print(f"wrote {len(records)} records to {args.out}")
     return records
