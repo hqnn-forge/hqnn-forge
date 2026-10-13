@@ -130,7 +130,12 @@ Measurement
 By default every feature is an exact expectation value
 (``"measurement": "exact"``).  With ``--shots S`` the features of A, B and D
 are estimated from ``S`` sampled bitstrings per sample
-(``"measurement": "shots"``), drawn with the recorded ``shot_seed``.
+(``"measurement": "shots"``), drawn with the recorded ``shot_seed``.  Every
+feature matrix of A and B is drawn from the start of that one stream, so the
+shot noise of two of them (the other arm, another grid point or fold) is not
+independent: these are common random numbers.  Arm D's device is seeded
+with the same number and starts its own stream anew for every matrix, so
+its noise is shared between D's matrices but not with A and B.
 ``D-hybrid`` is always trained and scored on exact expectation values, and
 arm C has nothing to measure.
 
@@ -143,6 +148,10 @@ under ``--cache-dir``, keyed by the SHA-256 of
 * the data fingerprint, :func:`hqnn_forge.benchmark.fingerprint` of the
   input matrix handed to the map and its labels, and
 * the map's ``get_config()``, with the number of shots and the shot seed.
+
+The key holds neither the version of this package nor those of its
+dependencies: after a change of the code or the environment, empty the
+directory or pass ``--no-cache``.
 
 A later request with the same inputs and settings (another head, another
 tuning trial, a repeated run) reads the file; a change in either part of the
@@ -213,7 +222,8 @@ the dataset's size and SHA-256; ``settings`` and ``environment``.
 :mod:`hqnn_forge.experiment` does) and an infinity as the string ``"inf"``
 or ``"-inf"``; both occur in ``separation``, where a ratio is ``inf`` for
 perfectly separated features and NaN when it is ``0/0``.
-:func:`read_records` turns them back into floats there.
+:func:`read_records` turns them back into floats there, and a ``null`` in
+``pr_auc`` (probabilities that are not finite) back into NaN.
 
 Usage
 -----
@@ -231,6 +241,7 @@ control, for a smoke test; ``--max-separation-rows`` and
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import hashlib
 import itertools
@@ -238,11 +249,10 @@ import json
 import math
 import os
 import time
-import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Final, NamedTuple, TextIO
 
 import numpy as np
 import numpy.typing as npt
@@ -266,7 +276,13 @@ from hqnn_forge.models import (
     LinearClassifier,
 )
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
-from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
+from hqnn_forge.rydberg import (
+    DEFAULT_C6,
+    MAX_ATOMS,
+    AtomRegister,
+    PulseEncoding,
+    RydbergFeatureMap,
+)
 from hqnn_forge.training import train_model
 from hqnn_forge.utils import FocalLoss
 
@@ -291,6 +307,8 @@ LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "foca
 TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
+#: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
+_CIRCUIT_ROTATION: Final = "X"
 #: Second entry of the seed sequence of the seeds that belong to the run, not to a fold.
 _RUN_STREAM = 1 << 16
 
@@ -375,6 +393,22 @@ class Settings:
     separation_seed: int = 0
 
     def __post_init__(self) -> None:
+        # The limit of the Rydberg maps and arm D's depth bind only where those arms run.
+        most = MAX_ATOMS if {"A", "B"} & set(self.arms) else None
+        if self.n_atoms < 1 or (most is not None and self.n_atoms > most):
+            raise ValueError(
+                f"n_atoms must be >= 1, and <= {MAX_ATOMS} with arm A or B; got {self.n_atoms}."
+            )
+        if self.shots is not None and self.shots < 1:
+            raise ValueError(f"shots must be None or >= 1; got {self.shots}.")
+        if self.hidden < 1:
+            raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
+        if "D" in self.arms and self.circuit_layers < 1:
+            raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
+        if self.max_epochs < 1:
+            raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
+        if self.patience is not None and self.patience < 1:
+            raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -840,7 +874,13 @@ def frozen_circuit(settings: Settings, circuit_seed: int) -> QuantumEncodingLaye
         else {"shots": settings.shots, "seed": run_seeds(settings.random_state)["shot_seed"]}
     )
     layer = QuantumEncodingLayer(
-        settings.n_atoms, settings.circuit_layers, device_name="default.qubit", **sampling
+        settings.n_atoms,
+        settings.circuit_layers,
+        rotation=_CIRCUIT_ROTATION,
+        device_name="default.qubit",
+        entangler="ring",
+        readout="all",
+        **sampling,
     )
     weights = layer.qlayer.weights
     generator = torch.Generator().manual_seed(circuit_seed)
@@ -943,11 +983,11 @@ def _circuit_representation(
         config={
             "feature_map": "QuantumEncodingLayer",
             "config": {
-                "n_qubits": settings.n_atoms,
-                "n_layers": settings.circuit_layers,
-                "rotation": "X",
-                "entangler": "ring",
-                "readout": "all",
+                "n_qubits": layer.n_qubits,
+                "n_layers": layer.n_layers,
+                "rotation": _CIRCUIT_ROTATION,
+                "entangler": layer.entangler,
+                "readout": layer.readout,
                 "device_name": "default.qubit",
                 "weights": "uniform(-pi, pi)",
                 "circuit_seed": circuit_seed,
@@ -1280,8 +1320,10 @@ def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
 
     In ``separation`` the two float mappings of :func:`to_json_line` are
     undone: ``null`` is NaN and ``"inf"`` is infinity (the two integer
-    fields stay integers).  Elsewhere a ``null`` stays ``None``, because
-    there it also stands for "does not apply" (the grid fields of arm C).
+    fields stay integers).  A ``null`` in ``pr_auc`` is NaN as well, as
+    :func:`fit_and_score` records it for probabilities that are not finite.
+    Elsewhere a ``null`` stays ``None``, because there it also stands for
+    "does not apply" (the grid fields of arm C).
     """
     records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as fh:
@@ -1289,6 +1331,7 @@ def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             record: dict[str, Any] = json.loads(line)
+            record["pr_auc"] = _restore(record["pr_auc"])
             for measures in record["separation"].values():
                 for key, value in measures.items():
                     if key not in ("n_samples", "n_features"):
@@ -1352,9 +1395,11 @@ def run_dataset(
         the inside out; see the module docstring for its fields.
     """
     X = np.ascontiguousarray(X, dtype=np.float64)
-    y = np.asarray(y).astype(np.int64)
-    if X.ndim != 2 or y.shape != (X.shape[0],) or not np.isin(y, (0, 1)).all():
+    labels = np.asarray(y)
+    # Checked before the cast to integers, which would turn a soft label of 0.9 into class 0.
+    if X.ndim != 2 or labels.shape != (X.shape[0],) or not np.isin(labels, (0, 1)).all():
         raise ValueError(f"{name}: X must be (n_samples, n_features) and y binary 0/1.")
+    y = labels.astype(np.int64)
     if X.shape[1] < settings.n_atoms:
         raise ValueError(
             f"{name}: {X.shape[1]} features cannot be reduced to n_atoms={settings.n_atoms}."
@@ -1568,7 +1613,10 @@ def run(
     settings:
         The run's settings.
     out:
-        The JSON-lines file; overwritten.
+        The JSON-lines file; overwritten.  It is opened with the first
+        record, so a run that fails before one (a setting or a dataset that
+        a map, the splits or the training refuse) leaves an earlier file as
+        it is.
     cache_dir:
         Directory of the feature cache; ``None`` computes without storing.
 
@@ -1579,9 +1627,12 @@ def run(
     """
     cache = FeatureCache(cache_dir)
     records: list[dict[str, Any]] = []
-    with open(out, "w", encoding="utf-8") as fh:
+    with contextlib.ExitStack() as stack:
+        fh: TextIO | None = None
         for name, (X, y, data_seed) in datasets.items():
             for record in run_dataset(name, X, y, settings, cache, data_seed=data_seed):
+                if fh is None:
+                    fh = stack.enter_context(open(out, "w", encoding="utf-8"))
                 records.append(record)
                 fh.write(to_json_line(record) + "\n")
                 fh.flush()
@@ -1590,8 +1641,9 @@ def run(
 
 def _parser() -> argparse.ArgumentParser:
     default = Settings()
+    paragraphs = (__doc__ or "").split("\n\n")  # no docstring under ``python -OO``
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n\n")[1],
+        description=paragraphs[1] if len(paragraphs) > 1 else None,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--out", type=Path, default=Path("rydberg_features_benchmark.jsonl"))
@@ -1693,12 +1745,12 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         name: load_dataset(name, settings, path=args.data_path, download=args.download)
         for name in names
     }
-    with warnings.catch_warnings():
-        # PennyLane's device fallbacks and PCANormalizer's notes, once per fold and trial.
-        warnings.simplefilter("ignore")
-        records = run(
-            datasets, settings, args.out, cache_dir=None if args.no_cache else args.cache_dir
-        )
+    # No warning of the run is hidden: a device fallback is issued once per process, and NumPy's
+    # overflow and invalid-value notes or PCANormalizer's degenerate eigenvalues (which component
+    # sets which atom is then arbitrary) say that a number in the records is suspect.
+    records = run(
+        datasets, settings, args.out, cache_dir=None if args.no_cache else args.cache_dir
+    )
     print(summarise(records))
     print(f"wrote {len(records)} records to {args.out}")
     return records

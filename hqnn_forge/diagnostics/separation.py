@@ -94,7 +94,13 @@ computed.
 
 * **Range.**  ``J ∈ [0, ∞]``, dimensionless, and unchanged by any invertible
   affine map of the features (``F → F Aᵀ + b`` maps ``δ → A δ`` and
-  ``S_w → A S_w Aᵀ``).  ``J = 0`` when the class means coincide.
+  ``S_w → A S_w Aᵀ``).  ``J = 0`` when the class means coincide.  As
+  computed, the invariance holds for a well-conditioned ``A`` only: a
+  direction whose spread and mean difference are below about
+  ``max(M, d) · ε`` times the size of all features together (ε the
+  ``float64`` machine epsilon; one feature in a unit 14 orders of magnitude
+  smaller than the others at ``M = 60``) is taken for rounding error and
+  left out, as the Notes of :func:`fisher_discriminant_ratio` state.
 * **Singular** ``S_w``.  A direction ``v_a`` without within-class spread
   (``s_a = 0``) has ``J(v_a) = (v_aᵀ δ)²/0``: if the means differ along it
   the classes are separated perfectly and ``J = ∞``; if they do not, the
@@ -188,6 +194,12 @@ in the Frobenius inner product and norm.
   label (``F_c = ỹ vᵀ``), as for features equal to the labels; ``A = 0``
   when no feature is correlated with the label.  If every row is the same,
   ``H K H = 0``, for which ``kernel_target_alignment`` returns 0.
+* **As computed**, both statements hold for :func:`separation_measures`,
+  which forms the kernel of ``F − F[0]``.  The ``H K H`` of
+  ``linear_feature_kernel(F)`` itself is zero only to rounding when the rows
+  are equal (or differ in their last digits) and are not zero, and
+  ``kernel_target_alignment`` then returns the alignment of that rounding
+  error: any value in ``[−1, 1]``, negative ones included.
 * ``A`` is unchanged by a translation and a common scale of the features.
 
 Rounding, and features that have collapsed
@@ -209,6 +221,13 @@ alignment of ``g`` for every ``ε > 0``, down to where ``ε g`` is rounding
 error.  What shows the collapse is the distances; the other measures change
 only if ``g`` does.  Whether a small difference is resolvable is a question
 about the measurement (the number of shots), not one these measures answer.
+
+The scale has limits at both ends of the ``float64`` range, where a square
+overflows or underflows.  The independence of scale holds for entries of
+``F − F[0]`` between about ``1e-70`` and ``1e70`` in size (the alignment
+squares the kernel, a fourth power of the features; the other measures reach
+about ``1e±150``).  Outside that range the results are wrong without an
+error: a Fisher ratio of 0 or NaN, an alignment of 0 or NaN.
 
 Costs
 -----
@@ -354,10 +373,13 @@ class PairwiseDistances:
         return _ratio(self.mean_between, self.mean_within)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SeparationMeasures:
     """
     The scalar separation measures of one feature matrix; see the module docstring.
+
+    Two records are equal when every field is, an undefined (NaN) ratio
+    counting as equal to an undefined one; equal records have the same hash.
 
     Attributes
     ----------
@@ -392,6 +414,26 @@ class SeparationMeasures:
     fisher_ratio: float
     effective_rank: float
     kernel_alignment: float
+
+    # Written out: NaN is a documented value of the two ratios and is not
+    # equal to itself, so the generated __eq__ calls two records of the same
+    # collapsed features different (on Python 3.13 and later even when both
+    # hold the very same NaN object; before that it compared tuples, which
+    # look at identity first).  The hash follows the same key, because the
+    # hash of a NaN depends on the object.
+    def _key(self) -> tuple[Any, ...]:
+        return tuple(
+            None if isinstance(value, float) and math.isnan(value) else value
+            for value in self.to_dict().values()
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SeparationMeasures):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __hash__(self) -> int:
+        return hash(self._key())
 
     def to_dict(self) -> dict[str, Any]:
         """Every field as a plain ``int`` or ``float``, in the order above, for logging."""
@@ -515,8 +557,10 @@ def pairwise_distances(F: Any, y: Any) -> PairwiseDistances:
 
     Notes
     -----
-    The full ``n_samples × n_samples`` distance matrix is formed: 8 bytes per
-    entry, 200 MB at 5000 samples.
+    The full ``n_samples × n_samples`` distance matrix is formed (8 bytes per
+    entry, 200 MB at 5000 samples), and next to it the indices of its upper
+    triangle and the selected values, so the peak is about three times the
+    matrix: 650 MB at 5000 samples.
 
     Examples
     --------
@@ -646,8 +690,9 @@ def linear_feature_kernel(F: Any) -> torch.Tensor:
     ``K[i, j] = Σ_k F[i,k] F[j,k]``, the Gram matrix over the samples.  Pass
     it to :func:`~hqnn_forge.kernels.kernel_target_alignment` for the
     alignment of the features with the labels, in ``[0, 1]`` for this kernel
-    (see "Linear feature kernel" in the module docstring), next to that of
-    the state kernel of the same inputs.
+    up to the rounding described in the Notes (see "Linear feature kernel"
+    in the module docstring), next to that of the state kernel of the same
+    inputs.
 
     Parameters
     ----------
@@ -673,8 +718,9 @@ def linear_feature_kernel(F: Any) -> torch.Tensor:
     -----
     The alignment centres the kernel, which subtracts numbers of the size of
     ``|F[i]|²`` from one another.  For features whose rows differ only in
-    their last digits (``½ + 1e-12 · g``) the result is that of the rounding
-    error; :func:`separation_measures` avoids this by forming the kernel of
+    their last digits (``½ + 1e-12 · g``), or not at all, the result is that
+    of the rounding error and can be negative;
+    :func:`separation_measures` avoids this by forming the kernel of
     ``F − F[0]``, which has the same centred alignment.
 
     Examples

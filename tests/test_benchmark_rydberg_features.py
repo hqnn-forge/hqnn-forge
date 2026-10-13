@@ -26,6 +26,7 @@ import importlib.util
 import json
 import math
 import sys
+import warnings
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -128,6 +129,34 @@ def _map_by_hand(n_atoms: int, v: float, gamma_ratio: float, n_steps: int, **kwa
         n_steps=n_steps if gamma_ratio > 0 else None,
         **kwargs,
     )
+
+
+def _circuit_by_hand(X: np.ndarray, circuit_seed: int, n_layers: int = 2) -> np.ndarray:
+    """
+    Arm D's features, gate by gate: ``RX(x_i)`` on qubit ``i``, then per layer
+    a CNOT ring ``i → i+1`` and ``Rot`` on every qubit, then ``⟨Z_i⟩``.  The
+    angles are ``U(−π, π)`` draws of ``circuit_seed``, held in float32.
+    """
+    n = X.shape[1]
+    draw = torch.rand(
+        (n_layers, n, 3),
+        generator=torch.Generator().manual_seed(circuit_seed),
+        dtype=torch.float64,
+    )
+    weights = ((2 * draw - 1) * math.pi).to(torch.float32).double().numpy()
+
+    @qml.qnode(qml.device("default.qubit", wires=n))
+    def circuit(x: np.ndarray) -> Any:
+        for i in range(n):
+            qml.RX(x[i], wires=i)
+        for layer in range(n_layers):
+            for i in range(n):
+                qml.CNOT(wires=[i, (i + 1) % n])
+            for i in range(n):
+                qml.Rot(*weights[layer, i], wires=i)
+        return [qml.expval(qml.PauliZ(i)) for i in range(n)]
+
+    return np.array([[float(v) for v in circuit(row)] for row in X])
 
 
 def _single_atom_feature(x: np.ndarray) -> np.ndarray:
@@ -248,6 +277,16 @@ class TestGrid:
     @pytest.mark.parametrize(
         ("changes", "match"),
         [
+            (dict(n_atoms=0), "n_atoms"),
+            (dict(n_atoms=11), "n_atoms"),
+            (dict(n_atoms=11, arms=("B", "C")), "n_atoms"),
+            (dict(n_atoms=0, arms=("C",)), "n_atoms"),
+            (dict(shots=0), "shots"),
+            (dict(shots=-3, arms=("A", "B")), "shots"),
+            (dict(hidden=0), "hidden"),
+            (dict(circuit_layers=0), "circuit_layers"),
+            (dict(max_epochs=0), "max_epochs"),
+            (dict(patience=0), "patience"),
             (dict(v_over_omega=(1.0, 0.0)), "v_over_omega"),
             (dict(v_over_omega=()), "v_over_omega"),
             (dict(gamma_over_omega=(-0.1,)), "gamma_over_omega"),
@@ -265,6 +304,13 @@ class TestGrid:
     def test_invalid_settings(self, changes: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             bench.Settings(**changes)
+
+    def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
+        """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
+        assert bench.Settings(n_atoms=11, arms=("C", "D")).n_atoms == 11
+        assert bench.Settings(n_atoms=10).n_atoms == 10
+        assert bench.Settings(circuit_layers=0, arms=("A", "C")).circuit_layers == 0
+        assert bench.Settings(shots=1, patience=None, max_epochs=1).shots == 1
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +446,47 @@ class TestCircuitArm:
         assert np.abs(features).max() <= 1.0
         assert rep.n_frozen_parameters == 2 * 3 * 3
         assert rep.config["config"]["circuit_seed"] == seed
+        np.testing.assert_allclose(features, _circuit_by_hand(X, seed), rtol=0, atol=1e-9)
+
+    def test_the_recorded_config_is_that_of_the_circuit_built(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Qubits, layers, entangler and readout in the config, which is also the
+        cache key, are read off the layer: a circuit built otherwise is
+        recorded otherwise.
+        """
+        settings = bench.Settings(n_atoms=3, circuit_layers=1, arms=("D",))
+        seed = bench.run_seeds(settings.random_state)["circuit_seed"]
+        (rep, _) = bench.representations(settings)
+        assert rep.config["config"] == {
+            "n_qubits": 3,
+            "n_layers": 1,
+            "rotation": "X",
+            "entangler": "ring",
+            "readout": "all",
+            "device_name": "default.qubit",
+            "weights": "uniform(-pi, pi)",
+            "circuit_seed": seed,
+        }
+
+        def other(settings: Any, circuit_seed: int) -> Any:
+            return bench.QuantumEncodingLayer(
+                4, 2, device_name="default.qubit", entangler="brickwork", readout="first"
+            )
+
+        monkeypatch.setattr(bench, "frozen_circuit", other)
+        (rep, _) = bench.representations(settings)
+        assert rep.config["config"] == {
+            "n_qubits": 4,
+            "n_layers": 2,
+            "rotation": "X",
+            "entangler": "brickwork",
+            "readout": "first",
+            "device_name": "default.qubit",
+            "weights": "uniform(-pi, pi)",
+            "circuit_seed": seed,
+        }
 
     def test_sampled_features_depend_on_the_inputs_and_the_seed_alone(self) -> None:
         """
@@ -665,6 +752,96 @@ class TestUciData:
 
 
 # ---------------------------------------------------------------------------
+# The command line: what a failing or noisy run leaves behind
+# ---------------------------------------------------------------------------
+
+
+class TestCommandLine:
+    @pytest.mark.parametrize(
+        ("flags", "match"),
+        [
+            (["--shots", "0"], "shots"),
+            (["--shots", "0", "--arms", "A", "B"], "shots"),
+            (["--n-steps", "0"], "n_steps"),
+            (["--hidden", "0"], "hidden"),
+            (["--circuit-layers", "0"], "circuit_layers"),
+            (["--n-atoms", "11"], "n_atoms"),
+            (["--epochs", "0"], "max_epochs"),
+            (["--patience", "0"], "patience"),
+            # refused by the splits, with the data in hand: no record, so no new file
+            (["--folds", "100"], "n_splits"),
+            (["--inner-folds", "100"], "n_splits"),
+        ],
+    )
+    def test_a_refused_setting_leaves_an_earlier_results_file_alone(
+        self, tmp_path: Path, flags: list[str], match: str
+    ) -> None:
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=match):
+            bench.main([*flags, "--samples", "40", "--out", str(out), "--no-cache"])
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_a_run_that_fails_later_keeps_the_records_it_wrote(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The file is opened with the first record and holds every record up to the failure."""
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+
+        def run_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            yield {"dataset": name, "mcc": 0.5}
+            raise RuntimeError("the second fold failed")
+
+        monkeypatch.setattr(bench, "run_dataset", run_dataset)
+        with pytest.raises(RuntimeError, match="second fold"):
+            bench.run({"a": (np.zeros((2, 2)), np.zeros(2), None)}, QUICK, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        assert [json.loads(line) for line in lines] == [{"dataset": "a", "mcc": 0.5}]
+
+    def test_main_hides_no_warning_of_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A warning is how a suspect number announces itself: NumPy's
+        invalid-value and overflow notes, and ``PCANormalizer``'s degenerate
+        eigenvalues, after which the component that drives an atom is
+        arbitrary.  ``main`` shows each of them, and a fit with distinct
+        eigenvalues adds none.
+        """
+        cross = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]).repeat(3, axis=0)
+        distinct = cross * np.array([2.0, 1.0])
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            warnings.warn("a device fallback", UserWarning, stacklevel=1)
+            assert math.isnan(np.log(np.float64(-1.0)))
+            assert math.isinf(np.float64(1e308) * np.float64(10.0))
+            PCANormalizer(n_components=2).fit(distinct)
+            PCANormalizer(n_components=2).fit(cross)  # both eigenvalues are 6/11
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            bench.main(["--quick", "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
+        shown = [(w.category, str(w.message)) for w in caught]
+        assert [category for category, _ in shown] == [UserWarning] + [RuntimeWarning] * 3
+        assert shown[0][1] == "a device fallback"
+        assert shown[1][1] == "invalid value encountered in log"
+        assert "overflow encountered" in shown[2][1]
+        assert "are degenerate" in shown[3][1]
+        assert "not reproducible" in shown[3][1]
+
+    def test_the_parser_builds_without_a_docstring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``python -OO`` strips the module docstring the description is taken from."""
+        assert bench._parser().description.startswith("``RydbergFeatureMap``")
+        monkeypatch.setattr(bench, "__doc__", None)
+        parser = bench._parser()
+        assert parser.description is None
+        assert parser.parse_args(["--quick"]).quick is True
+
+
+# ---------------------------------------------------------------------------
 # Inputs: fitted on the training rows, oversampled once
 # ---------------------------------------------------------------------------
 
@@ -736,6 +913,40 @@ class TestInputs:
         assert tuning.n_test == 0
         assert tuning.test == tuning.val
         assert tuning.inputs.shape[0] == tuning.n_train + 20
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda y: np.where(y == 1, np.where(np.arange(y.size) % 2 == 0, 1.0, 0.9), 0.2),
+            lambda y: np.where(y == 1, 1.0, 0.5),
+            lambda y: 2 * y,
+            lambda y: np.where(np.arange(y.size) == 0, np.nan, y.astype(np.float64)),
+        ],
+        ids=["soft", "one-half", "0-and-2", "nan"],
+    )
+    def test_labels_other_than_0_and_1_are_refused_and_not_truncated(self, change: Any) -> None:
+        """
+        A cast to integers turns 0.9, 0.5 and 0.2 into class 0, and the
+        first of these cases would then run on labels nobody passed.
+        """
+        X, y = self._data()
+        with pytest.raises(ValueError, match="y binary 0/1"):
+            next(
+                bench.run_dataset(
+                    "positive-control", X, change(y), QUICK, bench.FeatureCache(None)
+                )
+            )
+
+    @pytest.mark.parametrize("dtype", [np.float64, np.bool_, np.int8])
+    def test_labels_of_0_and_1_in_another_dtype_are_those_labels(self, dtype: Any) -> None:
+        X, y = self._data()
+        record = next(
+            bench.run_dataset(
+                "positive-control", X, y.astype(dtype), QUICK, bench.FeatureCache(None)
+            )
+        )
+        assert record["data_sha256"] == fingerprint(X, y)
+        assert record["n_positives"] == int(y.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +1122,7 @@ class TestJson:
         record = {
             "arm": "C",
             "v_over_omega": None,
+            "pr_auc": 0.75,
             "separation": {"train": perfect, "test": identical},
         }
         path = tmp_path / "records.jsonl"
@@ -920,6 +1132,7 @@ class TestJson:
         assert written["separation"]["test"]["fisher_ratio"] is None
         (read,) = bench.read_records(path)
         assert read["v_over_omega"] is None  # "does not apply" stays None
+        assert read["pr_auc"] == 0.75
         for part, original in (("train", perfect), ("test", identical)):
             restored = read["separation"][part]
             assert set(restored) == set(original)
@@ -929,6 +1142,55 @@ class TestJson:
                     assert math.isnan(restored[key]), key
                 else:
                     assert restored[key] == value, key
+
+    def test_a_pr_auc_that_is_nan_survives_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A model whose probabilities are not finite scores a ``pr_auc`` of
+        NaN, written as ``null``; read back it is NaN again, so the lines of
+        a file summarise as the records ``run`` returned do.
+        """
+        rng = np.random.default_rng(0)
+        labels = np.tile([0, 1], 20)
+        inputs = rng.normal(size=(40, 2)) + labels[:, None]
+        split = bench.Split(
+            inputs=inputs, labels=labels, n_train=20, n_synthetic=0, n_val=10, n_test=10
+        )
+        model = LinearClassifier(2)
+        trained = model.predict_proba
+
+        def predict_proba(x: torch.Tensor) -> torch.Tensor:
+            return torch.full_like(trained(x), math.nan)
+
+        monkeypatch.setattr(model, "predict_proba", predict_proba)
+        fit = bench.fit_and_score(
+            model, split.inputs, split, QUICK.defaults, loss="bce", batch_seed=0
+        )
+        assert math.isnan(fit.pr_auc)
+
+        separation = separation_measures([[0.0], [0.5], [1.0], [1.5]], [0, 0, 1, 1]).to_dict()
+        record = {
+            "dataset": "positive-control",
+            "v_over_omega": None,
+            "gamma_over_omega": None,
+            "arm": "C",
+            "head": "linear",
+            "mcc": fit.mcc,
+            "pr_auc": fit.pr_auc,
+            "feature_dim": 2,
+            "n_parameters": 3,
+            "feature_seconds": 0.0,
+            "train_seconds": fit.seconds,
+            "separation": {"train": separation, "test": separation},
+        }
+        path = tmp_path / "records.jsonl"
+        path.write_text(bench.to_json_line(record) + "\n", encoding="utf-8")
+        assert _strict_loads(path.read_text(encoding="utf-8"))["pr_auc"] is None
+        (read,) = bench.read_records(path)
+        assert math.isnan(read["pr_auc"])
+        assert bench.summarise([read]) == bench.summarise([record])
+        assert " nan " in bench.summarise([read])
 
 
 # ---------------------------------------------------------------------------
@@ -1020,8 +1282,14 @@ class TestTuning:
         hybrid row included: the same split object, initialisation seed,
         batch seed and loss for the final fit, and the same tuning folds,
         candidates, seed and training settings for every trial.
+
+        The search space holds more configurations than the budget of two
+        trials, so a model that was given one trial more would get a longer
+        list; with the two values of ``QUICK`` every budget of two or more
+        is the whole grid.
         """
-        settings = QUICK
+        space = {"lr": (0.01, 0.02, 0.05, 0.1)}
+        settings = _replace(QUICK, search_space=space)
         X, y, data_seed = bench.load_dataset("positive-control", settings)
         fold = _fold_by_hand(X, y, settings, 0)
 
@@ -1095,7 +1363,8 @@ class TestTuning:
 
         # The tuning of every line: the same folds, candidates and seed ...
         assert len(tunes) == len(ROWS)
-        candidates = [{"lr": 0.01}, {"lr": 0.05}]
+        candidates = _sample_configs(space, settings.n_trials, fold.seeds["tune_seed"])
+        assert len(candidates) == settings.n_trials == 2 < len(space["lr"])
         for tune in tunes:
             assert len(tune.splits) == settings.inner_folds
             assert all(a is b for a, b in zip(tune.splits, tunes[0].splits, strict=True))
@@ -1350,8 +1619,15 @@ class TestQuick:
         """The arm's features of the training part's real rows and of the test rows, by hand."""
         fold = quick.fold
         real = np.concatenate([fold.train_idx, fold.val_idx])
-        if arm == "C":
+        if arm in ("C", "D-hybrid"):
             return fold.inputs[real], fold.inputs[fold.test_idx], real
+        if arm == "D":
+            seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
+            return (
+                _circuit_by_hand(fold.inputs[real], seed),
+                _circuit_by_hand(fold.inputs[fold.test_idx], seed),
+                real,
+            )
         fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
         return (
             fmap.transform(fold.inputs[real]).numpy(),
@@ -1359,7 +1635,7 @@ class TestQuick:
             real,
         )
 
-    @pytest.mark.parametrize("arm", ["A", "B", "C"])
+    @pytest.mark.parametrize("arm", ["A", "B", "C", "D", "D-hybrid"])
     def test_separation_measures_of_the_matrix_the_head_receives(
         self, quick: Any, arm: str
     ) -> None:
@@ -1368,7 +1644,7 @@ class TestQuick:
             "train": separation_measures(train, quick.y[real]).to_dict(),
             "test": separation_measures(test, quick.y[quick.fold.test_idx]).to_dict(),
         }
-        for head in ("linear", "mlp"):
+        for head in ("hybrid",) if arm == "D-hybrid" else ("linear", "mlp"):
             recorded = _line(quick, arm, head)["separation"]
             assert set(recorded) == {"train", "test"}
             for part in ("train", "test"):
@@ -1396,7 +1672,10 @@ class TestQuick:
         other = _line(quick, "A", "linear")["separation"]["test"]
         assert other["fisher_ratio"] != pytest.approx(expected["fisher_ratio"], rel=1e-3)
 
-    @pytest.mark.parametrize(("arm", "head"), [("C", "linear"), ("A", "mlp"), ("B", "linear")])
+    @pytest.mark.parametrize(
+        ("arm", "head"),
+        [("C", "linear"), ("A", "mlp"), ("B", "linear"), ("D", "linear"), ("D", "mlp")],
+    )
     def test_scores_of_a_model_trained_by_hand(self, quick: Any, arm: str, head: str) -> None:
         """
         MCC, PR-AUC, threshold and epochs of a line, from a model built and
@@ -1413,6 +1692,9 @@ class TestQuick:
         )
         if arm == "C":
             features = torch.from_numpy(stacked.astype(np.float32))
+        elif arm == "D":
+            circuit_seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
+            features = torch.from_numpy(_circuit_by_hand(stacked, circuit_seed)).to(torch.float32)
         else:
             fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
             features = fmap.transform(stacked).to(torch.float32)

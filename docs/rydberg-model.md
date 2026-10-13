@@ -12,7 +12,7 @@ swept quantities, and so that the model without interactions stays a closed-form
 
 | | Default | Section |
 |---|---|---|
-| Atoms | `N = d`, one per input, `4 ≤ N ≤ 6`, open chain at spacing `a` | Geometry |
+| Atoms | `N = d`, one per input, `4 ≤ N ≤ 6` by default, open chain at spacing `a` | Geometry |
 | Interaction | `C6 / r⁶` between every pair (full tail), `C6 = 2π × 862 690 MHz µm⁶` | Hamiltonian |
 | Encoding | `Δ_i = Δ_max · σ(x_i)`, one-signed, `Δ_max = √3 Ω` | Encoding |
 | Pulse | constant, `ΩT = π`, global Ω | Pulse |
@@ -67,7 +67,7 @@ evolution starts with every atom in `|g⟩`.
   leaves `−(ω_L − ω₀) n = −Δ n`. A positive Δ therefore lowers the energy of `|r⟩`. The
   interaction enters with the opposite sign: an atom whose neighbours are excited sees the
   effective detuning `Δ_i − Σ_j V_ij n_j`, and the doubly excited state of two atoms has the
-  diagonal entry `−Δ_1 − Δ_2 + V_12`.
+  diagonal entry `−Δ_0 − Δ_1 + V_01`.
 - **Basis ordering.** Atom `i` (counted from 0) is tensor factor `i` from the left and PennyLane
   wire `i`. The basis state `|b_0 b_1 … b_{N−1}⟩`, with `b_i = 1` for `|r⟩`, has the index
   `Σ_i b_i 2^(N−1−i)`: atom 0 is the most significant bit. For two atoms the order is
@@ -105,8 +105,10 @@ evolution starts with every atom in `|g⟩`.
 
 **One shape: an open chain.** `N` atoms on a line at spacing `a`, atom `i` at
 `r_i = (i · a, 0)`, in the order of the inputs: input `x_i` goes to atom `i`, so neighbouring
-inputs sit on neighbouring atoms. `N` equals the input dimension `d`, and the model is
-specified for `4 ≤ N ≤ 6`.
+inputs sit on neighbouring atoms. `N` equals the input dimension `d`. The default sizes are
+`4 ≤ N ≤ 6`; nothing on this page depends on that range. Every formula holds for any `N ≥ 1`,
+and the [closed-form limits](#closed-form-limits) use one to three atoms, so an implementation
+limits `N` only from above.
 
 - **The full `1/r⁶` tail is kept.** `V_ij = V / |i − j|⁶` with `V = C6/a⁶` the
   nearest-neighbour interaction: next-nearest neighbours interact with `V/64`, the next with
@@ -115,7 +117,9 @@ specified for `4 ≤ N ≤ 6`.
 - **Blockade radius.** `R_b = (C6/Ω)^(1/6)` is the distance at which two atoms interact with
   `V_ij = Ω`, so `V/Ω = (R_b/a)⁶` and `a = R_b · (V/Ω)^(−1/6)`. At the reference Ω,
   `R_b = 8.69 µm`. A unit-disk graph at radius `R_b` (the gate-based entangler of #418)
-  connects exactly the pairs with `V_ij ≥ Ω`.
+  connects the pairs with `V_ij > Ω`. A pair at exactly `R_b` has `V_ij = Ω` and lies on the
+  boundary of that graph, as the nearest neighbours do in the `V/Ω = 1` column below; which
+  side it falls on is for #418 to fix, and this model does not depend on it.
 - **The regime is not fixed: `V/Ω` is swept through the spacing**, from weakly interacting
   through `V ≈ Ω` into the blockade. At the reference Ω:
 
@@ -139,6 +143,10 @@ specified for `4 ≤ N ≤ 6`.
 - **Bounds.** `Δ_i` lies in the open interval `(0, Δ_max)` for every finite input. The bound is
   enforced by the logistic function, not by clipping: clipping would map every input beyond
   the range to the same detuning. A non-finite input is an error, not a value to squash.
+  This holds in exact arithmetic. In double precision `σ(x)` rounds to 1 for `x ≳ 37` and
+  underflows to 0 for `x` below about −700, so such inputs land on a bound and are no longer
+  told apart. In floating point the interval is therefore closed, and the strict monotonicity
+  stated in the next section holds for inputs short of those values.
 - **Why the logistic function.** Any strictly increasing map onto `(0, Δ_max)` keeps the
   properties below; the logistic function is fixed here because it uses the range for both
   input scales the library produces. Standardised inputs within ±2 cover 12 % to 88 % of the
@@ -291,12 +299,12 @@ is checked by the feature map (#499).
 | Convention | Closed-form check |
 |---|---|
 | Factor of 2 in Ω | One atom, `Δ = γ = 0`: `⟨n⟩(t) = sin²(Ωt/2)`; the matrix is `[[0, Ω/2], [Ω/2, −Δ]]` |
-| Sign of Δ, sign of `C6` | Two atoms at distance `r`: the diagonal entry of the doubly excited state is `−Δ_1 − Δ_2 + C6/r⁶` |
+| Sign of Δ, sign of `C6` | Two atoms at distance `r`: the diagonal entry of the doubly excited state is `−Δ_0 − Δ_1 + C6/r⁶` |
 | Detuned Rabi formula | One atom, `γ = 0`: `⟨n⟩(t) = Ω²/Ω_eff² · sin²(Ω_eff t/2)` |
 | Basis ordering | A detuning on atom `i` alone changes exactly the diagonal entries with `b_i = 1` |
 | Full tail | Three atoms in a chain: the next-nearest coupling is 1/64 of the nearest |
 | Interactions off | `H` is the Kronecker sum of single-atom Hamiltonians, and ρ their tensor product, with and without dephasing |
-| Blockade | Two atoms, `V ≫ Ω`, `Δ = γ = 0`: `⟨n_1 + n_2⟩ → sin²(√2 Ωt/2)` as `Ω/V → 0`, and the doubly excited population stays below `(Ω/V)²` (its maximum over `Ωt ≤ 20` was 0.57, 0.52 and 0.51 times that at `V/Ω` = 10, 30 and 100) |
+| Blockade | Two atoms, `V ≫ Ω`, `Δ = γ = 0`: `⟨n_0 + n_1⟩ → sin²(√2 Ωt/2)` as `Ω/V → 0`, and the doubly excited population stays below `(Ω/V)²` (its maximum over `Ωt ≤ 20` was 0.57, 0.52 and 0.51 times that at `V/Ω` = 10, 30 and 100) |
 | What γ means | No drive: a single-atom coherence decays as `e^(−γt/2)` and `ρ_ab` as `e^(−γ t d_H(a,b)/2)` |
 | Dephasing against the drive | One atom, `Δ = 0`: the damped oscillation above, in all three cases |
 | Strong dephasing | `Ω > 0`, `γ > 0`, any input and any `V`: `ρ → 1/2^N` and every `⟨n_i⟩ → ½` once `gt ≫ 1`, with `g` the smallest nonzero decay rate of the Liouvillian (one atom, `Δ = 0`: `γ/4` up to `γ = 4Ω`, `γ/4 − κ` above). `γt ≫ 1` alone is not sufficient. Reached at `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 |
@@ -379,11 +387,11 @@ meet.
 |---|---|---|
 | Hamiltonian, units, `C6` | Aquila's native Hamiltonian has this form, with the phase convention above and `C6` of `70S` | Supported |
 | Chain, spacings 4 to 15 µm | Sites at least 4 µm apart in a region 75 µm wide: a row of 6 atoms fits up to `a = 15 µm`, so `0.04 ≤ V/Ω ≤ 105` at the reference Ω | Supported |
-| Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation, strongest at `V ≈ Ω` |
+| Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); the same expression gives about 42 % at `a = 4.03 µm`. Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation; the spread of `V` grows as the spacing shrinks |
 | Pulse bounds | `Ω ≤ 15.8 rad/µs`, `−125 ≤ Δ ≤ 125 rad/µs`, at most 4 µs: the reference `Ω = 12.57`, `Δ_max = 21.8 rad/µs` and `T = 0.25 µs` are inside | Supported |
 | Constant pulse | Ω may change by at most 250 rad/µs², so each edge of the pulse takes 0.05 µs of the 0.25 µs | Idealisation |
 | Local addressing: one detuning per atom | Ω and the phase are global. A local detuning `−Δ_local(t) · h_k n_k` with a static pattern `0 ≤ h_k ≤ 1` exists as an experimental capability, on request (AWS 2024); with the global detuning it reaches a one-signed range. Its magnitude limits and the resolution of `h_k` were not verified for this page | Idealisation |
-| Dephasing rate | Aquila reports `T₂* = 5.8 µs`, an echo time of 11.4 µs and a Rabi decay time of 7.5 µs. Read as this model's `2/γ`, `2/γ` and `4/γ` and divided by the maximum Ω, they give `γ/Ω` between 0.01 and 0.04 | Indicative only: those decays include shot-to-shot noise and loss, which are not Markovian dephasing. Larger `γ/Ω` is a stress test, not a device regime |
+| Dephasing rate | Aquila reports `T₂* = 5.8 µs`, an echo time of 11.4 µs and a Rabi decay time of 7.5 µs. Read as this model's `2/γ`, `2/γ` and `4/γ`, they give `γ` between 0.18 and 0.53 rad/µs, so `γ/Ω` between 0.014 and 0.042 at the reference Ω. The ratio grows as Ω falls: the slowest π pulse within 4 µs, `Ω = π/4 rad/µs`, gives 0.22 to 0.68, where a row of 6 atoms reaches only `V/Ω ≥ 0.6` (`R_b = 13.8 µm`); the whole sweep down to `V/Ω = 0.1` fits for `Ω ≥ 4.8 rad/µs`, where `γ/Ω ≤ 0.11` | Indicative only: those decays include shot-to-shot noise and loss, which are not Markovian dephasing. `γ/Ω` well above 0.7 is a stress test, not a device regime |
 | No decay | `T/τ_r = 1.7 × 10⁻³` for the Rydberg lifetime, `5 × 10⁻³` against the 50 µs effective lifetime of Bernien et al. | Good approximation |
 | No detection error | Aquila misreads a ground-state atom as excited with probability 0.01 and an excited atom as ground with 0.08; Bernien et al. report detection fidelities of 98 to 99 % and 93 %. With independent errors `ε` and `ε′` a feature becomes `ε + (1 − ε − ε′) ⟨n_i⟩` | Idealisation |
 | Exact expectation values | 1 to 1000 shots per task at fewer than 10 shots per second, and each input sample is its own task; about 100 shots are typical | Idealisation; the shots option models the statistics |

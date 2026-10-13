@@ -182,8 +182,9 @@ class PulseEncoding:
     ------
     ValueError
         If ``n_features`` is not an integer ``>= 1``, ``omega`` or
-        ``delta_max`` is not a finite number ``> 0``, or ``t`` is not a
-        finite number ``>= 0``.
+        ``delta_max`` is not a finite number ``> 0``, ``t`` is not a
+        finite number ``>= 0``, or ``omega`` is so small or so large that a
+        default (``π/Ω`` or ``√3 Ω``) is not finite.
 
     Examples
     --------
@@ -215,6 +216,12 @@ class PulseEncoding:
             if delta_max is None
             else _finite_number(delta_max, "delta_max", positive=True)
         )
+        # π/Ω overflows for a subnormal Ω and √3 Ω for an Ω next to the largest float.
+        if not (math.isfinite(self._t) and math.isfinite(self._delta_max)):
+            raise ValueError(
+                "omega must give a finite default t = π/Ω and delta_max = √3 Ω; "
+                f"got omega={self._omega!r}."
+            )
 
     @property
     def n_features(self) -> int:
@@ -266,8 +273,9 @@ class PulseEncoding:
         -----
         ``0 < Δ_i < Δ_max`` holds for every finite input in exact arithmetic.
         In ``float64``, ``σ(x)`` rounds to 1 for ``x`` above about 37 and to
-        0 for ``x`` below about −709.8 (where ``e^(−x)`` overflows), where
-        ``Δ_i`` equals a bound.
+        0 for ``x`` below about −700, where ``Δ_i`` equals a bound.  The exact
+        lower value depends on how the torch build evaluates σ: −709.8 where
+        ``e^(−x)`` overflows, −745.2 where ``e^x`` itself rounds to 0.
         """
         n = self._n_features
         x = _finite_tensor(X, "X").detach()

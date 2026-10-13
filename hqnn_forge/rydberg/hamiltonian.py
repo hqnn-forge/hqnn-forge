@@ -98,6 +98,18 @@ def _finite_tensor(value: Any, name: str) -> torch.Tensor:
     return tensor
 
 
+def _bits(n: int, device: torch.device) -> torch.Tensor:
+    """
+    ``bits[k, i] = b_i(k) = (k >> (n−1−i)) & 1`` as ``float64``, shape ``(2^n, n)``.
+
+    Atom 0 is the most significant bit of the basis index.  The Hamiltonian,
+    the solver and the readout all take the ordering from this one table.
+    """
+    index = torch.arange(2**n, device=device)
+    shifts = torch.arange(n - 1, -1, -1, device=device)
+    return ((index[:, None] >> shifts) & 1).to(torch.float64)
+
+
 def rydberg_hamiltonian(
     register: AtomRegister,
     omega: Any,
@@ -236,9 +248,7 @@ def rydberg_hamiltonian(
 
     dim = 2**n
     index = torch.arange(dim, device=delta.device)
-    # bits[k, i] = b_i(k) = (k >> (n-1-i)) & 1: atom 0 is the most significant bit.
-    shifts = torch.arange(n - 1, -1, -1, device=delta.device)
-    bits = ((index[:, None] >> shifts) & 1).to(torch.float64)
+    bits = _bits(n, delta.device)
 
     # Detuning: -Σ_i Δ_i b_i(k), accumulated atom by atom.
     diagonal = torch.zeros(*shape[:-1], dim, dtype=torch.float64, device=delta.device)

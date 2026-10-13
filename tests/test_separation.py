@@ -395,6 +395,24 @@ class TestFisherDiscriminantRatio:
         assert fisher_discriminant_ratio(features, 2 * labels - 1) == pytest.approx(value)
         assert fisher_discriminant_ratio(features, 1 - labels) == pytest.approx(value, rel=1e-12)
 
+    def test_unchanged_by_a_feature_in_a_much_smaller_unit_up_to_the_documented_limit(
+        self,
+    ) -> None:
+        """
+        Rescaling one feature is an invertible map.  Ten orders of magnitude
+        leave the ratio as it is; beyond ``max(M, d) · ε`` times the size of
+        the features together (about ``1e-14`` here) the feature counts as
+        rounding error, and the ratio is that of the other features alone.
+        """
+        features, labels = two_blobs(30, 30, [0.0, 3.0], 1.0, seed=24)
+        value = fisher_discriminant_ratio(features, labels)
+        unit = torch.tensor([1.0, 1e-10], dtype=F64)
+        assert fisher_discriminant_ratio(features * unit, labels) == pytest.approx(value, rel=1e-6)
+        first_alone = fisher_discriminant_ratio(features[:, :1], labels)
+        assert first_alone < 0.1 * value  # the class difference is in the second feature
+        lost = features * torch.tensor([1.0, 1e-16], dtype=F64)
+        assert fisher_discriminant_ratio(lost, labels) == pytest.approx(first_alone, rel=1e-9)
+
     def test_equal_class_means_give_zero(self) -> None:
         features = torch.tensor([[-1.0], [1.0], [-2.0], [2.0]], dtype=F64)
         assert fisher_discriminant_ratio(features, torch.tensor([0, 0, 1, 1])) == 0.0
@@ -553,6 +571,23 @@ class TestLinearFeatureKernel:
         alignment = kernel_target_alignment(linear_feature_kernel(features), labels)
         assert float(alignment) == pytest.approx(1.0, abs=1e-12)
 
+    def test_identical_rows_off_the_origin_have_the_alignment_of_their_rounding(self) -> None:
+        """
+        The Gram matrix of nine equal rows is constant, but its centred form
+        is rounding error and not zero, so the alignment of ``F Fᵀ`` as it is
+        is that of the rounding (−0.11 for these rows where it was measured;
+        the value depends on the platform, so only its range is asserted) and
+        not the 0 of the definition.  The kernel of ``F − F[0]``, which
+        ``separation_measures`` uses, is zero exactly.
+        """
+        features = torch.tensor([[0.1, 0.7, 0.437]], dtype=F64).repeat(9, 1)
+        labels = torch.tensor([0, 1, 0, 1, 1, 0, 1, 1, 0])
+        kernel = linear_feature_kernel(features)
+        assert float(kernel.max() - kernel.min()) < 1e-15
+        assert -1.0 - 1e-12 <= float(kernel_target_alignment(kernel, labels)) <= 1.0 + 1e-12
+        shifted = linear_feature_kernel(features - features[0])
+        assert float(kernel_target_alignment(shifted, labels)) == 0.0
+
     def test_one_feature_along_the_labels_and_one_across_gives_one_over_root_two(self) -> None:
         """
         ``F = [y, u]`` with ``y = (−1, −1, 1, 1)`` and ``u = (1, −1, 1, −1)``,
@@ -675,6 +710,44 @@ class TestSeparationMeasures:
         assert measures.mean_between_distance == pytest.approx(
             1e-12 * reference.mean_between_distance, rel=1e-3
         )
+
+    @pytest.mark.parametrize("scale", [1e-60, 1e60])
+    def test_the_dimensionless_measures_do_not_depend_on_a_common_scale(
+        self, scale: float
+    ) -> None:
+        """Within the documented range, about ``1e-70`` to ``1e70``."""
+        features, labels = two_blobs(20, 30, [1.0, -0.5, 0.2], 1.0, seed=25)
+        reference = separation_measures(features, labels)
+        measures = separation_measures(scale * features, labels)
+        assert measures.distance_ratio == pytest.approx(reference.distance_ratio, rel=1e-12)
+        assert measures.fisher_ratio == pytest.approx(reference.fisher_ratio, rel=1e-12)
+        assert measures.effective_rank == pytest.approx(reference.effective_rank, rel=1e-12)
+        assert measures.kernel_alignment == pytest.approx(reference.kernel_alignment, rel=1e-12)
+        assert measures.mean_between_distance == pytest.approx(
+            scale * reference.mean_between_distance, rel=1e-12
+        )
+
+    def test_records_of_the_same_features_are_equal_also_where_a_ratio_is_undefined(self) -> None:
+        """
+        Identical rows have NaN for both ratios, and NaN is not equal to
+        itself: the generated dataclass comparison called two records of the
+        same features different (on Python 3.13 and later).
+        """
+        features = torch.tensor([[0.1, 0.7, 0.437]], dtype=F64).repeat(9, 1)
+        labels = torch.tensor([0, 1, 0, 1, 1, 0, 1, 1, 0])
+        measures = separation_measures(features, labels)
+        again = separation_measures(features.clone(), labels)
+        assert math.isnan(measures.fisher_ratio) and math.isnan(measures.distance_ratio)
+        assert measures == again and hash(measures) == hash(again)
+        # A NaN from elsewhere is another object with another hash of its own.
+        rebuilt = SeparationMeasures(**{**measures.to_dict(), "fisher_ratio": float("nan")})
+        assert rebuilt == measures and hash(rebuilt) == hash(measures)
+        other, other_labels = two_blobs(12, 15, [1.0, 0.5], 1.0, seed=19)
+        defined = separation_measures(other, other_labels)
+        assert defined == separation_measures(other.clone(), other_labels)
+        assert defined != measures
+        assert defined != SeparationMeasures(**{**defined.to_dict(), "effective_rank": 1.5})
+        assert defined != defined.to_dict()
 
     def test_to_dict_holds_every_scalar_and_survives_json(self) -> None:
         features, labels = two_blobs(12, 15, [1.0, 0.5], 1.0, seed=19)
