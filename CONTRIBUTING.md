@@ -21,6 +21,16 @@ and consistent processes lead to better software.
 Adding a dataset loader, an encoding layer or a variational block? The conventions and required
 tests for each are in [`docs/extending.md`](docs/extending.md).
 
+## Roles
+
+*   **Maintainer** (@g8rdier): assigns issues, reviews and merges pull requests, and decides on
+    scope and releases. Questions about who should work on what go to the maintainer.
+*   **Triage collaborators:** contributors with triage access who help keep issues tidy
+    (titles, duplicates, missing information) and work on their own issues. They do not assign
+    work to others or approve merges.
+*   **Contributors:** everyone else who opens issues or pull requests. No special access is
+    needed; see [Issue First](#1-issue-first) for how to pick up an issue.
+
 ## Git Workflow
 
 ### 1. Issue First
@@ -39,6 +49,11 @@ intentional.
     the work actually requires — there's no need to process them in creation order. The only
     real constraint is the reverse: don't reference an issue number in a commit, PR, or another
     issue before that issue exists.
+*   **Assignment:** To work on an issue, ask for it in a comment and wait until it is assigned
+    to you before opening a branch. Maintainers assign issues to other contributors;
+    collaborators with triage access may assign issues to themselves and pass other requests
+    on to a maintainer. A new contributor holds one issue at a time until their first PR is
+    merged, so that an issue is not blocked by work that has not started.
 
 ### 2. Branch Naming
 

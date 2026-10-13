@@ -120,23 +120,30 @@ from typing import Any
 
 import torch
 
-from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS
+from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _bits
 
 __all__ = ["evolve", "readout"]
 
-#: Largest ``|H − H†|`` entry :func:`evolve` accepts, relative to the largest
-#: ``|H|`` entry.  A matrix built in ``float64`` from a Hermitian expression is
-#: Hermitian to a few units of 1e-16.
+#: Largest ``|H − H†|`` entry :func:`evolve` accepts in a sample, relative to
+#: the largest ``|H|`` entry of that sample.  A matrix built in ``float64`` from
+#: a Hermitian expression is Hermitian to a few units of 1e-16.
 _HERMITIAN_RTOL = 1e-12
+#: The same bound in units of the machine epsilon of the input's dtype, which
+#: is the larger of the two below double precision: a matrix computed in
+#: ``complex64`` is Hermitian to its own rounding only (``1.2e-5`` relative).
+#: The epsilon is that of single precision at most: with a half-precision
+#: one (``bfloat16``: 100 ε = 0.78) the bound would accept nearly any matrix.
+_HERMITIAN_EPS = 100
 
 
 def _non_negative_number(value: Any, name: str) -> float:
     """``value`` as a float ``>= 0``, or a ``ValueError`` naming the argument."""
-    number = (
-        float(value)
-        if isinstance(value, numbers.Real) and not isinstance(value, bool)
-        else math.nan
-    )
+    number = math.nan
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        try:
+            number = float(value)
+        except OverflowError:  # an int beyond the float range
+            number = math.inf
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{name} must be a finite number >= 0; got {value!r}.")
     return number
@@ -177,13 +184,6 @@ def _atom_count(matrix: Any, name: str) -> int:
     if not bool(torch.isfinite(matrix).all()):
         raise ValueError(f"{name} must be finite; got a NaN or an infinity.")
     return n
-
-
-def _bits(n: int, device: torch.device) -> torch.Tensor:
-    """``bits[k, i] = b_i(k) = (k >> (n−1−i)) & 1`` as ``float64``, shape ``(2^n, n)``."""
-    index = torch.arange(2**n, device=device)
-    shifts = torch.arange(n - 1, -1, -1, device=device)
-    return ((index[:, None] >> shifts) & 1).to(torch.float64)
 
 
 def evolve(
@@ -260,6 +260,10 @@ def evolve(
     -----
     * **Precision.**  The Hamiltonian is converted to ``complex128`` whatever
       its dtype.
+    * **Hermiticity** is checked per sample: the largest ``|H − H†|`` entry
+      may be at most ``1e-12`` of the sample's largest ``|H|`` entry, or 100
+      machine epsilons of the input's dtype where that is more (``1.2e-5``
+      for single precision, and no more than that below it).
     * **Choosing ``n_steps``.**  Halving ``dt`` divides the error by 4, so
       two runs with ``n_steps`` and ``2 · n_steps`` differ by about 3/4 of
       the coarser run's error.  ``dt`` must be small against ``1/γ`` and
@@ -300,37 +304,47 @@ def evolve(
     h = hamiltonian.to(torch.complex128)
     # eigh reads one triangle only: a non-Hermitian matrix would be evolved as
     # another, Hermitian one without any error.
-    # An empty batch, which rydberg_hamiltonian returns for no samples, has no
-    # entry to compare (max() of nothing raises) and comes back empty.
-    scale = float(h.detach().abs().max()) if h.numel() else 0.0
-    asymmetry = float((h - h.mH).detach().abs().max()) if h.numel() else 0.0
-    if asymmetry > _HERMITIAN_RTOL * scale:
+    # Each sample is measured against its own largest entry: one scale for the
+    # batch would let a sample with a strong interaction hide another's
+    # asymmetry.  An empty batch, which rydberg_hamiltonian returns for no
+    # samples, has no sample to compare and comes back empty.
+    eps = min(torch.finfo(hamiltonian.dtype).eps, torch.finfo(torch.float32).eps)
+    rtol = max(_HERMITIAN_RTOL, _HERMITIAN_EPS * eps)
+    scale = h.detach().abs().amax(dim=(-2, -1)).reshape(-1)
+    asymmetry = (h - h.mH).detach().abs().amax(dim=(-2, -1)).reshape(-1)
+    failed = (asymmetry > rtol * scale).nonzero()
+    if failed.numel():
+        sample = int(failed[0])
+        where = f" of sample {sample}" if h.ndim == 3 else ""
         raise ValueError(
-            "hamiltonian must be Hermitian; its largest |H - H†| entry is "
-            f"{asymmetry:.3g} (largest |H| entry {scale:.3g})."
+            f"hamiltonian must be Hermitian; the largest |H - H†| entry{where} is "
+            f"{float(asymmetry[sample]):.3g} (largest |H| entry {float(scale[sample]):.3g})."
         )
-
-    # H = V E V†: energies[..., m] = E_m, vectors[..., k, m] = V_km.
-    energies, vectors = torch.linalg.eigh(h)
-
-    if gamma == 0:
-        # ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m); row 0 of V is ⟨g…g|m⟩.
-        amplitudes = torch.exp(-1j * energies * t) * vectors[..., 0, :].conj()
-        psi = vectors @ amplitudes[..., :, None]
-        return psi @ psi.mH
-
-    if steps is None:
+    # Asked for before the eigendecomposition, the expensive part of a call.
+    if gamma > 0 and steps is None:
         raise ValueError(
             "n_steps is required when gamma > 0: the splitting has an error of order "
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the level spacings of the Hamiltonian."
         )
+
+    # H = V E V†: energies[..., m] = E_m, vectors[..., k, m] = V_km.
+    energies, vectors = torch.linalg.eigh(h)
+
+    if gamma == 0 or steps is None:  # no steps only without dephasing, see above
+        # ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m); row 0 of V is ⟨g…g|m⟩.
+        amplitudes = torch.exp(-1j * energies * t) * vectors[..., 0, :].conj()
+        psi = vectors @ amplitudes[..., :, None]
+        return psi @ psi.mH
+
     dt = t / steps
     # U(dt) = V e^(−i E dt) V†: column m of V scaled by its phase, times V†.
     propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
-    # d_H(a, b) = Σ_i (a_i − b_i)², the number of atoms on which a and b differ.
+    # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
+    # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)
-    distance = ((bits[:, None, :] - bits[None, :, :]) ** 2).sum(dim=-1)
+    weight = bits.sum(dim=-1)
+    distance = weight[:, None] + weight[None, :] - 2 * (bits @ bits.T)
     # e^(𝓛_D τ) multiplies ρ_ab by exp(−γ τ d_H(a, b) / 2), for τ = dt/2 and τ = dt.
     half_damping = torch.exp(-gamma * (dt / 2) * distance / 2)
     full_damping = torch.exp(-gamma * dt * distance / 2)
