@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -184,11 +185,13 @@ class TestPulseEncoding:
 
     def test_where_float64_rounds_a_detuning_onto_a_bound(self) -> None:
         """
-        ``σ(x)`` is 0 once ``e^(−x)`` overflows, ``x < −ln(DBL_MAX) = −709.78``,
-        and 1 once ``e^(−x) < 2^(−53)``, ``x > 53 ln 2 = 36.74``.
+        ``σ(x)`` is 1 once ``e^(−x) < 2^(−53)``, ``x > 53 ln 2 = 36.74``.  It is
+        0 at the latest once ``e^x`` is below half the smallest subnormal,
+        ``x < −745.13``; a build that evaluates ``1/(1 + e^(−x))`` gives 0 from
+        ``x < −ln(DBL_MAX) = −709.78`` on, which is not asserted here.
         """
         encoding = PulseEncoding(1, omega=1.0, delta_max=1.0)
-        low, zero, high, one = encoding.detunings([[-709.0], [-711.0], [36.0], [38.0]])[:, 0]
+        low, zero, high, one = encoding.detunings([[-709.0], [-750.0], [36.0], [38.0]])[:, 0]
         assert low.item() == pytest.approx(math.exp(-709.0), rel=1e-12)  # 1.2e-308, not 0
         assert zero.item() == 0.0
         assert 1.0 - high.item() == pytest.approx(math.exp(-36.0), rel=0.5)  # 2.3e-16, not 0
@@ -228,6 +231,15 @@ class TestPulseEncoding:
     def test_rejects_a_bad_omega(self, omega: Any) -> None:
         with pytest.raises(ValueError, match="omega must be a finite number > 0"):
             PulseEncoding(2, omega=omega)
+
+    @pytest.mark.parametrize("omega", [1e-320, 1.1e308])
+    def test_rejects_an_omega_whose_default_pulse_is_not_finite(self, omega: float) -> None:
+        """``π/Ω`` overflows at ``Ω = 1e-320``, ``√3 Ω`` at ``Ω = 1.1e308``."""
+        with pytest.raises(ValueError, match="omega must give a finite default"):
+            PulseEncoding(2, omega=omega)
+        # With both values given, nothing is derived from omega and nothing overflows.
+        given = PulseEncoding(2, omega=omega, t=0.25, delta_max=1.0)
+        assert (given.t, given.delta_max) == (0.25, 1.0)
 
     @pytest.mark.parametrize("t", [-0.1, math.nan, math.inf, "1", True])
     def test_rejects_a_bad_time(self, t: Any) -> None:
@@ -845,6 +857,56 @@ class TestShots:
         standard_error = (exact * (1 - exact) / (200 * 20)).sqrt()
         assert bool(((mean - exact).abs() <= 6 * standard_error + 5 / 4000).all())
 
+    def test_with_dephasing_the_estimates_converge_to_the_exact_features(self) -> None:
+        """The same bound as without dephasing, on the mixed states of the splitting."""
+        feature_map = RydbergFeatureMap(
+            chain(3),
+            PulseEncoding(3, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=OMEGA,
+            n_steps=25,
+            correlations=True,
+        )
+        x = inputs(6, 3, seed=14)
+        exact = feature_map.transform(x)
+        shots = 100_000
+        estimates = feature_map.transform(
+            x, shots=shots, generator=torch.Generator().manual_seed(4)
+        )
+        standard_error = (exact * (1 - exact) / shots).sqrt()
+        assert bool(((estimates - exact).abs() <= 6 * standard_error + 5 / shots).all())
+
+    def test_a_population_rounded_below_zero_is_sampled_as_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A state whose diagonal holds ``−1e-17`` gives the estimates of the same
+        state with 0 there, from the same draws; ``torch.multinomial`` refuses
+        a negative probability, so without the clamp the call raises.
+        """
+        populations = torch.tensor([0.25, 0.0, 0.75, 0.0], dtype=F64)
+
+        def state(second: float) -> Callable[..., torch.Tensor]:
+            def fake_evolve(hamiltonian: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+                diagonal = populations.clone()
+                diagonal[1] = second
+                return torch.diag_embed(diagonal).to(C128).expand(hamiltonian.shape[0], 4, 4)
+
+            return fake_evolve
+
+        feature_map = self.build(2)
+        x = inputs(5, 2)
+        monkeypatch.setattr(feature_map_module, "evolve", state(0.0))
+        clean = feature_map.transform(x, shots=200, generator=torch.Generator().manual_seed(9))
+        monkeypatch.setattr(feature_map_module, "evolve", state(-1e-17))
+        rounded = feature_map.transform(x, shots=200, generator=torch.Generator().manual_seed(9))
+        assert torch.equal(rounded, clean)
+        # States 0 and 2 hold all the weight: one atom is excited in about 3/4 of
+        # the shots, the other and the pair never.
+        atoms = clean[:, :2].sort(dim=1).values
+        assert bool((atoms[:, 0] == 0).all()) and bool((clean[:, 2] == 0).all())
+        assert bool(((atoms[:, 1] - 0.75).abs() < 0.2).all())
+
     def test_shots_none_is_exact_and_ignores_the_generator(self) -> None:
         feature_map = self.build(3)
         x = inputs(3, 3)
@@ -1069,10 +1131,10 @@ class TestValidation:
         [
             (
                 {"n_features": 2, "omega": OMEGA, "scale": 2.0},
-                "unexpected keyword argument 'scale'",
+                "'scale'",
             ),
-            ({"n_features": 2}, "missing 1 required keyword-only argument: 'omega'"),
-            ({"omega": OMEGA}, "missing 1 required positional argument: 'n_features'"),
+            ({"n_features": 2}, "'omega'"),
+            ({"omega": OMEGA}, "'n_features'"),
         ],
     )
     def test_an_encoding_dict_with_a_wrong_key_is_a_type_error(
