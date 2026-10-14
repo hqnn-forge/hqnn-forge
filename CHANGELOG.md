@@ -362,6 +362,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dephasing rate and fold (#519, #520)
 
 ### Changed
+- The remaining rendered API modules declare `__all__`, keeping implementation imports out
+  of star imports and ensuring documentation checks cover every declared export (#550)
 - The package metadata links the repository, issue tracker and changelog, and the README's
   image and file links are absolute, so both work on PyPI (#327)
 - The README links the API reference site near the top and from Quick Start, Architecture and
