@@ -841,6 +841,22 @@ class TestCommandLine:
         assert parser.description is None
         assert parser.parse_args(["--quick"]).quick is True
 
+    def test_every_parser_option_has_help(self) -> None:
+        """Every optional argument of _parser() must carry a non-empty help string (#526).
+
+        ``ArgumentDefaultsHelpFormatter`` only prints a default next to an option
+        that already has a ``help=`` string; without one, both the description and
+        the default are invisible to users running ``--help``.
+        """
+        parser = bench._parser()
+        missing = [
+            action.option_strings
+            for action in parser._actions
+            if action.option_strings  # skip the positional catch-all action
+            and action.help in (None, argparse.SUPPRESS, "")
+        ]
+        assert missing == [], f"Options without a help string: {missing}"
+
 
 # ---------------------------------------------------------------------------
 # Inputs: fitted on the training rows, oversampled once
@@ -2157,48 +2173,3 @@ class TestSeparationSubsamplingIntegration:
         sep1 = r1[0]["separation"]["train"]["mean_within_distance"]
         sep2 = r2[0]["separation"]["train"]["mean_within_distance"]
         assert sep1 != sep2
-
-
-# ---------------------------------------------------------------------------
-# CLI: _parser() help strings (#526)
-# ---------------------------------------------------------------------------
-
-
-def test_every_parser_option_has_help() -> None:
-    """Every optional argument of _parser() must carry a non-empty help string (#526).
-
-    ``ArgumentDefaultsHelpFormatter`` only prints a default next to an option
-    that already has a ``help=`` string; without one, both the description and
-    the default are invisible to users running ``--help``.
-    """
-    parser = bench._parser()
-    missing = [
-        action.option_strings
-        for action in parser._actions
-        if action.option_strings  # skip the positional catch-all action
-        and action.help in (None, argparse.SUPPRESS, "")
-    ]
-    assert missing == [], f"Options without a help string: {missing}"
-
-
-def test_help_output_contains_every_option() -> None:
-    """The formatted --help text must mention every optional flag (#526).
-
-    This confirms the formatter renders the parser correctly and that no option
-    is accidentally hidden (e.g. via ``help=argparse.SUPPRESS``).
-    """
-    import io
-
-    parser = bench._parser()
-    buf = io.StringIO()
-    parser.print_help(buf)
-    text = buf.getvalue()
-
-    optional_flags = [
-        flag
-        for action in parser._actions
-        for flag in action.option_strings
-        if action.help not in (argparse.SUPPRESS,)
-    ]
-    missing_from_output = [flag for flag in optional_flags if flag not in text]
-    assert missing_from_output == [], f"Flags missing from --help output: {missing_from_output}"

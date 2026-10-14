@@ -486,6 +486,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   few 1e-17 for an IQP layer at 12): the default 5000 pairs of a 2-layer angle layer went
   from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
   take a batch of parameters runs tape by tape as before (#374)
+- `examples/benchmark_rydberg_features.py`: every option has a help string, and `--help`
+  shows its default (#526)
 
 ### Fixed
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release

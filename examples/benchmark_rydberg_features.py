@@ -1650,7 +1650,7 @@ def _parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=Path("rydberg_features_benchmark.jsonl"),
-        help="JSON-lines output file; overwritten",
+        help="JSON-lines output file; replaced once the first record is written",
     )
     parser.add_argument("--quick", action="store_true", help="one fold, one small grid point")
     parser.add_argument(
@@ -1673,7 +1673,10 @@ def _parser() -> argparse.ArgumentParser:
         "--n-atoms",
         type=int,
         default=default.n_atoms,
-        help="atoms N: PCA components, inputs, and arm-D qubits",
+        help=(
+            "atoms N: PCA components, inputs, and arm-D qubits; "
+            "also shapes the positive-control dataset"
+        ),
     )
     parser.add_argument(
         "--v-over-omega",
@@ -1718,7 +1721,7 @@ def _parser() -> argparse.ArgumentParser:
         "--circuit-layers",
         type=int,
         default=default.circuit_layers,
-        help="variational layers of arm D's frozen gate-based circuit",
+        help="variational layers of arm D's gate-based circuit, both when frozen and in D-hybrid",
     )
     parser.add_argument(
         "--folds",
@@ -1736,7 +1739,10 @@ def _parser() -> argparse.ArgumentParser:
         "--validation-folds",
         type=int,
         default=default.validation_folds,
-        help="one Nth of the training part is held out for early stopping and threshold",
+        help=(
+            "1/k of the training portion is held out for early stopping and "
+            "threshold selection, where k is this option's value"
+        ),
     )
     parser.add_argument("--trials", type=int, default=default.n_trials, help="0: no tuning")
     parser.add_argument(
@@ -1773,7 +1779,7 @@ def _parser() -> argparse.ArgumentParser:
         "--patience",
         type=int,
         default=default.patience,
-        help="early-stopping patience in epochs; None to disable",
+        help="early-stopping patience in epochs",
     )
     parser.add_argument(
         "--samples",
@@ -1785,7 +1791,10 @@ def _parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=default.random_state,
-        help="root seed for splits, draws, initialisation and batch order",
+        help=(
+            "root seed for splits, draws, initialisation and batch order; "
+            "also shapes the positive-control dataset"
+        ),
     )
     parser.add_argument(
         "--max-separation-rows",
