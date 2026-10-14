@@ -536,10 +536,11 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         offset ``p10 − p01``, so a model trained with it is evaluated on
         outputs without that shift unless the evaluation runs inside
         ``apply_readout_error`` with the same pair (#488).  With ``shots``
-        the map rescales the sampled estimate: the mean is exact, but the
-        shot noise is scaled by ``|1 − p01 − p10|`` and so comes out smaller
-        than that of flipped shots (#486).  Stored as plain floats; shown in
-        the repr.
+        each shot is flipped instead, so the output has the spread of a
+        device with this error, ``(1 − ⟨Z'⟩²)/shots``, and the map is its
+        mean and gives its gradient (#486; see
+        :func:`~hqnn_forge.noise.apply_readout_error`).  Stored as plain
+        floats; shown in the repr.
 
     Attributes
     ----------

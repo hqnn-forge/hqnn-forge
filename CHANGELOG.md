@@ -293,9 +293,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `noise_sweep(..., channel="readout")`, and `readout_error=` on the layers and classifiers for
   training (weight-safe in checkpoints). The map acts on the layer's output: a layer's own
   `readout_error` is suppressed inside `apply_depolarizing_noise` like its other training
-  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. On a sampled
-  layer the mean is exact but the shot noise is scaled by `|1 − p01 − p10|`, smaller than that
-  of flipped shots (#486). A model trained with `readout_error` learns its offset, and
+  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. A model
+  trained with `readout_error` learns its offset, and
   `predict_proba` runs without it unless called inside `apply_readout_error` (#488) (#358)
 - A model specification page, `docs/rydberg-model.md`, for a simulated Rydberg-atom feature
   map: units, Hamiltonian and its sign and ordering conventions, chain geometry, the detuning
@@ -488,6 +487,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
+- A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
+  each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
+  output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
+  spread was scaled by `|1 − p01 − p10|`, too small for every ⟨Z⟩ and zero at
+  `p01 + p10 = 1`. Gradients are unchanged;
+  exact layers are unaffected (#486)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
