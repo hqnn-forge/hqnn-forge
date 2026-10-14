@@ -60,9 +60,22 @@ class TestInitSeed:
         _build(cls, extra, init_seed=7)
         assert torch.equal(torch.random.get_rng_state(), before)
 
-    @pytest.mark.parametrize("encoding_type", ["angle", "iqp", "amplitude", "reuploading"])
+    @pytest.mark.parametrize(
+        "options",
+        [
+            *(
+                pytest.param({"encoding_type": e}, id=e)
+                for e in ("angle", "iqp", "amplitude", "reuploading")
+            ),
+            # Train-mode noise builds a second QNode on its own device.
+            pytest.param({"noise_level": 0.05}, id="density-noise"),
+            pytest.param(
+                {"noise_level": 0.05, "noise_method": "trajectories"}, id="trajectory-noise"
+            ),
+        ],
+    )
     def test_the_global_numpy_rng_is_left_exactly_as_it_was(
-        self, cls: type, extra: dict, encoding_type: str
+        self, cls: type, extra: dict, options: dict
     ) -> None:
         saved = np.random.get_state()
         try:
@@ -71,7 +84,7 @@ class TestInitSeed:
             # well as the MT19937 keys and their current position.
             np.random.normal()
             before = np.random.get_state()
-            _build(cls, extra, init_seed=7, encoding_type=encoding_type)
+            _build(cls, extra, init_seed=7, **options)
             after = np.random.get_state()
             assert after[0] == before[0]
             np.testing.assert_array_equal(after[1], before[1])

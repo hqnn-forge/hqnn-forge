@@ -445,9 +445,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
-- Constructing a classifier with `init_seed` no longer advances NumPy's global RNG:
-  supported simulators use a private generator when the device `seed` is `None`. Pass
-  an explicit device seed for repeatable shot samples (#533)
+- Constructing a classifier or encoding layer, with or without `init_seed`, no longer advances
+  NumPy's global RNG: the built-in simulators and the train-mode `default.mixed` device get an
+  explicit `seed=None`, so an unseeded device draws from OS entropy and `numpy.random.seed` no
+  longer makes its shot samples repeat; pass the device `seed` for that (#533)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
