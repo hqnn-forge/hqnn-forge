@@ -1646,37 +1646,147 @@ def _parser() -> argparse.ArgumentParser:
         description=paragraphs[1] if len(paragraphs) > 1 else None,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--out", type=Path, default=Path("rydberg_features_benchmark.jsonl"))
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("rydberg_features_benchmark.jsonl"),
+        help="JSON-lines output file; overwritten",
+    )
     parser.add_argument("--quick", action="store_true", help="one fold, one small grid point")
-    parser.add_argument("--dataset", nargs="+", choices=DATASETS, default=["positive-control"])
+    parser.add_argument(
+        "--dataset",
+        nargs="+",
+        choices=DATASETS,
+        default=["positive-control"],
+        help="datasets to run",
+    )
     parser.add_argument("--data-path", type=Path, default=None, help="file or directory (UCI)")
     parser.add_argument("--download", action="store_true", help="fetch a missing UCI file")
-    parser.add_argument("--cache-dir", type=Path, default=Path("rydberg_features_cache"))
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("rydberg_features_cache"),
+        help="directory for the feature cache; disabled by --no-cache",
+    )
     parser.add_argument("--no-cache", action="store_true", help="do not store features")
-    parser.add_argument("--n-atoms", type=int, default=default.n_atoms)
     parser.add_argument(
-        "--v-over-omega", type=float, nargs="+", default=list(default.v_over_omega)
+        "--n-atoms",
+        type=int,
+        default=default.n_atoms,
+        help="atoms N: PCA components, inputs, and arm-D qubits",
     )
     parser.add_argument(
-        "--gamma-over-omega", type=float, nargs="+", default=list(default.gamma_over_omega)
+        "--v-over-omega",
+        type=float,
+        nargs="+",
+        default=list(default.v_over_omega),
+        help="V/Omega grid values (nearest-neighbour interaction / Rabi frequency)",
     )
-    parser.add_argument("--n-steps", type=int, default=default.n_steps)
-    parser.add_argument("--shots", type=int, default=None, help="default: exact features")
-    parser.add_argument("--arms", nargs="+", choices=ARMS, default=list(default.arms))
-    parser.add_argument("--hidden", type=int, default=default.hidden)
-    parser.add_argument("--circuit-layers", type=int, default=default.circuit_layers)
-    parser.add_argument("--folds", type=int, default=default.n_splits)
-    parser.add_argument("--max-folds", type=int, default=None, help="default: every fold")
-    parser.add_argument("--validation-folds", type=int, default=default.validation_folds)
+    parser.add_argument(
+        "--gamma-over-omega",
+        type=float,
+        nargs="+",
+        default=list(default.gamma_over_omega),
+        help="gamma/Omega grid values (dephasing rate / Rabi frequency); 0 = no dephasing",
+    )
+    parser.add_argument(
+        "--n-steps",
+        type=int,
+        default=default.n_steps,
+        help="Lindblad solver steps per map when gamma > 0",
+    )
+    parser.add_argument(
+        "--shots",
+        type=int,
+        default=None,
+        help="bitstrings per sample for arms A, B and D; omit for exact expectation values",
+    )
+    parser.add_argument(
+        "--arms",
+        nargs="+",
+        choices=ARMS,
+        default=list(default.arms),
+        help="arms to run (D also runs D-hybrid)",
+    )
+    parser.add_argument(
+        "--hidden",
+        type=int,
+        default=default.hidden,
+        help="hidden-layer width of the MLP head",
+    )
+    parser.add_argument(
+        "--circuit-layers",
+        type=int,
+        default=default.circuit_layers,
+        help="variational layers of arm D's frozen gate-based circuit",
+    )
+    parser.add_argument(
+        "--folds",
+        type=int,
+        default=default.n_splits,
+        help="number of outer cross-validation folds",
+    )
+    parser.add_argument(
+        "--max-folds",
+        type=int,
+        default=None,
+        help="run only this many of the outer folds; omit to run all",
+    )
+    parser.add_argument(
+        "--validation-folds",
+        type=int,
+        default=default.validation_folds,
+        help="one Nth of the training part is held out for early stopping and threshold",
+    )
     parser.add_argument("--trials", type=int, default=default.n_trials, help="0: no tuning")
-    parser.add_argument("--inner-folds", type=int, default=default.inner_folds)
-    parser.add_argument("--loss", choices=sorted(LOSSES), default=default.loss)
-    parser.add_argument("--lr", type=float, default=default.lr)
-    parser.add_argument("--epochs", type=int, default=default.max_epochs)
-    parser.add_argument("--batch-size", type=int, default=default.batch_size)
-    parser.add_argument("--patience", type=int, default=default.patience)
-    parser.add_argument("--samples", type=int, default=default.n_samples)
-    parser.add_argument("--seed", type=int, default=default.random_state)
+    parser.add_argument(
+        "--inner-folds",
+        type=int,
+        default=default.inner_folds,
+        help="stratified folds used inside each tuning trial",
+    )
+    parser.add_argument(
+        "--loss",
+        choices=sorted(LOSSES),
+        default=default.loss,
+        help="training loss function",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=default.lr,
+        help="Adam learning rate (overridden by tuning when --trials > 0)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=default.max_epochs,
+        help="maximum training epochs per model",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=default.batch_size,
+        help="mini-batch size (overridden by tuning when --trials > 0)",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=default.patience,
+        help="early-stopping patience in epochs; None to disable",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=default.n_samples,
+        help="samples of the positive-control dataset",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=default.random_state,
+        help="root seed for splits, draws, initialisation and batch order",
+    )
     parser.add_argument(
         "--max-separation-rows",
         type=int,
