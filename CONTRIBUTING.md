@@ -264,8 +264,8 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     above it, and adds the compare link at the bottom. It also bumps `version` in
     `CITATION.cff` to the new version (`tests/test_citation.py` fails until it does) and can
     add a `date-released`.
-*   **When uv moves to a new minor release, raise the `<0.13` cap by hand in `[build-system]` in
-    `pyproject.toml`.**
+*   **When uv moves to a new minor release, raise the `uv_build` cap in `[build-system]` in
+    `pyproject.toml`.** Dependabot opens that PR itself (#551); merge it once CI is green.
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 
