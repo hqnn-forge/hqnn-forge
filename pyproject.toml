@@ -111,6 +111,9 @@ line-length = 99
 target-version = "py311"
 
 [tool.ruff.lint]
+# ruff 0.17 dropped most flake8-datetimez rules from its default set; they keep
+# timestamps such as the experiment record's "created" stamp timezone-aware
+extend-select = ["DTZ"]
 ignore = [
     # `import torch.nn as nn` / `import torch.optim as optim` is the PyTorch
     # idiom used throughout; `from torch import nn` reads as a different thing

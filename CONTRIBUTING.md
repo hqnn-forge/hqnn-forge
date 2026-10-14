@@ -190,8 +190,8 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     `ignore_missing_imports` hides the missing module. The `dev` extra declares the tools without a version range, so a pip install
     gets the newest releases, and when a new ruff changes a default, its `ruff format`
     disagrees with CI's. The versions are deliberately not capped in `pyproject.toml`
-    either. Dependabot only updates `uv.lock`, so a cap such as `ruff<0.17` would stop it
-    from ever proposing the next minor release.
+    either. Dependabot only updates `uv.lock`, so any upper bound on ruff would stop it
+    from ever proposing a release past that bound.
 
 ## Dependency Changes
 
