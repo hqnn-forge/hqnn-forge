@@ -1234,7 +1234,9 @@ class FeatureCache:
     ------
     RuntimeError
         With a directory, if the package has no source files to fingerprint
-        (:func:`code_files`).
+        (:func:`code_files`), or if the files could not be read when this
+        script was imported (:data:`CODE_SHA256` is ``None``) and can be now:
+        a digest read that late is not used.
     """
 
     def __init__(
@@ -1249,8 +1251,18 @@ class FeatureCache:
         self.code_sha256 = code_sha256
         if self.directory is not None:
             if self.code_sha256 is None:
-                # no digest from the import: read again, for the message that says why
-                self.code_sha256 = CODE_SHA256 if CODE_SHA256 is not None else code_fingerprint()
+                if CODE_SHA256 is None:
+                    # no digest from the import: read again, only for the message that says
+                    # why.  A digest that can be had now is of the files as they are now, not
+                    # of the code this process has loaded, and is not used.
+                    code_fingerprint()
+                    raise RuntimeError(
+                        "the source files of hqnn_forge and of this script could not be read "
+                        "when the script was imported but can be now, so the feature cache "
+                        "cannot tell which code this process computes with; run again, or "
+                        "with --no-cache (cache_dir=None)."
+                    )
+                self.code_sha256 = CODE_SHA256
             self.directory.mkdir(parents=True, exist_ok=True)
 
     def path(self, inputs: FloatArray, labels: IntArray, config: Mapping[str, Any]) -> Path | None:

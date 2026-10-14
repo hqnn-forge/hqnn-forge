@@ -1302,6 +1302,30 @@ class TestCache:
         fetched = sourceless.FeatureCache(None).fetch(self.inputs, self.labels, {}, compute)
         assert (fetched.hit, calls) == (False, [12])
 
+    def test_a_digest_that_could_not_be_read_at_the_import_is_not_read_later(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        No digest when the script was imported, files that can be read when
+        the cache is built: their digest is of the files as they are then,
+        not of the code the process has loaded, so the directory is refused
+        instead of being filled under it.
+        """
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        late = _script()  # no __init__.py yet: nothing to fingerprint
+        assert late.CODE_SHA256 is None
+
+        (package / "__init__.py").write_bytes(b"MARK = 2\n")
+        assert len(late.code_fingerprint()) == 64  # readable now
+        with pytest.raises(RuntimeError, match="when the script was imported.*--no-cache"):
+            late.FeatureCache(tmp_path / "cache")
+        assert not (tmp_path / "cache").exists()
+        assert late.FeatureCache(tmp_path / "cache", code_sha256="c" * 64).code_sha256 == "c" * 64
+        assert late.FeatureCache(None).path(self.inputs, self.labels, {}) is None
+
     def test_without_a_directory_every_request_computes(self) -> None:
         compute, calls = self._counting()
         cache = bench.FeatureCache(None)
