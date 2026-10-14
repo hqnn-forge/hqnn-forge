@@ -491,8 +491,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
   spread was scaled by `|1 − p01 − p10|`, too small for every ⟨Z⟩ and zero at
-  `p01 + p10 = 1`. Gradients are unchanged;
-  exact layers are unaffected (#486, #546)
+  `p01 + p10 = 1`. Gradients are unchanged; exact layers are unaffected (#486, #546)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
