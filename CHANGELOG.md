@@ -360,6 +360,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
   `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
   dephasing rate and fold (#519, #520)
+- `examples/benchmark_rydberg_features.py` standardises each head's features per fold, with the
+  mean and standard deviation of the fold's real training rows (never synthetic, validation or
+  test rows), for arms A, B, C and D alike (not `D-hybrid`), so that a score under strong
+  dephasing no longer falls because the features shrink towards ½ while the optimiser keeps its
+  step size; with exact features the collapse then shows through `--shots` and in the
+  `separation` distances, which stay on the features as the map returns them. On by default,
+  recorded as `standardise` in `settings`; `--no-standardise` restores the features as returned
+  and reads the same cache entries (#518, #545)
 
 ### Changed
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
