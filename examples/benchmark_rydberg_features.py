@@ -1353,6 +1353,92 @@ def features_of(rep: Representation, split: Split, cache: FeatureCache) -> Cache
     return cache.fetch(split.inputs, split.labels, rep.config, rep.compute)
 
 
+def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatArray:
+    """
+    Every column of ``features`` centred and scaled by its statistics on ``fit_rows``.
+
+    **Not part of a run yet.**  Whether a head sees its features as the map
+    returns them or standardised is the open decision of #518; until it is
+    taken, :func:`run_dataset` does not call this function and step 4 of
+    the module docstring holds as written.
+
+    Definition
+    ----------
+    For the matrix ``F`` (row ``r`` a sample, column ``j`` a feature) and
+    the ``n`` rows ``R = fit_rows``,
+
+    ::
+
+        μ_j  = (1/n) Σ_{r ∈ R} F[r, j]
+        σ_j² = (1/n) Σ_{r ∈ R} (F[r, j] − μ_j)²
+        Z[r, j] = (F[r, j] − μ_j) / σ_j          for every row r
+
+    with the population variance (``1/n``, not ``1/(n − 1)``), as
+    :func:`preprocess` scales the raw columns.  A column with ``σ_j = 0`` on
+    the fitting rows is only centred (``σ_j`` is replaced by 1).  ``Z`` is
+    dimensionless whatever the unit of ``F``; on the fitting rows each
+    column of ``Z`` has mean 0 and, unless it is constant there, variance 1.
+    Rows outside ``R`` enter neither ``μ`` nor ``σ``: changing one changes
+    that row of ``Z`` and no other.
+
+    What it removes
+    ---------------
+    Replace column ``j`` by ``a_j + ε_j F[·, j]`` with ``ε_j > 0``.  Then
+    ``μ_j → a_j + ε_j μ_j`` and ``σ_j → ε_j σ_j``, so
+
+    ::
+
+        Z[r, j] → (a_j + ε_j F[r, j] − a_j − ε_j μ_j) / (ε_j σ_j) = Z[r, j]
+
+    ``Z`` does not depend on the offset or the scale of a column (a negative
+    ``ε_j`` flips the column's sign).  Features of the form ``½ + ε g``, the
+    shape of excitation probabilities collapsing under strong dephasing
+    (``docs/rydberg-model.md``, "Strong dephasing"), therefore give the
+    standardisation of ``g`` for every ``ε``.
+
+    That holds up to rounding.  The arithmetic is in float64: ``½ + ε g`` is
+    stored with an absolute error of up to ``2⁻⁵³ ≈ 1.1e-16``, which the
+    division turns into ``1.1e-16/(ε σ_g)`` in units of ``Z``.  Any other
+    error of the features that does not shrink with their spread is
+    magnified in the same way: a solver error ``δ`` becomes ``δ/σ_j``.
+
+    Parameters
+    ----------
+    features:
+        Shape ``(n_rows, d)``.
+    fit_rows:
+        Indices of the rows the statistics are taken over, at least one.
+        For a :class:`Split`, the real training rows are
+        ``np.arange(split.n_train − split.n_synthetic)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(n_rows, d)``, float64; row ``r`` and column ``j`` are those
+        of ``features``.
+
+    Raises
+    ------
+    ValueError
+        If ``features`` is not two-dimensional, ``fit_rows`` is empty, or a
+        fitting row holds a value that is not finite.
+    """
+    matrix = np.asarray(features, dtype=np.float64)
+    if matrix.ndim != 2:
+        raise ValueError(f"features must have shape (n_rows, d); got {matrix.shape}.")
+    rows = np.asarray(fit_rows)
+    if rows.size == 0:
+        raise ValueError("fit_rows must name at least one row.")
+    fitted = matrix[rows]
+    if not np.isfinite(fitted).all():
+        raise ValueError("features are not finite on the fitting rows.")
+    mean = fitted.mean(axis=0)
+    std = fitted.std(axis=0)
+    std[std == 0] = 1.0
+    result: FloatArray = (matrix - mean) / std
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Models, training, tuning
 # ---------------------------------------------------------------------------

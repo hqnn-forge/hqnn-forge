@@ -19,7 +19,10 @@ What the numbers are checked against:
   and the JSON mapping;
 * ``hashlib`` over files listed with ``os.walk``, for the code digest in the
   feature cache's key (#522), and ``compare_environment`` for which entries
-  of the environment the key holds.
+  of the environment the key holds;
+* a matrix standardised by hand, scikit-learn's ``StandardScaler`` and the
+  standardisation of ``g`` for features ``½ + ε g``, for
+  ``standardise_features`` (#518).
 """
 
 from __future__ import annotations
@@ -1582,6 +1585,133 @@ class TestCache:
                 assert record["environment"] == where
         for line, record in zip(bench.read_records(tmp_path / "b.jsonl"), second, strict=True):
             assert line["tuning"] == record["tuning"]
+
+
+# ---------------------------------------------------------------------------
+# Standardising a feature matrix (#518)
+# ---------------------------------------------------------------------------
+
+
+def _collapsed(epsilon: float, n_synthetic: int = 8) -> tuple[Any, np.ndarray, np.ndarray]:
+    """
+    A split of 200 rows with features ``½ + ε g`` and the rows a fit may see.
+
+    ``g`` has four columns of unit normal noise, shifted by ``±0.8`` with
+    the label in the first two, so a head can learn it.  Blocks: 120
+    training rows whose last ``n_synthetic`` count as synthetic, 40
+    validation rows, 40 test rows.
+    """
+    rng = np.random.default_rng(518)
+    labels = (np.arange(200) % 2).astype(np.int64)
+    g = rng.standard_normal((200, 4))
+    g[:, :2] += 0.8 * (2.0 * labels[:, None] - 1.0)
+    split = bench.Split(
+        inputs=g, labels=labels, n_train=120, n_synthetic=n_synthetic, n_val=40, n_test=40
+    )
+    return split, 0.5 + epsilon * g, np.arange(120 - n_synthetic)
+
+
+class TestStandardiseFeatures:
+    def test_a_matrix_by_hand(self) -> None:
+        # Column 0 on the fitting rows: 1, 2, 3, so μ = 2 and σ² = (1 + 0 + 1)/3.
+        # Column 1 is constant there and is only centred.
+        features = np.array([[1.0, 0.5], [2.0, 0.5], [3.0, 0.5], [5.0, 0.7]])
+        result = bench.standardise_features(features, np.array([0, 1, 2]))
+        s = math.sqrt(2.0 / 3.0)
+        expected = np.array([[-1 / s, 0.0], [0.0, 0.0], [1 / s, 0.0], [3 / s, 0.2]])
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-15)
+        assert result.dtype == np.float64
+
+    def test_it_agrees_with_scikit_learn_fitted_on_the_fitting_rows(self) -> None:
+        from sklearn.preprocessing import StandardScaler
+
+        _, features, fit_rows = _collapsed(0.01)
+        expected = StandardScaler().fit(features[fit_rows]).transform(features)
+        result = bench.standardise_features(features, fit_rows)
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-11)
+        # On the fitting rows every column then has mean 0 and variance 1 (1/n).
+        np.testing.assert_allclose(result[fit_rows].mean(axis=0), 0.0, atol=1e-11)
+        np.testing.assert_allclose(result[fit_rows].std(axis=0), 1.0, atol=1e-11)
+
+    def test_rows_outside_the_fit_change_no_other_row(self) -> None:
+        split, features, fit_rows = _collapsed(0.01)
+        before = bench.standardise_features(features, fit_rows)
+        # Synthetic, validation and test rows: none of them is a fitting row.
+        outside = np.setdiff1d(np.arange(features.shape[0]), fit_rows)
+        assert outside[0] == split.n_train - split.n_synthetic
+        changed = features.copy()
+        changed[outside] = 0.5 + 7.0 * (changed[outside] - 0.5)
+        after = bench.standardise_features(changed, fit_rows)
+        np.testing.assert_array_equal(after[fit_rows], before[fit_rows])
+        mean, std = features[fit_rows].mean(axis=0), features[fit_rows].std(axis=0)
+        np.testing.assert_allclose(after[outside], (changed[outside] - mean) / std, rtol=1e-12)
+        assert np.abs(after[outside] - before[outside]).max() > 1.0
+        # A fitting row does enter: the same change there moves every row.
+        changed = features.copy()
+        changed[fit_rows[:20]] = 0.5 + 7.0 * (changed[fit_rows[:20]] - 0.5)
+        moved = bench.standardise_features(changed, fit_rows)
+        assert np.abs(moved[outside] - before[outside]).max() > 0.1
+
+    @pytest.mark.parametrize("epsilon", [1e-1, 1e-3, 1e-6])
+    def test_the_result_does_not_depend_on_offset_and_scale(self, epsilon: float) -> None:
+        # ½ + ε g has μ = ½ + ε μ_g and σ = ε σ_g, so its standardisation is that of g.
+        split, features, fit_rows = _collapsed(epsilon)
+        g = split.inputs
+        expected = (g - g[fit_rows].mean(axis=0)) / g[fit_rows].std(axis=0)
+        result = bench.standardise_features(features, fit_rows)
+        # ½ + ε g is rounded to 1.1e-16, which is 1.1e-16/(ε σ_g) after the division.
+        np.testing.assert_allclose(result, expected, rtol=0, atol=4 * 1.1e-16 / epsilon + 1e-13)
+        # A negative factor only flips the sign.
+        np.testing.assert_allclose(
+            bench.standardise_features(0.5 - epsilon * g, fit_rows),
+            -expected,
+            rtol=0,
+            atol=4 * 1.1e-16 / epsilon + 1e-13,
+        )
+
+    @pytest.mark.parametrize(
+        ("features", "rows", "message"),
+        [
+            (np.zeros(4), np.array([0, 1]), "features must have shape"),
+            (np.zeros((4, 2)), np.array([], dtype=np.intp), "fit_rows must name at least one row"),
+            (
+                np.array([[0.0, 1.0], [np.nan, 2.0], [1.0, 3.0]]),
+                np.array([0, 1]),
+                "not finite on the fitting rows",
+            ),
+        ],
+    )
+    def test_what_is_refused(self, features: np.ndarray, rows: np.ndarray, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            bench.standardise_features(features, rows)
+
+    @pytest.mark.parametrize("head", ["linear", "mlp"])
+    def test_scores_on_standardised_features_do_not_depend_on_epsilon(self, head: str) -> None:
+        settings = bench.Settings()
+        config = {"lr": 0.05, "max_epochs": 30, "batch_size": 32, "patience": None}
+
+        def score(epsilon: float, *, standardise: bool) -> Any:
+            split, features, fit_rows = _collapsed(epsilon)
+            if standardise:
+                features = bench.standardise_features(features, fit_rows)
+            model = bench.build_model(head, 4, settings, init_seed=3)
+            return bench.fit_and_score(model, features, split, config, loss="bce", batch_seed=5)
+
+        reference = score(1.0, standardise=True)
+        # The task is learnable, so equal scores are not equal failures.
+        assert reference.mcc > 0.5
+        assert reference.pr_auc > 0.8
+        for epsilon in (1e-2, 1e-4, 1e-6):
+            fit = score(epsilon, standardise=True)
+            assert fit.mcc == reference.mcc
+            assert fit.epochs == reference.epochs
+            assert fit.pr_auc == pytest.approx(reference.pr_auc, abs=1e-6)
+            assert fit.threshold == pytest.approx(reference.threshold, abs=1e-4)
+        # Without the step the same data at another ε is another training problem:
+        # the head starts from the same weights but its logits are ε times as wide.
+        raw = score(1.0, standardise=False)
+        small = score(1e-4, standardise=False)
+        assert small.pr_auc < raw.pr_auc - 0.05
 
 
 # ---------------------------------------------------------------------------
