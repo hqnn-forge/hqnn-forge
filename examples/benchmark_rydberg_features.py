@@ -166,14 +166,18 @@ file; a change in any part of the key is a miss.  A fix in
 therefore compute anew, also between two commits of one development
 version, in a working tree with uncommitted edits and without git.  The
 digest does not tell which module a feature depends on: an edit anywhere in
-the package or in this script, a comment included, is a miss.  A package
-without source files cannot be fingerprinted and is refused; ``--no-cache``
-runs there.  Entries of other versions stay in the directory under their
-own names and are not removed.
+the package or in this script, a comment included, is a miss.  The files
+are read once, when this script is imported (:data:`CODE_SHA256`): an edit
+made while a run is under way does not rename the entries of the code that
+run has loaded.  A package without source files cannot be fingerprinted and
+is refused; ``--no-cache`` runs there.  Entries of other versions stay in
+the directory under their own names and are not removed.
 
 What the key does not see: the platform string (as ``compare_environment``),
-and the packages ``environment()`` does not record, such as a dependency of
-PennyLane or the BLAS behind NumPy.  Every entry therefore also stores the
+the packages ``environment()`` does not record, such as a dependency of
+PennyLane or the BLAS behind NumPy, and a change of a recorded package that
+keeps its version string (an editable or git install of a development
+version).  Every entry therefore also stores the
 full ``environment()`` it was computed in, and each line of an arm with a
 fixed map records it as ``feature_environment``, beside the ``environment``
 of the run that wrote the line.  The two differ only on a hit from another
@@ -1128,6 +1132,22 @@ def code_fingerprint(files: Mapping[str, Path] | None = None) -> str:
     return hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
 
 
+def _code_at_import() -> str | None:
+    """:func:`code_fingerprint` of the files as they are now, or ``None`` where it cannot be had."""
+    try:
+        return code_fingerprint()
+    except (RuntimeError, OSError):
+        return None
+
+
+#: The code digest of this process: :func:`code_fingerprint`, read once while
+#: this script is imported, right after the package.  A file that changes
+#: later, while the datasets load or during the run, is not the code this
+#: process computes with and must not name its entries.  ``None`` where the
+#: code cannot be fingerprinted; :class:`FeatureCache` then refuses a directory.
+CODE_SHA256: str | None = _code_at_import()
+
+
 def cache_key(
     data_sha256: str, config: Mapping[str, Any], env: Mapping[str, Any], code_sha256: str
 ) -> str:
@@ -1205,9 +1225,10 @@ class FeatureCache:
         Default: :func:`hqnn_forge.experiment.environment` of the running
         process.
     code_sha256:
-        The code digest.  Default: :func:`code_fingerprint`, read once, here:
-        the process computes with the code it has imported, whatever happens
-        to the files during a long run.  Not computed without a directory.
+        The code digest.  Default: :data:`CODE_SHA256`, read once when this
+        script was imported: the process computes with the code it has
+        imported, whatever happens to the files afterwards.  Not needed
+        without a directory.
 
     Raises
     ------
@@ -1228,7 +1249,8 @@ class FeatureCache:
         self.code_sha256 = code_sha256
         if self.directory is not None:
             if self.code_sha256 is None:
-                self.code_sha256 = code_fingerprint()
+                # no digest from the import: read again, for the message that says why
+                self.code_sha256 = CODE_SHA256 if CODE_SHA256 is not None else code_fingerprint()
             self.directory.mkdir(parents=True, exist_ok=True)
 
     def path(self, inputs: FloatArray, labels: IntArray, config: Mapping[str, Any]) -> Path | None:

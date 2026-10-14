@@ -1249,6 +1249,40 @@ class TestCache:
         }
         assert len(loaded) > 20 and loaded <= hashed
         assert bench.code_fingerprint() == bench.code_fingerprint(files) == _code_by_hand()
+        assert bench.CODE_SHA256 == _code_by_hand()
+
+    def test_an_edit_after_the_import_does_not_rename_the_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The digest in the key is the one read when the script was imported:
+        a file that changes before the cache is built (while the datasets
+        load) is not the code this process computes with, and its digest
+        would file the features of the old code under the name of the new.
+        """
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.py").write_bytes(b"MARK = 1\n")
+        script = ROOT / "examples" / "benchmark_rydberg_features.py"
+        by_hand = {
+            "hqnn_forge/__init__.py": hashlib.sha256(b"MARK = 1\n").hexdigest(),
+            script.name: hashlib.sha256(script.read_bytes()).hexdigest(),
+        }
+        at_import = hashlib.sha256(json.dumps(by_hand, sort_keys=True).encode()).hexdigest()
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        fresh = _script()
+        assert fresh.CODE_SHA256 == at_import
+
+        (package / "__init__.py").write_bytes(b"MARK = 2\n")
+        assert fresh.code_fingerprint() != at_import
+        cache = fresh.FeatureCache(tmp_path / "cache")
+        assert cache.code_sha256 == at_import
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        key = fresh.cache_key(
+            fingerprint(self.inputs, self.labels), config, environment(), at_import
+        )
+        assert cache.path(self.inputs, self.labels, config) == tmp_path / "cache" / f"{key}.npz"
 
     def test_a_package_without_source_files_is_refused_unless_nothing_is_stored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1258,12 +1292,15 @@ class TestCache:
         package.mkdir()
         (package / "__init__.pyc").write_bytes(b"")
         monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.pyc"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        sourceless = _script()  # imported from such a package: the import itself still works
+        assert sourceless.CODE_SHA256 is None
         with pytest.raises(RuntimeError, match="--no-cache"):
-            bench.FeatureCache(tmp_path / "cache")
+            sourceless.FeatureCache(tmp_path / "cache")
         assert not (tmp_path / "cache").exists()
         compute, calls = self._counting()
-        assert bench.FeatureCache(None).fetch(self.inputs, self.labels, {}, compute).hit is False
-        assert calls == [12]
+        fetched = sourceless.FeatureCache(None).fetch(self.inputs, self.labels, {}, compute)
+        assert (fetched.hit, calls) == (False, [12])
 
     def test_without_a_directory_every_request_computes(self) -> None:
         compute, calls = self._counting()
