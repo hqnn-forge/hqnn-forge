@@ -738,7 +738,9 @@ class TestFlippedShots:
         # 4·p10·(1 − p10)/N, where #372's map gave the constant p10 − p01.
         # With the head set to the identity, predict_proba is sigmoid(⟨Z'_0⟩).
         # 600 values: Z standard errors of the variance are 29%.  The device
-        # seed fixes the shots and the flips, so the test is deterministic.
+        # seed fixes the shots and the flips, and torch.manual_seed the weights
+        # the shots are drawn from, so the test is deterministic.
+        torch.manual_seed(0)
         model = HybridBinaryClassifier(
             n_input_features=3, n_qubits=3, n_layers=1, readout="first", seed=5, **CPU
         )
