@@ -74,6 +74,17 @@ from hqnn_forge.training.trainer import _logits
 from hqnn_forge.utils import FocalLoss, SoftmaxFocalLoss, eval_mode
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
+__all__: list[str] = [
+    "CALIBRATORS",
+    "CalibrationName",
+    "HybridClassifierEstimator",
+    "KernelEncoding",
+    "LossName",
+    "ModelName",
+    "QuantumKernelClassifier",
+    "StrategyName",
+]
+
 ModelName = Literal["serial", "parallel"]
 LossName = Literal["focal", "bce"]
 StrategyName = Literal["softmax", "one_vs_rest"]

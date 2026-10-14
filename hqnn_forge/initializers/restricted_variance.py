@@ -174,6 +174,12 @@ import torch
 
 from hqnn_forge._warnings import external_stacklevel
 
+__all__: list[str] = [
+    "UNIFORM_STD",
+    "block_local_init_",
+    "restricted_normal_init_",
+]
+
 #: Standard deviation of an angle drawn uniformly from [0, 2π): 2π/sqrt(12).
 UNIFORM_STD = 2 * math.pi / math.sqrt(12)
 

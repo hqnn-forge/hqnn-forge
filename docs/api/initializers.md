@@ -6,4 +6,5 @@
 
 ::: hqnn_forge.initializers.restricted_variance
     options:
-      members: false
+      members:
+        - UNIFORM_STD

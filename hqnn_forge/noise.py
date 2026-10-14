@@ -198,6 +198,34 @@ from torch import nn
 
 from hqnn_forge._resolve import resolve_encoding_layer
 
+__all__: list[str] = [
+    "CHANNELS",
+    "KRAUS_DEVICES",
+    "KRAUS_DIFF_METHODS",
+    "MAX_P",
+    "MAX_TRAINING_NOISE_QUBITS",
+    "Channel",
+    "NoiseMethod",
+    "NoiseSweepPoint",
+    "Position",
+    "ShotSweepPoint",
+    "TrainingNoiseMixin",
+    "apply_depolarizing_noise",
+    "apply_readout_error",
+    "apply_shots",
+    "check_kraus_trajectories",
+    "noise_sweep",
+    "qnode_shots",
+    "readout_error_map",
+    "run_with_training_noise",
+    "shot_sweep",
+    "training_noise_qnode",
+    "trajectory_noise_qnode",
+    "validate_noise",
+    "validate_noise_method",
+    "validate_readout_error",
+]
+
 Position = Literal["all", "end"]
 NoiseMethod = Literal["density", "trajectories"]
 Channel = Literal["depolarizing", "amplitude_damping", "phase_damping", "bit_flip", "phase_flip"]
