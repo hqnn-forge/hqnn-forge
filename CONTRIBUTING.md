@@ -27,7 +27,9 @@ tests for each are in [`docs/extending.md`](docs/extending.md).
     scope and releases. Questions about who should work on what go to the maintainer.
 *   **Triage collaborators:** contributors with triage access who help keep issues tidy
     (titles, duplicates, missing information) and work on their own issues. They do not assign
-    work to others or approve merges.
+    work to others or approve merges. Contributors become eligible for triage access after two
+    merged PRs that followed the workflow in this guide. Eligibility is not automatic: the
+    maintainer decides whether and when to grant it.
 *   **Contributors:** everyone else who opens issues or pull requests. No special access is
     needed; see [Issue First](#1-issue-first) for how to pick up an issue.
 
