@@ -16,11 +16,14 @@ updates:
           - "vermin"
 
   # Keeps the actions in every workflow current (checkout, setup-python,
-  # setup-uv, the artifact actions, and release.yml where every action is pinned
-  # to a commit SHA and Dependabot updates the SHA pins together with their
-  # version comments); without this entry none would ever be updated. They
-  # arrive in one grouped PR rather than one each: they are reviewed identically
-  # and each ungrouped PR would spend a full matrix run to say the same thing.
+  # setup-uv, the artifact and pages actions, and pypi-publish); without this
+  # entry none would ever be updated. release.yml, docs.yml, docs-build.yml
+  # and upstream.yml pin their actions to commit SHAs with version comments
+  # (see the comment at the top of release.yml's jobs: for the rationale);
+  # tests.yml, retarget.yml and dispatch.yml stay on tags. Dependabot updates
+  # both tags and commit-pinned actions with their comments. They arrive in
+  # one grouped PR rather than one each: they are reviewed identically and each
+  # ungrouped PR would spend a full matrix run to say the same thing.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
