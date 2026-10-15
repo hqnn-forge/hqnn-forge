@@ -36,12 +36,12 @@ concurrency:
 
 jobs:
   # ruff and mypy are configured in pyproject.toml. One interpreter is enough:
-  # the enforced rule set is explicitly selected in [tool.ruff.lint] and does not
-  # change when ruff defaults change; [tool.mypy] fixes python_version = "3.12".
-  # The tools come from uv.lock so a new release cannot change behavior under an
-  # open PR, and bumping ruff in uv.lock cannot alter the enforced rules without
-  # a reviewed change to pyproject.toml. Dependabot bumps them like every other
-  # dev dependency.
+  # the enforced rule set is explicitly selected in [tool.ruff.lint], so changes
+  # to Ruff defaults do not silently add or remove enforced rules. Rule behavior
+  # can still change between Ruff versions. [tool.mypy] fixes python_version = "3.12".
+  # The tools come from uv.lock for reproducible CI runs. Dependabot proposes
+  # version updates through the lockfile, and rule-policy changes require a
+  # reviewed change to pyproject.toml.
   # --all-extras so mypy sees matplotlib, scikit-learn and pennylane-lightning:
   # with ignore_missing_imports, a missing extra silently types its imports as Any.
   # ruff covers the whole tree (it respects .gitignore). mypy covers the package,

@@ -159,37 +159,14 @@ select = [
     "BLE001",
 
     # C4 (flake8-comprehensions)
-    "C400",
-    "C401",
-    "C402",
-    "C403",
-    "C404",
-    "C405",
-    "C406",
-    "C409",
-    "C410",
-    "C411",
-    "C413",
-    "C414",
-    "C415",
-    "C417",
-    "C418",
-    "C419",
+    "C4",
 
     # D (pydocstyle)
     "D419",
 
-    # DTZ (flake8-datetimez)
-    "DTZ001",
-    "DTZ002",
-    "DTZ003",
-    "DTZ004",
-    "DTZ005",
-    "DTZ006",
-    "DTZ007",
-    "DTZ011",
-    "DTZ012",
-    "DTZ901",
+    # DTZ (flake8-datetimez): keep timestamps such as the experiment record's
+    # "created" stamp timezone-aware; retain the full family as in #555.
+    "DTZ",
 
     # E (pycodestyle errors)
     "E722",
@@ -359,6 +336,7 @@ select = [
     "PLE2514",
     "PLE2515",
 
+    # PLR: partial selection because the full family produces excessive violations
     # PLR (Pylint Refactor)
     "PLR0124",
     "PLR0133",
@@ -456,45 +434,46 @@ select = [
     "PYI064",
     "PYI066",
 
-    # RET (flake8-return)
-    "RET501",
+# RET (flake8-return)
+"RET",
 
-    # RUF (Ruff-specific rules)
-    "RUF007",
-    "RUF008",
-    "RUF009",
-    "RUF010",
-    "RUF012",
-    "RUF013",
-    "RUF015",
-    "RUF016",
-    "RUF017",
-    "RUF018",
-    "RUF019",
-    "RUF020",
-    "RUF022",
-    "RUF023",
-    "RUF024",
-    "RUF026",
-    "RUF028",
-    "RUF030",
-    "RUF032",
-    "RUF033",
-    "RUF034",
-    "RUF040",
-    "RUF041",
-    "RUF048",
-    "RUF049",
-    "RUF051",
-    "RUF053",
-    "RUF057",
-    "RUF058",
-    "RUF059",
-    "RUF063",
-    "RUF068",
-    "RUF100",
-    "RUF101",
-    "RUF200",
+# RUF: partial selection because the full family produces excessive violations.
+# RUF (Ruff-specific rules)
+"RUF007",
+"RUF008",
+"RUF009",
+"RUF010",
+"RUF012",
+"RUF013",
+"RUF015",
+"RUF016",
+"RUF017",
+"RUF018",
+"RUF019",
+"RUF020",
+"RUF022",
+"RUF023",
+"RUF024",
+"RUF026",
+"RUF028",
+"RUF030",
+"RUF032",
+"RUF033",
+"RUF034",
+"RUF040",
+"RUF041",
+"RUF048",
+"RUF049",
+"RUF051",
+"RUF053",
+"RUF057",
+"RUF058",
+"RUF059",
+"RUF063",
+"RUF068",
+"RUF100",
+"RUF101",
+"RUF200",
 
     # S (flake8-bandit)
     "S102",
@@ -600,15 +579,8 @@ select = [
     "YTT303",
 ]
 ignore = [
-    # `import torch.nn as nn` / `import torch.optim as optim` is the PyTorch
-    # idiom used throughout; `from torch import nn` reads as a different thing
-    "PLR0402",
-    # `dict(key=value)` for config dicts reads like the keyword arguments
-    # it records or forwards
+    # `dict(key=value)` is intentional for config dictionaries.
     "C408",
-    # int(round(x)) is kept on purpose: round() of a numpy scalar is not
-    # guaranteed to return a Python int
-    "RUF046",
 ]
 
 [tool.ruff.lint.per-file-ignores]

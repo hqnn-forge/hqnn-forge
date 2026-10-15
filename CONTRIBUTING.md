@@ -175,27 +175,14 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     --exclude long hqnn_forge tests examples .github/scripts
 ```
 
-*   **ruff** lints the whole tree and checks its formatting, including the Python code
-    blocks in Markdown files. The enforced lint rule set is explicitly configured in
-    `[tool.ruff.lint]` rather than relying on ruff's changing defaults; changing the enforced
-    rules requires a reviewed configuration change in `pyproject.toml`. The pre-commit hooks
-    in the README run both steps on each commit.
+*   **ruff** lints the whole tree and checks its formatting, including the Python code blocks in Markdown files. The enforced lint rule set is explicitly configured in `[tool.ruff.lint]` rather than relying on Ruff's changing defaults. Explicit selection prevents rules from being silently added to or removed from the enforced set when Ruff's default rule set changes, but rule behavior can still change between Ruff versions. Changes to the enforced rules require a reviewed configuration change in `pyproject.toml`. The pre-commit hooks in the README run both steps on each commit.
 *   **mypy** type-checks the package, the tests and the examples. Modules that still fail
     are listed under `[[tool.mypy.overrides]]` in `pyproject.toml` until #232 clears them.
     CI also fails when an entry there no longer matches any module.
 *   **vermin** fails on stdlib calls that don't exist on Python 3.11, the `requires-python`
     floor, which neither ruff nor mypy catches. CI also fails when vermin reports a file as
     "incompatible", because vermin skips such a file without an error.
-*   **Why `uv run --frozen`.** It uses the ruff, mypy and vermin versions pinned in
-    `uv.lock`, which CI uses too. `--all-extras` installs every extra, as CI does. Without it, mypy
-    types matplotlib, the one typed package among the extras, as `Any`, because
-    `ignore_missing_imports` hides the missing module. The `dev` extra declares the tools without a version range, so a pip install
-    gets the newest releases, and when a new ruff changes formatting defaults, its `ruff format`
-    disagrees with CI's. The versions are deliberately not capped in `pyproject.toml`
-    either. Dependabot only updates `uv.lock`, so any upper bound on ruff would stop it
-    from ever proposing a release past that bound. Because the lint rule set is explicitly
-    selected in `pyproject.toml`, Dependabot's ruff bumps cannot alter the enforced rules.
-
+*   **Why `uv run --frozen`.** It uses the Ruff, mypy, and vermin versions pinned in `uv.lock`, which CI uses too. `--all-extras` installs every extra, as CI does. Without it, mypy types matplotlib, the one typed package among the extras, as `Any`, because `ignore_missing_imports` hides the missing module. The `dev` extra declares the tools without version ranges, so installing them with pip gets the newest releases. A newer Ruff version can change formatting behavior, causing `ruff format` to disagree with CI, and can also change rule behavior. A newer Ruff installed with pip can therefore produce different `ruff check` results from CI. The versions are deliberately not capped in `pyproject.toml`. Dependabot updates `uv.lock`, allowing newer releases to be proposed and reviewed without an upper version bound. Because the lint rule set is explicitly selected in `pyproject.toml`, changes to Ruff's default rule set will not silently add or remove enforced rules. However, explicit selection does not guarantee identical behavior across Ruff versions.
 ## Dependency Changes
 
 `uv.lock` is tracked in the repository and CI tests against it: the `test-locked` job in
