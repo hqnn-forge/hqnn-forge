@@ -350,6 +350,11 @@ class TestShotSweep:
             )
             # Each set of labels contains exactly two correct predictions out of four.
             assert point.scores == [0.5] * n_repeats
+        if n_repeats > 1:
+            # The repeated exact rows are copies, not views of one row.
+            exact = points[1].probabilities
+            exact[0] = 0.0
+            torch.testing.assert_close(exact[1], expected_row, rtol=0, atol=1e-7)
         assert model.quantum_layer.qlayer.qnode is original
 
     def test_spread_falls_like_one_over_root_shots(self) -> None:
@@ -358,7 +363,10 @@ class TestShotSweep:
         x = torch.randn(20, 4)
         exact, few, many = shot_sweep(model, x, [None, 40, 4000], n_repeats=6)
         assert exact.probabilities.shape == (6, 20)
-        assert (exact.probabilities == exact.probabilities[0]).all()
+        # Every exact row matches a separate exact call, sample for sample (up
+        # to float rounding: the sweep runs its own parameter-shift QNode).
+        reference = model.predict_proba(x)
+        torch.testing.assert_close(exact.probabilities, reference.expand(6, -1), rtol=0, atol=1e-6)
         spread_few = few.probabilities.std(0).mean()
         spread_many = many.probabilities.std(0).mean()
         # sqrt(4000 / 40) = 10; the estimate of a mean std over 6 repeats is

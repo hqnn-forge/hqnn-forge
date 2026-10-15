@@ -1211,7 +1211,7 @@ class ShotSweepPoint(NamedTuple):
     #: for a binary classifier, ``(n_repeats, n_samples, n_classes)`` for
     #: :class:`~hqnn_forge.models.MulticlassHybridClassifier`.
     probabilities: torch.Tensor
-    #: Scores of the repeated evaluations, or None without ``score_fn``.
+    #: One score per row of ``probabilities``, or None without ``score_fn``.
     scores: list[float] | None
 
 
@@ -1225,12 +1225,15 @@ def shot_sweep(
     score_fn: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
 ) -> list[ShotSweepPoint]:
     """
-    Predict ``X`` ``n_repeats`` times at each shot count, without retraining.
+    Predict ``X`` ``n_repeats`` times at each finite shot count, without retraining.
 
     The repeats show the spread shot noise alone puts on the predictions and
     on the score; ``None`` in ``shots`` gives the exact reference, evaluated
     and scored once with its probabilities and score repeated ``n_repeats``
-    times.  Arguments as for :func:`noise_sweep`.
+    times.  That assumes ``predict_proba`` is deterministic at ``shots=None``,
+    as it is for the hqnn_forge models, which predict in eval mode; a custom
+    one that leaves dropout on would have its spread hidden.  Arguments as for
+    :func:`noise_sweep`.
 
     Raises
     ------
