@@ -83,6 +83,47 @@ def test_foreign_dotted_targets_stay_plain_code(package: object, target: str) ->
     assert convert(f":class:`{target}`", obj, package) == f"`{target}`"  # type: ignore[arg-type]
 
 
+def test_a_missing_member_is_linked_under_its_owner(package: object) -> None:
+    # Under the module where noise is defined, not the module referencing it.
+    obj = package["benchmark"]  # type: ignore[index]
+    assert resolve("noise.missing", obj, package) == "hqnn_forge.noise.missing"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("scope", "target"),
+    [
+        # No scope holds pathlib; data.credit_card imports only Path from it.
+        ("data.credit_card", "pathlib.Path.is_dir"),
+        # Inherited from torch.nn.Module, which griffe does not load.
+        ("models.hybrid_classifier", "HybridBinaryClassifier.parameters"),
+        # records is a list; griffe models no members of an attribute's value.
+        ("benchmark", "BenchmarkResult.records.append"),
+        ("benchmark.BenchmarkResult", "records.append"),
+    ],
+)
+def test_members_griffe_cannot_see_stay_plain_code(
+    package: object, scope: str, target: str
+) -> None:
+    obj = package[scope]  # type: ignore[index]
+    assert resolve(target, obj, package) is None  # type: ignore[arg-type]
+
+
+def test_a_foreign_name_re_exported_in_the_package_stays_plain_code(tmp_path: Path) -> None:
+    root = tmp_path / "hqnn_forge"
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    (root / "types.py").write_text("import numpy as np\nfrom torch import Tensor\n")
+    (root / "mod.py").write_text(
+        "from hqnn_forge.types import np\nfrom .types import Tensor\n\nclass Local:\n    pass\n"
+    )
+    # A path, not the name: the name finds the installed hqnn_forge first.
+    synthetic = griffe.load(root, search_paths=[str(tmp_path)])
+    obj = synthetic["mod"]
+    assert resolve("np.ndarray", obj, synthetic) is None
+    assert resolve("Tensor.shape", obj, synthetic) is None
+    assert resolve("Local.missing", obj, synthetic) == "hqnn_forge.mod.Local.missing"
+
+
 def test_a_missing_class_member_fails_a_strict_build(package: object, tmp_path: Path) -> None:
     # A minimal site isolates autorefs validation from the project's rendered API.
     docs = tmp_path / "docs"
@@ -100,10 +141,8 @@ def test_a_missing_class_member_fails_a_strict_build(package: object, tmp_path: 
         check=False,
     )
     assert result.returncode != 0
-    assert (
-        "Could not find cross-reference target 'hqnn_forge.benchmark.BenchmarkResult.missing_member'"
-        in result.stderr
-    )
+    # The target only: autorefs' wording around it is not ours to pin.
+    assert "hqnn_forge.benchmark.BenchmarkResult.missing_member" in result.stderr
 
 
 def test_convert_rewrites_roles_and_honours_the_tilde(package: object) -> None:
