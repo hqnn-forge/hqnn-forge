@@ -233,9 +233,10 @@ Usage
     python examples/benchmark_rydberg_features.py \\
         --dataset positive-control iranian-churn --data-path data/raw --download
 
-``--quick`` runs one fold of one small grid point on a small positive
-control, for a smoke test; ``--max-separation-rows`` and
-``--separation-seed`` still apply.
+``--quick`` runs the predefined QUICK smoke-test configuration on the
+positive-control dataset, overriding ordinary grid, model, dataset, and
+training options; only ``--out``, ``--cache-dir``, ``--no-cache``, ``--seed``,
+``--max-separation-rows``, and ``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -1652,7 +1653,16 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("rydberg_features_benchmark.jsonl"),
         help="JSON-lines output file; replaced once the first record is written",
     )
-    parser.add_argument("--quick", action="store_true", help="one fold, one small grid point")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "run the predefined QUICK smoke-test configuration on the positive-control "
+            "dataset regardless of --dataset, overriding ordinary grid, model, dataset, "
+            "and training options; only --out, --cache-dir, --no-cache, --seed, "
+            "--max-separation-rows, and --separation-seed remain effective"
+        ),
+    )
     parser.add_argument(
         "--dataset",
         nargs="+",
@@ -1815,10 +1825,10 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     """
     Parse the command line, run, print the summary and return the records.
 
-    ``--quick`` replaces the grid, the budget and the dataset by those of
-    :data:`QUICK`; only ``--out``, the cache options, ``--seed``, and
-    separation subsampling flags (``--max-separation-rows``,
-    ``--separation-seed``) still apply.
+    ``--quick`` replaces the grid, the budget, model settings, and the
+    dataset with the predefined :data:`QUICK` smoke-test configuration on the
+    positive-control dataset; only ``--out``, ``--cache-dir``, ``--no-cache``,
+    ``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
     args = _parser().parse_args(argv)
     max_sep = (

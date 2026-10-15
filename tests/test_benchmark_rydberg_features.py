@@ -857,6 +857,43 @@ class TestCommandLine:
         ]
         assert missing == [], f"Options without a help string: {missing}"
 
+    def test_quick_help_clarifies_overrides_and_effective_options(self) -> None:
+        """--quick help must document overrides and preserved options (#549)."""
+        parser = bench._parser()
+        # Inspect the help text belonging specifically to the --quick action,
+        # so assertions do not pass merely because options appear elsewhere in --help.
+        quick_action = next(a for a in parser._actions if "--quick" in a.option_strings)
+        assert isinstance(quick_action.help, str)
+        quick_help = quick_action.help
+
+        # Predefined QUICK smoke-test configuration
+        assert "QUICK" in quick_help
+        assert "smoke-test" in quick_help
+
+        # Positive-control dataset and the fact that --dataset is overridden
+        assert "positive-control" in quick_help
+        assert "--dataset" in quick_help
+
+        # Other applicable command-line settings are overridden or ignored
+        assert "overrid" in quick_help.lower() or "ignor" in quick_help.lower()
+
+        # Options that remain effective are explicitly listed in --quick's help text
+        effective_options = [
+            "--out",
+            "--cache-dir",
+            "--no-cache",
+            "--seed",
+            "--max-separation-rows",
+            "--separation-seed",
+        ]
+        for opt in effective_options:
+            assert opt in quick_help
+
+        # Confirm the --quick action help is also rendered in parser.format_help()
+        full_help = parser.format_help()
+        assert "--quick" in full_help
+        assert " ".join(quick_help.split()) in " ".join(full_help.split())
+
 
 # ---------------------------------------------------------------------------
 # Inputs: fitted on the training rows, oversampled once
