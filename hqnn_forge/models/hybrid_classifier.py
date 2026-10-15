@@ -236,8 +236,9 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         only method that works: ``adjoint`` and ``backprop`` need the exact
         state, and ``finite-diff``'s tiny step turns the shot noise into
         gradients of order 1e6.  The samples come from the device's own
-        generator, which ``torch.manual_seed`` does not reach: pass ``seed``
-        for a model with shots that repeats run to run.
+        generator, which neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` reaches: pass ``seed`` for a model with shots
+        that repeats run to run.
         :func:`hqnn_forge.noise.apply_shots` evaluates a model with a finite
         shot count without rebuilding it.
     noise_channel:
@@ -250,7 +251,8 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
     seed:
         Seed of the device's random generator, which draws the shot samples,
         so a shot-based model gives the same samples on every run.  Default
-        ``None``: unseeded, and ``torch.manual_seed`` does not reach it.  See
+        ``None``: unseeded, and neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` reaches it.  See
         :func:`hqnn_forge.encoding._common.resolve_device`.
     readout_error:
         ``(p01, p10)``: in train mode, each measured bit reads 1 instead of 0

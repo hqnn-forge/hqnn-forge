@@ -319,6 +319,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
 
 ### Changed
+- `numpy.random.seed` no longer makes the shot samples of an unseeded device repeat: the
+  built-in simulators now draw an unseeded device's generator from OS entropy.  Pass the
+  layer's or classifier's `seed` for repeatable shot-based results (#533)
 - The package metadata links the repository, issue tracker and changelog, and the README's
   image and file links are absolute, so both work on PyPI (#327)
 - The README links the API reference site near the top and from Quick Start, Architecture and
@@ -445,10 +448,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 
 ### Fixed
-- Constructing a classifier or encoding layer, with or without `init_seed`, no longer advances
-  NumPy's global RNG: the built-in simulators and the train-mode `default.mixed` device get an
-  explicit `seed=None`, so an unseeded device draws from OS entropy and `numpy.random.seed` no
-  longer makes its shot samples repeat; pass the device `seed` for that (#533)
+- Building a classifier or encoding layer on a built-in simulator (`default.qubit` or a
+  lightning device), with or without `init_seed`, no longer advances NumPy's global RNG, and
+  neither do train-mode density noise, `encoded_states`, `quantum_kernel_matrix`,
+  `encoded_density_matrices`, `QuantumKernelClassifier.fit` or `expressibility`: their devices
+  get an explicit `seed=None` instead of PennyLane's default, which draws from `np.random` (#533)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite

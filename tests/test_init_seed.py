@@ -9,6 +9,8 @@ and not advanced either.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +35,7 @@ CLASSES = [
 
 
 def _build(cls: type, extra: dict, **kwargs: object) -> Any:
-    return cls(n_input_features=5, n_qubits=3, n_layers=2, **CPU, **extra, **kwargs)
+    return cls(n_input_features=5, n_qubits=3, n_layers=2, **{**CPU, **extra, **kwargs})
 
 
 def _same_weights(a: torch.nn.Module, b: torch.nn.Module) -> bool:
@@ -72,25 +74,24 @@ class TestInitSeed:
             pytest.param(
                 {"noise_level": 0.05, "noise_method": "trajectories"}, id="trajectory-noise"
             ),
+            pytest.param(
+                {"device_name": "lightning.qubit", "diff_method": "adjoint"},
+                id="lightning",
+                marks=pytest.mark.requires_lightning,
+            ),
         ],
     )
+    @pytest.mark.parametrize("init_seed", [7, None], ids=["seeded", "unseeded"])
     def test_the_global_numpy_rng_is_left_exactly_as_it_was(
-        self, cls: type, extra: dict, options: dict
+        self,
+        cls: type,
+        extra: dict,
+        options: dict,
+        init_seed: int | None,
+        numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
     ) -> None:
-        saved = np.random.get_state()
-        try:
-            np.random.seed(123)
-            # Keep a cached Gaussian too: the complete state includes it as
-            # well as the MT19937 keys and their current position.
-            np.random.normal()
-            before = np.random.get_state()
-            _build(cls, extra, init_seed=7, **options)
-            after = np.random.get_state()
-            assert after[0] == before[0]
-            np.testing.assert_array_equal(after[1], before[1])
-            assert after[2:] == before[2:]
-        finally:
-            np.random.set_state(saved)
+        with numpy_rng_untouched():
+            _build(cls, extra, init_seed=init_seed, **options)
 
     def test_none_keeps_drawing_from_the_global_rng(self, cls: type, extra: dict) -> None:
         torch.manual_seed(5)

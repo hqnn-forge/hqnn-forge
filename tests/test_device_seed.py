@@ -7,6 +7,9 @@ layers and classifiers, and SPSA's common random numbers for shot noise.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+
 import numpy as np
 import pytest
 import torch
@@ -53,14 +56,12 @@ class TestSeed:
         assert not _same(_samples(a), _samples(b))
 
     @pytest.mark.parametrize("device_name", ["default.qubit", "default.mixed"])
-    def test_unseeded_device_leaves_the_global_numpy_rng_alone(self, device_name: str) -> None:
+    def test_unseeded_device_leaves_the_global_numpy_rng_alone(
+        self, device_name: str, numpy_rng_untouched: Callable[[], AbstractContextManager[None]]
+    ) -> None:
         # default.mixed exercises the path outside the fallback chain too.
-        before = np.random.get_state()
-        resolve_device(device_name, 2)
-        after = np.random.get_state()
-        assert after[0] == before[0]
-        np.testing.assert_array_equal(after[1], before[1])
-        assert after[2:] == before[2:]
+        with numpy_rng_untouched():
+            resolve_device(device_name, 2)
 
     def test_seed_does_not_touch_the_weights(self) -> None:
         a, b = _model(1), _model(2)
@@ -110,10 +111,8 @@ class TestSeed:
         assert type(model.quantum_layer.seed) is int
         assert _same(_samples(model), _samples(_model(3)))
 
-    @pytest.mark.parametrize("seed", [None, 8])
-    def test_seed_is_honoured_after_a_fallback(
-        self, monkeypatch: pytest.MonkeyPatch, seed: int | None
-    ) -> None:
+    @staticmethod
+    def _without_lightning(monkeypatch: pytest.MonkeyPatch) -> None:
         import pennylane as qml
 
         from hqnn_forge.encoding import angle_embedding as ae
@@ -126,18 +125,25 @@ class TestSeed:
             return real(name, *args, **kwargs)
 
         monkeypatch.setattr(ae.qml, "device", device)
-        before = np.random.get_state()
+
+    def test_seed_is_honoured_after_a_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._without_lightning(monkeypatch)
         with pytest.warns(RuntimeWarning):
+            dev = resolve_device("lightning.qubit", 2, seed=8)
+        assert dev.name == "default.qubit"
+        np.testing.assert_array_equal(dev._rng.random(5), np.random.default_rng(8).random(5))
+
+    @pytest.mark.parametrize("seed", [None, 8])
+    def test_a_fallback_leaves_the_global_numpy_rng_alone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seed: int | None,
+        numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
+    ) -> None:
+        self._without_lightning(monkeypatch)
+        with numpy_rng_untouched(), pytest.warns(RuntimeWarning):
             dev = resolve_device("lightning.qubit", 2, seed=seed)
         assert dev.name == "default.qubit"
-        after = np.random.get_state()
-        assert after[0] == before[0]
-        np.testing.assert_array_equal(after[1], before[1])
-        assert after[2:] == before[2:]
-        if seed is not None:
-            np.testing.assert_array_equal(
-                dev._rng.random(5), np.random.default_rng(seed).random(5)
-            )
 
     def test_config_records_the_seed_and_checkpoints_round_trip(self, tmp_path) -> None:
         model = _model(7)

@@ -41,6 +41,11 @@ KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "d
 #: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
 #: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
+#: Devices :func:`resolve_device` passes an explicit ``seed=None`` when
+#: unseeded.  Omitting ``seed`` leaves PennyLane's ``"global"`` default, which
+#: draws a seed from ``np.random`` even for analytic circuits (#417); these
+#: devices accept ``None`` and create a private, entropy-seeded generator.
+_SEED_NONE_DEVICES: frozenset[str] = frozenset({*KNOWN_DEVICES, "default.mixed"})
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
 Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient"]
@@ -534,14 +539,10 @@ def resolve_device(
         itself is broken.
     """
     seed = validate_seed(seed)
-    # Omitting seed uses PennyLane's "global" default, which draws a seed
-    # from np.random even for analytic circuits. Explicit None instead uses
-    # the device's private, entropy-seeded generator.
-    kwargs: dict[str, object] = (
-        {"seed": seed}
-        if seed is not None or device_name in (*KNOWN_DEVICES, "default.mixed")
-        else {}
-    )
+    kwargs: dict[str, object] = {"seed": seed}
+    if seed is None and device_name not in _SEED_NONE_DEVICES:
+        # A plugin need not accept a seed keyword: leave its default alone.
+        kwargs = {}
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits, **kwargs)
         logger.debug("Quantum device initialised: %s (%d qubits)", device_name, n_qubits)
