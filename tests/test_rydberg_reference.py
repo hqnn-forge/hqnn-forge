@@ -57,7 +57,7 @@ the two errors, each stated here and checked:
   The tolerance takes twice that estimate for ``n = N_STEPS``.  So that the
   solver does not set its own tolerance freely, the estimate must stay below
   ``SPLITTING_CAP``: the draws below keep ``Ω dt ≤ 1.6e-3`` and
-  ``γ dt ≤ 3.2e-3``, and the estimate is between 2.8e-9 and 1.3e-8.  A step
+  ``γ dt ≤ 3.2e-3``, and the estimate is between 2.8e-9 and 1.2e-8.  A step
   that is not second order, or a dissipator that converges to another
   equation, cannot hide behind it: the first breaks the cap or the
   comparison, the second leaves a difference of the order of ``γ t`` whatever
@@ -65,7 +65,7 @@ the two errors, each stated here and checked:
 
 An element of ρ is therefore compared to ``MESOLVE_ERROR = 1e-9`` without
 dephasing, and with it to at most ``MESOLVE_ERROR + 2 · SPLITTING_CAP = 1.01e-7``,
-in the cases below to between 7e-9 and 2.6e-8, of which the measured
+in the cases below to between 6.7e-9 and 2.6e-8, of which the measured
 difference is about half.  A readout value is a sum of ``2^(N−1)``
 (``⟨n_i⟩``) or ``2^(N−2)`` (``⟨n_i n_j⟩``) diagonal elements and gets that
 many times the tolerance of one element.
@@ -324,7 +324,7 @@ class TestAgainstMesolve:
         """
         The comparison has something to tell apart: with the atoms of the
         reference in reverse order, or its dephasing rate doubled, ρ moves by
-        thousands of tolerances.
+        more than ten thousand tolerances.
         """
         rho = solved(case).rho.numpy()
         mirrored = reference(case._replace(delta=case.delta[::-1])).rho

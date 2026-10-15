@@ -193,12 +193,13 @@ jobs:
   # interpreter that has floors of its own, so every floor is exercised on
   # every PR and has to be raised when it stops working.
   #
-  # Only the runtime deps and the lightning and sklearn extras are resolved
-  # lowest. The dev tools are declared without floors, and lowest-direct would
-  # pick mypy 0.1, which does not build; examples adds only matplotlib, also
-  # without a floor, to the scikit-learn already covered by sklearn. pytest is
-  # installed afterwards at its normal resolution, using the spec from the dev
-  # extra, which leaves the runtime pins untouched.
+  # Only the runtime deps, the lightning and sklearn extras and qutip (see
+  # below) are resolved lowest. The other dev tools are declared without
+  # floors, and lowest-direct would pick mypy 0.1, which does not build;
+  # examples adds only matplotlib, also without a floor, to the scikit-learn
+  # already covered by sklearn. pytest is installed afterwards at its normal
+  # resolution, using the spec from the dev extra, which leaves the runtime
+  # pins untouched.
   #
   # qutip is the one dev dependency resolved lowest as well: it is the
   # reference of tests/test_rydberg_reference.py, nothing else brings it, and
