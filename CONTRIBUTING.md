@@ -176,8 +176,10 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
 ```
 
 *   **ruff** lints the whole tree and checks its formatting, including the Python code
-    blocks in Markdown files. The pre-commit hooks in the README run both steps on each
-    commit.
+    blocks in Markdown files. The enforced lint rule set is explicitly configured in
+    `[tool.ruff.lint]` rather than relying on ruff's changing defaults; changing the enforced
+    rules requires a reviewed configuration change in `pyproject.toml`. The pre-commit hooks
+    in the README run both steps on each commit.
 *   **mypy** type-checks the package, the tests and the examples. Modules that still fail
     are listed under `[[tool.mypy.overrides]]` in `pyproject.toml` until #232 clears them.
     CI also fails when an entry there no longer matches any module.
@@ -188,10 +190,11 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     `uv.lock`, which CI uses too. `--all-extras` installs every extra, as CI does. Without it, mypy
     types matplotlib, the one typed package among the extras, as `Any`, because
     `ignore_missing_imports` hides the missing module. The `dev` extra declares the tools without a version range, so a pip install
-    gets the newest releases, and when a new ruff changes a default, its `ruff format`
+    gets the newest releases, and when a new ruff changes formatting defaults, its `ruff format`
     disagrees with CI's. The versions are deliberately not capped in `pyproject.toml`
     either. Dependabot only updates `uv.lock`, so any upper bound on ruff would stop it
-    from ever proposing a release past that bound.
+    from ever proposing a release past that bound. Because the lint rule set is explicitly
+    selected in `pyproject.toml`, Dependabot's ruff bumps cannot alter the enforced rules.
 
 ## Dependency Changes
 
