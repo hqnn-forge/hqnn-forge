@@ -67,7 +67,7 @@ jobs:
       run: uvx twine check --strict dist/*
     - name: Check the wheel contains no Mermaid fence
       run: |
-        if unzip -p dist/*.whl '*.dist-info/METADATA' | grep -q '```mermaid'; then
+        if unzip -p dist/*.whl '*.dist-info/METADATA' | grep -Eq '(`{3,}|~{3,})mermaid\b'; then
           echo "::error::the wheel's METADATA contains a mermaid fence."
           exit 1
         fi
