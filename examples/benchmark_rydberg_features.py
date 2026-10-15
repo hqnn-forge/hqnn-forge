@@ -233,10 +233,11 @@ Usage
     python examples/benchmark_rydberg_features.py \\
         --dataset positive-control iranian-churn --data-path data/raw --download
 
-``--quick`` runs the predefined QUICK smoke-test configuration on the
-positive-control dataset, overriding ordinary grid, model, dataset, and
-training options; only ``--out``, ``--cache-dir``, ``--no-cache``, ``--seed``,
-``--max-separation-rows``, and ``--separation-seed`` still apply.
+``--quick`` runs the predefined QUICK smoke-test configuration (one fold,
+one small grid point) on the positive control, explicitly selecting
+``positive-control`` and ignoring conflicting grid, model, dataset-selection,
+and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
+``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -1657,10 +1658,10 @@ def _parser() -> argparse.ArgumentParser:
         "--quick",
         action="store_true",
         help=(
-            "run the predefined QUICK smoke-test configuration on the positive-control "
-            "dataset regardless of --dataset, overriding ordinary grid, model, dataset, "
-            "and training options; only --out, --cache-dir, --no-cache, --seed, "
-            "--max-separation-rows, and --separation-seed remain effective"
+            "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
+            "ignoring conflicting grid, model, dataset-selection, and training options; "
+            "only --out, --cache-dir, --no-cache, --seed, --max-separation-rows, "
+            "and --separation-seed still apply"
         ),
     )
     parser.add_argument(
@@ -1825,10 +1826,12 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     """
     Parse the command line, run, print the summary and return the records.
 
-    ``--quick`` replaces the grid, the budget, model settings, and the
-    dataset with the predefined :data:`QUICK` smoke-test configuration on the
-    positive-control dataset; only ``--out``, ``--cache-dir``, ``--no-cache``,
-    ``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
+    ``--quick`` runs the predefined :data:`QUICK` smoke-test configuration
+    (one fold, one small grid point) and explicitly selects the
+    ``positive-control`` dataset, ignoring conflicting grid, model,
+    dataset-selection, and training options; only ``--out``, ``--cache-dir``,
+    ``--no-cache``, ``--seed``, ``--max-separation-rows``, and
+    ``--separation-seed`` still apply.
     """
     args = _parser().parse_args(argv)
     max_sep = (

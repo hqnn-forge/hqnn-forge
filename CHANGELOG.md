@@ -488,6 +488,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a batch of parameters runs tape by tape as before (#374)
 - `examples/benchmark_rydberg_features.py`: every option has a help string, and `--help`
   shows its default (#526)
+- `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
+  smoke-test configuration on the positive control and ignores conflicting grid, model,
+  dataset-selection, and training options (#563)
 
 ### Fixed
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
