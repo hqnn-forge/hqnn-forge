@@ -28,10 +28,12 @@ hooks below leave them alone.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 from collections.abc import Callable, Generator, Iterator
 
+import numpy as np
 import pytest
 import torch
 
@@ -180,3 +182,31 @@ def _fresh_device_fallback() -> Iterator[None]:
     reset_device_fallback()
     yield
     reset_device_fallback()
+
+
+@contextlib.contextmanager
+def _numpy_rng_untouched() -> Iterator[None]:
+    """
+    Assert that the block leaves NumPy's global RNG exactly as it found it
+    (#417), then restore the state the test started with.  A cached Gaussian
+    is drawn first, so the comparison covers the whole state tuple, not only
+    the MT19937 keys and their position.
+    """
+    saved = np.random.get_state()
+    try:
+        np.random.seed(123)
+        np.random.normal()
+        before = np.random.get_state()
+        yield
+        after = np.random.get_state()
+        assert after[0] == before[0]
+        np.testing.assert_array_equal(after[1], before[1])
+        assert after[2:] == before[2:]
+    finally:
+        np.random.set_state(saved)
+
+
+@pytest.fixture
+def numpy_rng_untouched() -> Callable[[], contextlib.AbstractContextManager[None]]:
+    """``_numpy_rng_untouched`` as a fixture, for the same reason as ``grad_of``."""
+    return _numpy_rng_untouched

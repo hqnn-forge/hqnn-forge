@@ -24,6 +24,7 @@ What the numbers are checked against:
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -844,6 +845,114 @@ class TestCommandLine:
         parser = bench._parser()
         assert parser.description is None
         assert parser.parse_args(["--quick"]).quick is True
+
+    def test_every_parser_option_has_help(self) -> None:
+        """Every optional argument of _parser() must carry a non-empty help string (#526).
+
+        ``ArgumentDefaultsHelpFormatter`` only prints a default next to an option
+        that already has a ``help=`` string; without one, both the description and
+        the default are invisible to users running ``--help``.
+        """
+        parser = bench._parser()
+        missing = [
+            action.option_strings
+            for action in parser._actions
+            if action.option_strings  # skip the positional catch-all action
+            and action.help in (None, argparse.SUPPRESS, "")
+        ]
+        assert missing == [], f"Options without a help string: {missing}"
+
+    def test_quick_help_clarifies_overrides_and_effective_options(self) -> None:
+        """--quick help must document overrides and preserved options (#549)."""
+        parser = bench._parser()
+        # Inspect the help text belonging specifically to the --quick action,
+        # so assertions do not pass merely because options appear elsewhere in --help.
+        quick_action = next(a for a in parser._actions if "--quick" in a.option_strings)
+        assert isinstance(quick_action.help, str)
+        quick_help = quick_action.help
+
+        # Predefined QUICK smoke-test configuration
+        assert "QUICK" in quick_help
+        assert "smoke test" in quick_help
+
+        # Positive control
+        assert "positive control" in quick_help
+
+        # Other applicable command-line settings are overridden or ignored
+        assert "overrid" in quick_help.lower() or "ignor" in quick_help.lower()
+
+        # Options that remain effective are explicitly listed in --quick's help text
+        effective_options = [
+            "--out",
+            "--cache-dir",
+            "--no-cache",
+            "--seed",
+            "--max-separation-rows",
+            "--separation-seed",
+        ]
+        for opt in effective_options:
+            assert opt in quick_help
+
+    def test_quick_behavior_overrides_conflicting_options_and_preserves_effective_ones(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--quick must select positive-control and predefined QUICK settings (#549)."""
+        captured: dict[str, Any] = {}
+
+        def mock_run(
+            datasets: Any,
+            settings: Any,
+            out: Any,
+            *,
+            cache_dir: Any = None,
+        ) -> list[dict[str, Any]]:
+            captured["datasets"] = datasets
+            captured["settings"] = settings
+            captured["out"] = out
+            captured["cache_dir"] = cache_dir
+            return []
+
+        monkeypatch.setattr(bench, "run", mock_run)
+
+        out_path = tmp_path / "custom_out.jsonl"
+        cache_dir = tmp_path / "custom_cache"
+
+        bench.main(
+            [
+                "--quick",
+                "--n-atoms",
+                "6",
+                "--patience",
+                "5",
+                "--dataset",
+                "iranian-churn",
+                "--seed",
+                "7",
+                "--separation-seed",
+                "13",
+                "--out",
+                str(out_path),
+                "--cache-dir",
+                str(cache_dir),
+            ]
+        )
+
+        # Selected dataset must only be positive-control
+        assert list(captured["datasets"].keys()) == ["positive-control"]
+
+        # Settings must equal predefined QUICK with only preserved seed fields changed
+        expected_settings = _replace(QUICK, random_state=7, separation_seed=13)
+        assert captured["settings"] == expected_settings
+
+        # Conflicting options must not have been honored
+        assert captured["settings"].n_atoms == QUICK.n_atoms
+        assert captured["settings"].n_atoms != 6
+        assert captured["settings"].patience == QUICK.patience
+        assert captured["settings"].patience != 5
+
+        # Explicit out and cache_dir paths are preserved
+        assert captured["out"] == out_path
+        assert captured["cache_dir"] == cache_dir
 
 
 # ---------------------------------------------------------------------------
