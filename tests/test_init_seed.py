@@ -2,12 +2,15 @@
 tests/test_init_seed.py
 =======================
 ``init_seed`` on the classifiers and a seeded ``HybridClassifierEstimator.fit``
-(#175): the weights are reproducible from the seed, and the global torch RNG is
-left exactly as the caller had it -- not reseeded, and not advanced either.
+(#175): the weights are reproducible from the seed, and the global torch and
+NumPy RNGs (#417) are left exactly as the caller had them -- not reseeded,
+and not advanced either.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +35,7 @@ CLASSES = [
 
 
 def _build(cls: type, extra: dict, **kwargs: object) -> Any:
-    return cls(n_input_features=5, n_qubits=3, n_layers=2, **CPU, **extra, **kwargs)
+    return cls(n_input_features=5, n_qubits=3, n_layers=2, **{**CPU, **extra, **kwargs})
 
 
 def _same_weights(a: torch.nn.Module, b: torch.nn.Module) -> bool:
@@ -58,6 +61,37 @@ class TestInitSeed:
         before = torch.random.get_rng_state()
         _build(cls, extra, init_seed=7)
         assert torch.equal(torch.random.get_rng_state(), before)
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            *(
+                pytest.param({"encoding_type": e}, id=e)
+                for e in ("angle", "iqp", "amplitude", "reuploading")
+            ),
+            # Train-mode noise builds a second QNode on its own device.
+            pytest.param({"noise_level": 0.05}, id="density-noise"),
+            pytest.param(
+                {"noise_level": 0.05, "noise_method": "trajectories"}, id="trajectory-noise"
+            ),
+            pytest.param(
+                {"device_name": "lightning.qubit", "diff_method": "adjoint"},
+                id="lightning",
+                marks=pytest.mark.requires_lightning,
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("init_seed", [7, None], ids=["seeded", "unseeded"])
+    def test_the_global_numpy_rng_is_left_exactly_as_it_was(
+        self,
+        cls: type,
+        extra: dict,
+        options: dict,
+        init_seed: int | None,
+        numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
+    ) -> None:
+        with numpy_rng_untouched():
+            _build(cls, extra, init_seed=init_seed, **options)
 
     def test_none_keeps_drawing_from_the_global_rng(self, cls: type, extra: dict) -> None:
         torch.manual_seed(5)

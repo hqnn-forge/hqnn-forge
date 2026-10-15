@@ -51,7 +51,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.2.0
+      uses: astral-sh/setup-uv@v10.3.0
       with:
         python-version: "3.12"
         enable-cache: true
@@ -167,7 +167,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.2.0
+      uses: astral-sh/setup-uv@v10.3.0
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
@@ -193,12 +193,19 @@ jobs:
   # interpreter that has floors of its own, so every floor is exercised on
   # every PR and has to be raised when it stops working.
   #
-  # Only the runtime deps and the lightning and sklearn extras are resolved
-  # lowest. The dev tools are declared without floors, and lowest-direct would
-  # pick mypy 0.1, which does not build; examples adds only matplotlib, also
-  # without a floor, to the scikit-learn already covered by sklearn. pytest is
-  # installed afterwards at its normal resolution, using the spec from the dev
-  # extra, which leaves the runtime pins untouched.
+  # Only the runtime deps, the lightning and sklearn extras and qutip (see
+  # below) are resolved lowest. The other dev tools are declared without
+  # floors, and lowest-direct would pick mypy 0.1, which does not build;
+  # examples adds only matplotlib, also without a floor, to the scikit-learn
+  # already covered by sklearn. pytest is installed afterwards at its normal
+  # resolution, using the spec from the dev extra, which leaves the runtime
+  # pins untouched.
+  #
+  # qutip is the one dev dependency resolved lowest as well: it is the
+  # reference of tests/test_rydberg_reference.py, nothing else brings it, and
+  # without it that module would skip, which fails here. Its floors are
+  # installed after the runtime floors, so they are tested next to the numpy
+  # floor and the scipy that pennylane resolved.
   test-lowest:
     runs-on: ubuntu-latest
     # One leg per set of floors: pyproject.toml gives torch, numpy and
@@ -212,7 +219,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10.2.0
+      uses: astral-sh/setup-uv@v10.3.0
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
@@ -227,6 +234,8 @@ jobs:
         uv pip install --resolution lowest-direct -e ".[lightning,sklearn]"
         PYTEST_SPEC=$(uv run --no-sync python -c 'import re, tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"pytest\s*[<>=!~]", d)))')
         uv pip install "$PYTEST_SPEC"
+        uv run --no-sync python -c 'import re, tomllib; print("\n".join(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"qutip\s*[<>=!~]", d)))' > qutip-floors.txt
+        uv pip install --resolution lowest-direct -r qutip-floors.txt
 
     # The resolver silently installs a newer version when another dependency
     # requires one, so an unreachable floor would otherwise still go green

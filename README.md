@@ -430,6 +430,12 @@ total. A seeded hybrid (`init_seed`) gets a control seeded with the same seed.
 Switching a trained model's circuit off with `disable_quantum_layer` measures something
 else, how much that model depends on the circuit.
 
+`LinearClassifier(n_input_features)` is the smallest model with the same interface: one affine
+map to a logit, `n + 1` parameters, a logistic regression when trained with
+`BCEWithLogitsLoss`. `examples/benchmark_rydberg_features.py` uses it and a small
+`ClassicalBaseline` as the heads of a fixed feature map (the Rydberg map with and without
+interactions, the inputs themselves, a frozen gate-based circuit) on identical folds.
+
 The API reference documents each architecture's constructor and the pieces behind it:
 [models](https://hqnn-forge.github.io/hqnn-forge/api/models/),
 [encoding layers](https://hqnn-forge.github.io/hqnn-forge/api/encoding/),
@@ -448,18 +454,20 @@ hqnn_forge/
 ├── circuits/        Reusable VQC ansatz primitives
 ├── initializers/    Small-angle (restricted-variance) weight initialisation
 ├── preprocessing/   PCA + normalisation, stratified folds, SMOTE (no sklearn runtime dep)
-├── models/          Full hybrid architectures
+├── models/          Full hybrid architectures, their MLP control and a linear classifier
 ├── training/        Train/validate loop with early stopping
 ├── evaluation/      Decision threshold search, confusion metrics, PR-AUC, score per
 │                    parameter, paired Wilcoxon tests, plots (needs matplotlib)
 ├── diagnostics/     Circuit cost (depth, gates, inert parameters), gradient variance,
-│                    Fisher information and effective dimension
+│                    Fisher information and effective dimension; separation measures of a
+│                    fixed feature matrix (distances, Fisher ratio, effective rank, alignment)
 ├── data/            Dataset loader (Kaggle credit-card fraud)
 ├── utils/           Imbalance-robust losses, checkpoint save/load, quantum-layer ablation,
 │                    eval-mode context manager
 ├── rydberg/         Atom register (positions, C6/r⁶ couplings, blockade radius), the dense
 │                    Rydberg Hamiltonian of a small neutral-atom array, and its time evolution
-│                    under dephasing (Lindblad solver, excitation readout)
+│                    under dephasing (Lindblad solver, excitation readout); a fixed feature map
+│                    from inputs to excitation probabilities, exact or from shots
 ├── kernels.py       Quantum kernel matrices from the encoding layers (QSVM)
 ├── noise.py         Noise channels (depolarizing, damping, flips), post hoc or during training
 └── sklearn.py       scikit-learn estimator wrapper (cross_val_score, GridSearchCV, Pipeline);
@@ -629,3 +637,5 @@ APA.
 - Bernien et al. (2017) — *Probing many-body dynamics on a 51-atom quantum simulator*
 - Wurtz et al. (2023) — *Aquila: QuEra's 256-qubit neutral-atom quantum computer*
 - Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
+- Fisher (1936) — *The use of multiple measurements in taxonomic problems*
+- Roy & Vetterli (2007) — *The effective rank: a measure of effective dimensionality*

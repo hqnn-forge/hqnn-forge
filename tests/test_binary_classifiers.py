@@ -26,6 +26,7 @@ from hqnn_forge.models import (
     BinaryClassifierBase,
     ClassicalBaseline,
     HybridBinaryClassifier,
+    LinearClassifier,
     ParallelHybridClassifier,
 )
 from hqnn_forge.utils.modes import eval_mode
@@ -112,6 +113,7 @@ class TestBaseClass:
             HybridBinaryClassifier: dict(n_input_features=4, n_qubits=2, **DEVICE_KWARGS),
             ParallelHybridClassifier: dict(n_input_features=4, n_qubits=2, **DEVICE_KWARGS),
             ClassicalBaseline: dict(n_input_features=4, hidden_dims=[3]),
+            LinearClassifier: dict(n_input_features=4),
         }
         pending = list(BinaryClassifierBase.__subclasses__())
         shipped: set[type[BinaryClassifierBase]] = set()

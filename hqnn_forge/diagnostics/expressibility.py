@@ -259,7 +259,8 @@ def _sample_states(
         raw = x.expand(n_states, -1)
     prepared = _prepare(raw, encoder, "inputs")
 
-    device = qml.device("default.qubit", wires=n_qubits)
+    # seed=None: the default ("global") would draw from np.random (#417).
+    device = qml.device("default.qubit", wires=n_qubits, seed=None)
     states: list[torch.Tensor] = []
     for start in range(0, n_states, _CHUNK):
         tapes = []
