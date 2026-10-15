@@ -41,6 +41,11 @@ KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "d
 #: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
 #: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
+#: Devices :func:`resolve_device` passes an explicit ``seed=None`` when
+#: unseeded.  Omitting ``seed`` leaves PennyLane's ``"global"`` default, which
+#: draws a seed from ``np.random`` even for analytic circuits (#417); these
+#: devices accept ``None`` and create a private, entropy-seeded generator.
+_SEED_NONE_DEVICES: frozenset[str] = frozenset({*KNOWN_DEVICES, "default.mixed"})
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
 Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient"]
@@ -501,11 +506,13 @@ def resolve_device(
         Number of qubits to allocate.
     seed:
         Seed of the device's own random generator, which draws the shot
-        samples.  ``None`` leaves PennyLane's default, which seeds from the
-        global NumPy generator: ``torch.manual_seed`` does not reach it, so
-        shot-based results then differ from run to run.  ``default.qubit``,
-        ``default.mixed`` and the lightning devices honour it; a plugin device
-        is passed it as given.  See ``validate_seed``.
+        samples.  ``None`` creates an unseeded private generator, without
+        drawing from NumPy's global RNG.  Neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` controls it: pass ``seed`` for repeatable
+        shot-based results.  ``default.qubit``,
+        ``default.mixed`` and the lightning devices honour it.  Other plugins
+        receive an explicit seed as given, while ``None`` leaves their default
+        unchanged (they need not accept a ``seed`` keyword).  See ``validate_seed``.
 
     Returns
     -------
@@ -532,7 +539,10 @@ def resolve_device(
         itself is broken.
     """
     seed = validate_seed(seed)
-    kwargs: dict[str, object] = {} if seed is None else {"seed": seed}
+    kwargs: dict[str, object] = {"seed": seed}
+    if seed is None and device_name not in _SEED_NONE_DEVICES:
+        # A plugin need not accept a seed keyword: leave its default alone.
+        kwargs = {}
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits, **kwargs)
         logger.debug("Quantum device initialised: %s (%d qubits)", device_name, n_qubits)
