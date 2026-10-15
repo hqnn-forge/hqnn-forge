@@ -317,6 +317,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and requires `n_steps`. `readout(rho, *, pairs=False)` returns `⟨n_i⟩` for every atom and
   optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ. Gradients through `evolve`
   are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
+- `hqnn_forge.rydberg.RydbergFeatureMap(register, encoding, *, c6, gamma, n_steps=None,
+  interactions=True, correlations=False)`: a fixed map from a batch of inputs to the excitation
+  probabilities `⟨n_i⟩` of a Rydberg array (optionally followed by the pair correlations
+  `⟨n_i n_j⟩`), a preprocessing step like `PCANormalizer` and not an encoding layer.
+  `transform(X)` evolves the samples in chunks and returns exact expectation values, or with
+  `shots=S` and a `torch.Generator` estimates from `S` sampled bitstrings; `states(X)` returns
+  the density matrices; `get_config()` records positions, `C6`, Ω, `T`, γ, the detuning bound
+  and the solver steps as JSON-serialisable data that rebuilds the map. `n_steps` is required
+  when `gamma > 0`. `PulseEncoding(n_features, *, omega, t=None, delta_max=None)` is the
+  encoding of `docs/rydberg-model.md`, `Δ_i = Δ_max · σ(x_i)` with one input per atom, and
+  defaults to `ΩT = π` and `Δ_max = √3 Ω` (#499, #508)
+- `hqnn_forge.diagnostics.separation_measures(F, y)`: measures of how a fixed feature matrix
+  separates inputs and two classes, without a trained head: the mean pairwise Euclidean
+  distance within and between classes and their ratio (`pairwise_distances` returns the two
+  sets of distances), `fisher_discriminant_ratio` along the best linear direction (the squared
+  Mahalanobis distance between the class means, with the pooled within-class covariance),
+  `effective_rank` of the feature covariance (exponential of the entropy of its normalised
+  eigenvalues), and the alignment of `linear_feature_kernel(F)` = `F Fᵀ` with the labels
+  through `kernel_target_alignment`. An undefined ratio is NaN and perfect separation `inf`.
+  `docs/rydberg-model.md` states which statement each supports for the Rydberg feature map
+  next to its state kernel, and that none predicts the score of a head (#500, #516)
+- `hqnn_forge.models.LinearClassifier(n_input_features, *, init_seed=None)`: one affine map to a
+  logit with the classifiers' interface (`predict_proba`, `get_config`, checkpoints), `n + 1`
+  parameters; trained with `BCEWithLogitsLoss` it is a logistic regression. It is the linear
+  head `ClassicalBaseline`, which needs a hidden layer, cannot be (#501, #517)
+- `examples/benchmark_rydberg_features.py`: a benchmark runner for the Rydberg feature map. On
+  identical folds, validation splits and seeds it trains a linear and a small MLP head on the
+  interacting features (arm A), on the same map with `interactions=False` (B), on the
+  PCA-reduced inputs themselves (C) and on the `⟨Z_i⟩` of a frozen random angle-embedding
+  circuit (D), plus a trained `HybridBinaryClassifier` as a marked, less comparable row, over a
+  grid of `V/Ω` (through the spacing) and `γ/Ω` at fixed `ΩT`, with the same random-search
+  budget for every arm, a feature cache on disk keyed by the data fingerprint and the map's
+  `get_config()`, a UCI loader or a synthetic positive control whose label depends on products
+  of inputs on neighbouring atoms, and one strict-JSON line per arm, head, grid point and fold
+  (scores, feature dimension, parameters, simulation and training seconds, separation
+  measures, seeds, fold indices, environment). Arm B is a classical model, so `A − B` measures
+  what interaction-induced mixing of inputs adds, not "quantum" against "classical";
+  `--quick` is a smoke test (#501, #517)
+- `separation_measures` gains `max_rows` and `seed` keywords to bound memory via deterministic
+  stratified subsampling, exported as `stratified_subsample_indices` from
+  `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
+  `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
+  dephasing rate and fold (#519, #520)
 
 ### Changed
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
@@ -445,6 +488,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   few 1e-17 for an IQP layer at 12): the default 5000 pairs of a 2-layer angle layer went
   from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
   take a batch of parameters runs tape by tape as before (#374)
+- `examples/benchmark_rydberg_features.py`: every option has a help string, and `--help`
+  shows its default (#526)
 
 ### Fixed
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release

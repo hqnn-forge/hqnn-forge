@@ -5,6 +5,12 @@ The model these functions implement, with its units and conventions, is specifie
 
 ::: hqnn_forge.rydberg
 
+## The feature map: encoding, single-atom feature, readout order and shots
+
+::: hqnn_forge.rydberg.feature_map
+    options:
+      members: false
+
 ## Sign conventions, basis ordering and matrix elements
 
 ::: hqnn_forge.rydberg.hamiltonian

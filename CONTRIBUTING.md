@@ -27,7 +27,9 @@ tests for each are in [`docs/extending.md`](docs/extending.md).
     scope and releases. Questions about who should work on what go to the maintainer.
 *   **Triage collaborators:** contributors with triage access who help keep issues tidy
     (titles, duplicates, missing information) and work on their own issues. They do not assign
-    work to others or approve merges.
+    work to others or approve merges. Contributors become eligible for triage access after two
+    merged PRs that followed the workflow in this guide. Eligibility is not automatic: the
+    maintainer decides whether and when to grant it.
 *   **Contributors:** everyone else who opens issues or pull requests. No special access is
     needed; see [Issue First](#1-issue-first) for how to pick up an issue.
 
@@ -190,8 +192,8 @@ uv run --frozen --all-extras vermin --no-tips -t=3.11- --violations --eval-annot
     `ignore_missing_imports` hides the missing module. The `dev` extra declares the tools without a version range, so a pip install
     gets the newest releases, and when a new ruff changes a default, its `ruff format`
     disagrees with CI's. The versions are deliberately not capped in `pyproject.toml`
-    either. Dependabot only updates `uv.lock`, so a cap such as `ruff<0.17` would stop it
-    from ever proposing the next minor release.
+    either. Dependabot only updates `uv.lock`, so any upper bound on ruff would stop it
+    from ever proposing a release past that bound.
 
 ## Dependency Changes
 
@@ -264,8 +266,8 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     above it, and adds the compare link at the bottom. It also bumps `version` in
     `CITATION.cff` to the new version (`tests/test_citation.py` fails until it does) and can
     add a `date-released`.
-*   **When uv moves to a new minor release, raise the `<0.13` cap by hand in `[build-system]` in
-    `pyproject.toml`.**
+*   **When uv moves to a new minor release, raise the `uv_build` cap in `[build-system]` in
+    `pyproject.toml`.** Dependabot opens that PR itself (#551); merge it once CI is green.
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 

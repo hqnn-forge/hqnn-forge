@@ -16,3 +16,12 @@ The sample `circuit_summary` counts on, and `draw_circuit` draws by default;
 not exported, import it from `hqnn_forge.diagnostics.circuit`.
 
 ::: hqnn_forge.diagnostics.circuit.sample_input
+
+## Separation measures: definitions, ranges and edge cases
+
+Which statement each measure supports for the Rydberg feature map is in
+[The Rydberg feature model](../rydberg-model.md#separation-measures).
+
+::: hqnn_forge.diagnostics.separation
+    options:
+      members: false
