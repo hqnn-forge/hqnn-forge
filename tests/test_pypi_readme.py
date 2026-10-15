@@ -11,7 +11,6 @@ import importlib.util
 import re
 import subprocess
 import textwrap
-import tomllib
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -41,6 +40,10 @@ class TestPyPIReadme:
     def test_heading_link_uses_visible_text(self) -> None:
         assert pypi_readme.heading_to_slug("[link](http://x.y) title") == "link-title"
 
+    @pytest.mark.parametrize("heading", ["Foo ##", "Foo #", "Foo ##   "])
+    def test_heading_closing_hashes_are_dropped(self, heading: str) -> None:
+        assert pypi_readme.heading_to_slug(heading) == "foo"
+
     def test_repeated_headings_use_unique_anchors(self) -> None:
         sample = (
             "# Same\n# Same\n```mermaid\ngraph TD; A-->B\n```\n"
@@ -51,9 +54,10 @@ class TestPyPIReadme:
         )
         assert re.findall(r"README.md#([^)]+)", output) == ["same-1", "same-2"]
 
+    @pytest.mark.parametrize("info", ["mermaid", " mermaid", "\tmermaid"])
     @pytest.mark.parametrize("fence", ["```", "~~~", "````", "~~~~"])
-    def test_both_mermaid_fences_are_replaced(self, fence: str) -> None:
-        sample = f"# Diagram\n{fence}mermaid\ngraph TD; A-->B\n{fence}\nAfter\n"
+    def test_both_mermaid_fences_are_replaced(self, fence: str, info: str) -> None:
+        sample = f"# Diagram\n{fence}{info}\ngraph TD; A-->B\n{fence}\nAfter\n"
         output = pypi_readme.generate(
             sample, repo_url="https://github.com/org/repo", version="0.1.0"
         )
@@ -66,8 +70,11 @@ class TestPyPIReadme:
     @pytest.mark.parametrize("fence", ["```", "~~~", "````", "~~~~"])
     def test_mermaid_closing_fence_matches_opener(self, fence: str) -> None:
         other_fence = "~~~" if fence.startswith("`") else "```"
+        # One character short of the opener: a real fence for 4-character
+        # openers, which still must not close the block.
+        short_fence = fence[0] * (len(fence) - 1)
         sample = (
-            f"# Diagram\n{fence}mermaid\n{other_fence}\n{fence[0] * 2}\n"
+            f"# Diagram\n{fence}mermaid\n{other_fence}\n{short_fence}\n"
             f"# Not a heading\n{fence}\nAfter\n"
         )
         output = pypi_readme.generate(sample, version="0.1.0")
@@ -75,7 +82,14 @@ class TestPyPIReadme:
         assert output.endswith("After\n")
 
     @pytest.mark.parametrize(
-        "metadata", ["```mermaid\nA-->B\n```", "~~~mermaid\nA-->B\n~~~", "A readable description"]
+        "metadata",
+        [
+            "```mermaid\nA-->B\n```",
+            "~~~mermaid\nA-->B\n~~~",
+            "``` mermaid\nA-->B\n```",
+            "~~~ mermaid\nA-->B\n~~~",
+            "A readable description",
+        ],
     )
     def test_release_metadata_guard(self, tmp_path: Path, metadata: str) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -300,6 +314,23 @@ class TestPyPIReadme:
         # Confirm no extra files like README.pypi.md were generated
         assert not (tmp_path / "README.pypi.md").exists()
 
+    @pytest.mark.parametrize(
+        "pyproject", [None, '[project]\nname = "x"\n', '[project\nversion = "1.0"\n']
+    )
+    def test_missing_version_fails_without_modifying_files(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], pyproject: str | None
+    ) -> None:
+        readme = tmp_path / "README.md"
+        original = "# Title\n\n```mermaid\ngraph TD\n```\n"
+        readme.write_text(original, encoding="utf-8")
+        if pyproject is not None:
+            (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        assert pypi_readme.main(["--in-place"], root=tmp_path) == 1
+        assert capsys.readouterr().err.startswith(
+            "Error: cannot read project.version from pyproject.toml"
+        )
+        assert readme.read_text(encoding="utf-8") == original
+
     def test_check_flag_not_supported(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -323,13 +354,9 @@ class TestPyPIReadme:
 
     def test_generate_on_real_readme(self) -> None:
         readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
-        output = pypi_readme.generate(readme_text)
-        assert "```mermaid" not in output
-
-        assert "~~~mermaid" not in output
-        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
-            "version"
-        ]
+        version = pypi_readme.project_version(ROOT)
+        output = pypi_readme.generate(readme_text, version=version)
+        assert re.search(r"(`{3,}|~{3,})\s*mermaid", output) is None
         links = re.findall(r"\[View diagram on GitHub\]\(([^)]+)\)", output)
         assert links == [
             f"https://github.com/hqnn-forge/hqnn-forge/blob/v{version}/README.md#how-a-benchmark-works",
