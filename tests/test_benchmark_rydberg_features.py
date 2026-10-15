@@ -47,7 +47,12 @@ from hqnn_forge.benchmark import _sample_configs, fingerprint
 from hqnn_forge.data import load_iranian_churn
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
-from hqnn_forge.experiment import RECORDED_PACKAGES, compare_environment, environment
+from hqnn_forge.experiment import (
+    COMPARED_VERSIONS,
+    RECORDED_PACKAGES,
+    compare_environment,
+    environment,
+)
 from hqnn_forge.models import ClassicalBaseline, HybridBinaryClassifier, LinearClassifier
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
 from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
@@ -1296,6 +1301,15 @@ class TestCache:
         fourth = bench.FeatureCache(None).fetch(self.inputs, self.labels, config, compute)
         assert (fourth.hit, fourth.environment) == (False, env)
 
+    def test_the_key_holds_exactly_what_compare_environment_compares(self) -> None:
+        """Each entry of ``environment()`` is in the key if and only if a change of it is a difference."""
+        env = environment()
+        assert set(bench.key_environment(env)) == {*COMPARED_VERSIONS, "packages"}
+        for name in sorted(set(env) - {"packages"}):
+            changed = {**env, name: "other"}
+            in_key = bench.key_environment(changed) != bench.key_environment(env)
+            assert in_key is bool(compare_environment(changed)), name
+
     def test_the_code_digest_by_hand(self, tmp_path: Path) -> None:
         """Every ``*.py`` below the package and the script, by name and content."""
         package = tmp_path / "pkg"
@@ -1336,6 +1350,20 @@ class TestCache:
         (package / "a.py").rename(package / "sub" / "a.py")
         seen.add(digest())
         assert len(seen) == 5
+        # bytecode Python wrote beside the source is not a module of its own
+        (package / "__pycache__").mkdir()
+        (package / "__pycache__" / "c.cpython-312.pyc").write_bytes(b"")
+        assert digest() in seen
+
+    @pytest.mark.parametrize("name", ["sub/d.pyc", "e.cpython-312-x86_64-linux-gnu.so", "f.pyd"])
+    def test_a_module_that_is_not_source_is_refused(self, tmp_path: Path, name: str) -> None:
+        """Its code would not enter the digest, so a change of it would be a hit."""
+        package = tmp_path / "pkg"
+        (package / "sub").mkdir(parents=True)
+        (package / "a.py").write_bytes(b"A = 1\n")
+        (package / name).write_bytes(b"")
+        with pytest.raises(RuntimeError, match="not Python source.*--no-cache"):
+            bench.code_files(package, tmp_path / "run.py")
 
     def test_the_code_digest_covers_the_package_and_the_script(self) -> None:
         """The files listed another way, among them the modules the features come from."""
@@ -1435,6 +1463,27 @@ class TestCache:
         assert late.FeatureCache(tmp_path / "cache", code_sha256="c" * 64).code_sha256 == "c" * 64
         assert late.FeatureCache(None).path(self.inputs, self.labels, {}) is None
 
+    def test_files_that_cannot_be_read_are_refused_with_a_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable module: no digest at the import, and the error names ``--no-cache``."""
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.py").write_bytes(b"MARK = 1\n")
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+
+        def unreadable(path: Path) -> bytes:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(Path, "read_bytes", unreadable)
+        locked = _script()
+        assert locked.CODE_SHA256 is None
+        with pytest.raises(RuntimeError, match="cannot be read.*--no-cache") as raised:
+            locked.FeatureCache(tmp_path / "cache")
+        assert isinstance(raised.value.__cause__, PermissionError)
+        assert not (tmp_path / "cache").exists()
+
     def test_without_a_directory_every_request_computes(self) -> None:
         compute, calls = self._counting()
         cache = bench.FeatureCache(None)
@@ -1503,6 +1552,36 @@ class TestCache:
             assert line["feature_environment"] == record["feature_environment"]
         for before, after in zip(first, third, strict=True):
             assert (after["mcc"], after["pr_auc"]) == (before["mcc"], before["pr_auc"])
+
+    def test_the_tuning_folds_record_their_hits_and_environments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The features of the tuning folds come through the cache too: a hit
+        computed elsewhere is recorded per tuning fold in ``tuning``, not
+        only for the fold the head is scored on.
+        """
+        settings = _replace(QUICK, arms=("A", "C"), n_trials=2, search_space={"lr": (0.01, 0.1)})
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        env = environment()
+        moved = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        monkeypatch.setattr(bench, "environment", lambda: moved)
+        first = bench.run(data, settings, tmp_path / "a.jsonl", cache_dir=cache)
+        monkeypatch.setattr(bench, "environment", lambda: env)
+        second = bench.run(data, settings, tmp_path / "b.jsonl", cache_dir=cache)
+        assert first and second
+        for records, hit, where in ((first, False, moved), (second, True, env)):
+            for record in records:
+                fixed = record["arm"] != "C"
+                tuning = record["tuning"]
+                assert tuning["feature_cache_hits"] == [hit and fixed] * settings.inner_folds
+                assert tuning["feature_environments"] == (
+                    [moved if fixed else None] * settings.inner_folds
+                )
+                assert record["environment"] == where
+        for line, record in zip(bench.read_records(tmp_path / "b.jsonl"), second, strict=True):
+            assert line["tuning"] == record["tuning"]
 
 
 # ---------------------------------------------------------------------------

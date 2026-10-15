@@ -560,7 +560,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package versions of `experiment.environment()` and a SHA-256 of the source of `hqnn_forge`
   and of the script, so a change of either computes anew (entries of an earlier cache
   directory are no longer read); each entry stores the environment it was computed in, and
-  the lines record it as `feature_environment` (#522, #543)
+  the lines record it as `feature_environment`, and their `tuning` per tuning fold as
+  `feature_environments` and `feature_cache_hits` (#522, #543)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

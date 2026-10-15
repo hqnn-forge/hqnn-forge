@@ -168,10 +168,14 @@ version, in a working tree with uncommitted edits and without git.  The
 digest does not tell which module a feature depends on: an edit anywhere in
 the package or in this script, a comment included, is a miss.  The files
 are read once, when this script is imported (:data:`CODE_SHA256`): an edit
-made while a run is under way does not rename the entries of the code that
-run has loaded.  A package without source files cannot be fingerprinted and
-is refused; ``--no-cache`` runs there.  Entries of other versions stay in
-the directory under their own names and are not removed.
+made while the datasets load or the features are computed does not rename
+the entries of the code the run has loaded.  The digest is taken after the
+imports, though, so an edit saved while they run (the script is read before
+``torch`` is imported, the package while PennyLane is) still files the old
+code's features under the new code's key (#574).  A package without source
+files, or with a module that is not source, cannot be fingerprinted and is
+refused; ``--no-cache`` runs there.  Entries of other versions stay in the
+directory under their own names and are not removed (#575).
 
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
@@ -230,7 +234,9 @@ all zero); ``measurement`` and ``shots``; the fold (``fold``, ``n_splits``,
 dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
 ``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
 and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
-with their scores; ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
+with their scores, and per tuning fold whether its features were a cache hit
+and the ``environment()`` they were computed in (``feature_cache_hits``,
+``feature_environments``, like the fields of the fold below); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
 features, or 0.0 for reused records), ``feature_cache_hit`` and
 ``feature_environment`` (the ``environment()`` the fold's features were
@@ -302,7 +308,7 @@ from hqnn_forge.data import (
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.encoding import QuantumEncodingLayer
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
-from hqnn_forge.experiment import _plain, environment
+from hqnn_forge.experiment import COMPARED_VERSIONS, _plain, environment
 from hqnn_forge.models import (
     BinaryClassifierBase,
     ClassicalBaseline,
@@ -1061,12 +1067,18 @@ def representations(settings: Settings) -> list[Representation]:
 def key_environment(env: Mapping[str, Any]) -> dict[str, Any]:
     """
     The entries of an :func:`hqnn_forge.experiment.environment` that enter
-    the cache key: ``python``, ``implementation``, ``hqnn_forge`` and
-    ``packages``, the ones
-    :func:`hqnn_forge.experiment.compare_environment` compares.  The
-    ``platform`` string is left out, as it is there.
+    the cache key: :data:`hqnn_forge.experiment.COMPARED_VERSIONS`
+    (``python``, ``implementation``, ``hqnn_forge``) and ``packages``, the
+    ones :func:`hqnn_forge.experiment.compare_environment` compares, read
+    from the same constant.  The ``platform`` string is left out, as it is
+    there.
     """
-    return {key: env[key] for key in ("python", "implementation", "hqnn_forge", "packages")}
+    return {key: env[key] for key in (*COMPARED_VERSIONS, "packages")}
+
+
+#: Suffixes of modules Python imports without source: their code does not enter
+#: :func:`code_fingerprint`, so a package that holds one is refused.
+COMPILED_SUFFIXES: Final = frozenset({".pyc", ".pyo", ".so", ".pyd"})
 
 
 def code_files(package: Path | None = None, script: Path | None = None) -> dict[str, Path]:
@@ -1093,8 +1105,10 @@ def code_files(package: Path | None = None, script: Path | None = None) -> dict[
     ------
     RuntimeError
         If the default package was not imported from a ``*.py`` file below
-        its directory (compiled files only, a zip archive): its code cannot
-        be fingerprinted.
+        its directory (compiled files only, a zip archive), or if the
+        package holds a module that is not source (a ``*.pyc`` outside
+        ``__pycache__``, an extension module): its code cannot be
+        fingerprinted.
     """
     if package is None:
         origin = Path(hqnn_forge.__file__ or "")
@@ -1105,6 +1119,19 @@ def code_files(package: Path | None = None, script: Path | None = None) -> dict[
                 f"feature cache cannot tell which code computed its entries; run with "
                 f"--no-cache (cache_dir=None)."
             )
+    compiled = sorted(
+        path
+        for path in package.rglob("*")
+        if path.suffix in COMPILED_SUFFIXES
+        and "__pycache__" not in path.relative_to(package).parts
+        and path.is_file()
+    )
+    if compiled:
+        raise RuntimeError(
+            f"{package} holds modules that are not Python source ({compiled[0]}), so the "
+            f"feature cache cannot tell which code computed its entries; run with "
+            f"--no-cache (cache_dir=None)."
+        )
     script = Path(__file__) if script is None else script
     files = {
         f"{package.name}/{path.relative_to(package).as_posix()}": path
@@ -1143,9 +1170,10 @@ def _code_at_import() -> str | None:
 
 
 #: The code digest of this process: :func:`code_fingerprint`, read once while
-#: this script is imported, right after the package.  A file that changes
-#: later, while the datasets load or during the run, is not the code this
-#: process computes with and must not name its entries.  ``None`` where the
+#: this script is imported, after the imports.  A file that changes later,
+#: while the datasets load or during the run, is not the code this process
+#: computes with and must not name its entries; one that changes during the
+#: imports is not seen (#574).  ``None`` where the
 #: code cannot be fingerprinted; :class:`FeatureCache` then refuses a directory.
 CODE_SHA256: str | None = _code_at_import()
 
@@ -1236,9 +1264,9 @@ class FeatureCache:
     ------
     RuntimeError
         With a directory, if the package has no source files to fingerprint
-        (:func:`code_files`), or if the files could not be read when this
-        script was imported (:data:`CODE_SHA256` is ``None``) and can be now:
-        a digest read that late is not used.
+        (:func:`code_files`), if they cannot be read, or if they could not
+        be read when this script was imported (:data:`CODE_SHA256` is
+        ``None``) and can be now: a digest read that late is not used.
     """
 
     def __init__(
@@ -1257,7 +1285,14 @@ class FeatureCache:
                     # no digest from the import: read again, only for the message that says
                     # why.  A digest that can be had now is of the files as they are now, not
                     # of the code this process has loaded, and is not used.
-                    code_fingerprint()
+                    try:
+                        code_fingerprint()
+                    except OSError as exc:
+                        raise RuntimeError(
+                            f"the source files of hqnn_forge and of this script cannot be "
+                            f"read ({exc}), so the feature cache cannot tell which code "
+                            f"computed its entries; run with --no-cache (cache_dir=None)."
+                        ) from exc
                     raise RuntimeError(
                         "the source files of hqnn_forge and of this script could not be read "
                         "when the script was imported but can be now, so the feature cache "
@@ -1632,7 +1667,7 @@ def run_dataset(
         "n_positives": int(y.sum()),
         "n_raw_features": int(X.shape[1]),
     }
-    env = environment()
+    env = cache.environment
     run = run_seeds(settings.random_state)
     split_seed, per_fold = fold_seeds(settings.random_state, name, settings.n_splits)
     outer = stratified_kfold(y, settings.n_splits, random_state=split_seed)
@@ -1714,7 +1749,8 @@ def run_dataset(
                     seed=settings.separation_seed,
                 ).to_dict(),
             }
-            tuning_features = [features_of(rep, s, cache).features for s in tuning_splits]
+            tuning_cached = [features_of(rep, s, cache) for s in tuning_splits]
+            tuning_features = [c.features for c in tuning_cached]
             arm_b_records: list[dict[str, Any]] = []
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
@@ -1736,6 +1772,8 @@ def run_dataset(
                         "inner_folds": settings.inner_folds,
                         "candidates": candidates,
                         "scores": scores,
+                        "feature_cache_hits": [c.hit for c in tuning_cached],
+                        "feature_environments": [c.environment for c in tuning_cached],
                     }
                 hyperparameters = {**settings.defaults, **chosen}
                 model = build_model(head, matrix.shape[1], settings, seeds["init_seed"])
