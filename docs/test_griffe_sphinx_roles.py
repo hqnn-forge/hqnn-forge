@@ -87,6 +87,10 @@ def test_a_missing_member_is_linked_under_its_owner(package: object) -> None:
     # Under the module where noise is defined, not the module referencing it.
     obj = package["benchmark"]  # type: ignore[index]
     assert resolve("noise.missing", obj, package) == "hqnn_forge.noise.missing"  # type: ignore[arg-type]
+    # Under the longest existing prefix, however deep the missing part.
+    assert resolve("BenchmarkResult.missing.deeper", obj, package) == (  # type: ignore[arg-type]
+        "hqnn_forge.benchmark.BenchmarkResult.missing.deeper"
+    )
 
 
 @pytest.mark.parametrize(
@@ -99,6 +103,9 @@ def test_a_missing_member_is_linked_under_its_owner(package: object) -> None:
         # records is a list; griffe models no members of an attribute's value.
         ("benchmark", "BenchmarkResult.records.append"),
         ("benchmark.BenchmarkResult", "records.append"),
+        # Implicit dunders of a class with no bases.
+        ("benchmark", "BenchmarkResult.__repr__"),
+        ("benchmark", "BenchmarkResult.__eq__"),
     ],
 )
 def test_members_griffe_cannot_see_stay_plain_code(
@@ -114,13 +121,26 @@ def test_a_foreign_name_re_exported_in_the_package_stays_plain_code(tmp_path: Pa
     (root / "__init__.py").write_text("")
     (root / "types.py").write_text("import numpy as np\nfrom torch import Tensor\n")
     (root / "mod.py").write_text(
-        "from hqnn_forge.types import np\nfrom .types import Tensor\n\nclass Local:\n    pass\n"
+        "from hqnn_forge import types\nfrom hqnn_forge.types import np\n"
+        "from .types import Tensor\nfrom other import Foreign\n\nclass Local:\n    pass\n"
     )
-    # A path, not the name: the name finds the installed hqnn_forge first.
-    synthetic = griffe.load(root, search_paths=[str(tmp_path)])
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "__init__.py").write_text("class Foreign:\n    pass\n")
+    # Paths, not names: the name finds the installed hqnn_forge first.  One
+    # loader, so the import of the loaded package other resolves.
+    loader = griffe.GriffeLoader(search_paths=[str(tmp_path)])
+    synthetic = loader.load(root)
+    loader.load(other)
     obj = synthetic["mod"]
     assert resolve("np.ndarray", obj, synthetic) is None
     assert resolve("Tensor.shape", obj, synthetic) is None
+    # The whole target exists, as an import from another package.
+    assert resolve("types.Tensor", obj, synthetic) is None
+    assert resolve("types.np", obj, synthetic) is None
+    # Resolved, but to another package's object, which is not rendered.
+    assert resolve("Foreign", obj, synthetic) is None
+    assert resolve("Foreign.missing", obj, synthetic) is None
     assert resolve("Local.missing", obj, synthetic) == "hqnn_forge.mod.Local.missing"
 
 

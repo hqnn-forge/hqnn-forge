@@ -24,7 +24,8 @@ Resolution, for a role in the docstring of object ``obj``:
   A missing member of an in-package module, or of a class with only in-package
   bases, is still emitted under that object's canonical path.  Members of
   anything else -- a class inheriting from ``torch.nn.Module``, an attribute's
-  value -- are invisible to griffe, so such a reference is plain code too.
+  value -- are invisible to griffe, so such a reference is plain code too, as
+  is a missing dunder, which every class has implicitly.
 
 ``~`` shows only the last component, as in Sphinx.
 
@@ -50,6 +51,10 @@ DOCSTRING_STYLE = "numpy"
 
 def _in_package(path: str) -> bool:
     return path == PACKAGE or path.startswith(PACKAGE + ".")
+
+
+def _is_dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
 
 
 def _lookup(package: griffe.Module, path: str) -> griffe.Object | griffe.Alias:
@@ -104,14 +109,15 @@ def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | No
     existing prefix must be an object whose members griffe all sees
     (`_members_known`), and the reference is emitted under that object's
     canonical path for autorefs to report.  Otherwise -- no scope holds the
-    first component, or the prefix is foreign, reached through a foreign
-    import, inherits from another package, or is a function or attribute --
+    first component, the whole target is a foreign import, the prefix is
+    foreign, reached through a foreign import, inherits from another package,
+    or is a function or attribute, or the first missing member is a dunder --
     the target is plain code.  An unresolved undotted target is emitted at
     ``obj``'s module.
     """
     target = target.strip().rstrip("()")
     parts = target.split(".")
-    if any(p.startswith("_") and not (p.startswith("__") and p.endswith("__")) for p in parts):
+    if any(p.startswith("_") and not _is_dunder(p) for p in parts):
         return None
     if parts[0] == PACKAGE:
         return _canonical(package, target) or target
@@ -128,14 +134,17 @@ def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | No
     if root_scope is None:
         # No local root: qualified in another package (torch.nn.Module).
         return None
-    for i in range(len(parts) - 1, 0, -1):
+    for i in range(len(parts), 0, -1):
         try:
             prefix = _lookup(package, f"{root_scope}.{'.'.join(parts[:i])}")
         except KeyError:
             continue
         except (griffe.AliasResolutionError, griffe.CyclicAliasError):
             return None  # Reached through an import from another package.
-        if not _members_known(prefix):
+        # The whole target exists but has no canonical path: a foreign import
+        # (types.Tensor).  A missing dunder is implicit (object.__repr__, a
+        # dataclass's __eq__) and has no page.
+        if i == len(parts) or _is_dunder(parts[i]) or not _members_known(prefix):
             return None
         # A missing member of a local object: emit it, so the strict build reports it.
         return ".".join([prefix.canonical_path, *parts[i:]])
