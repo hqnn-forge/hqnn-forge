@@ -196,9 +196,11 @@ from typing import Literal, NamedTuple
 import numpy as np
 import pennylane as qml
 import torch
+from scipy.stats import binom
 from torch import nn
 
 from hqnn_forge._resolve import resolve_encoding_layer
+from hqnn_forge.utils.rng import device_generator
 
 Position = Literal["all", "end"]
 NoiseMethod = Literal["density", "trajectories"]
@@ -718,11 +720,10 @@ class TrainingNoiseMixin:
             readout = getattr(self, "readout_error", None)
         if readout is None:
             return out
-        mapped = readout_error_map(out, *readout)
         shots = self.shots
         if shots is None or readout == (0.0, 0.0):
             # Exact values: the map is the whole effect.  (0, 0) flips nothing.
-            return mapped
+            return readout_error_map(out, *readout)
         p01, p10 = readout
         flipped = _flip_shots(
             out,
@@ -731,8 +732,11 @@ class TrainingNoiseMixin:
             p10,
             _flip_generator(self.qlayer.qnode.device),
         )
+        if not out.requires_grad:
+            return flipped
         # The value of the flipped shots, the gradient of the map (see
         # _flip_shots): mapped - mapped.detach() is exactly zero.
+        mapped = readout_error_map(out, *readout)
         return flipped + (mapped - mapped.detach())
 
     def _draws_per_output(self) -> int:
@@ -904,12 +908,38 @@ def _flip_shots(
     10⁷ shots.  Elementwise, any shape; the zeros' draws come first, from
     ``rng``.  Returns a tensor without gradient, in ``estimates``' dtype and
     device.
+
+    Each binomial is drawn by inversion (:func:`_binomial_by_inversion`), from
+    one uniform per element, not with ``rng.binomial``: that one's rejection
+    sampler takes a number of uniforms that depends on the count, so SPSA's
+    two evaluations, whose counts differ, would leave the shared generator
+    out of step after the first such element.  By inversion every call takes
+    exactly ``2 · estimates.numel()`` uniforms, and the flipped count rises
+    with the uniform, so the two sides stay coupled.
     """
     values = estimates.detach().to("cpu", torch.float64).numpy()
     zeros = np.clip(np.rint(shots * (1.0 + values) / 2.0), 0, shots).astype(np.int64)
-    flipped = rng.binomial(zeros, 1.0 - p01) + rng.binomial(shots - zeros, p10)
+    flipped = _binomial_by_inversion(zeros, 1.0 - p01, rng) + _binomial_by_inversion(
+        shots - zeros, p10, rng
+    )
     result = torch.from_numpy((2.0 * flipped - shots) / shots)
     return result.to(dtype=estimates.dtype, device=estimates.device)
+
+
+def _binomial_by_inversion(counts: np.ndarray, p: float, rng: np.random.Generator) -> np.ndarray:
+    """
+    ``Binomial(counts, p)`` elementwise, as the quantile of one uniform each.
+
+    Takes exactly ``counts.size`` uniforms from ``rng`` whatever the counts
+    and ``p``.  ``p = 0`` and ``p = 1`` are set exactly, so that a uniform at
+    the end of its range cannot give the one count they exclude.
+    """
+    uniforms = 1.0 - rng.random(counts.shape)  # in (0, 1]: the quantile at 0 is -1
+    if p == 0.0:
+        return np.zeros_like(counts)
+    if p == 1.0:
+        return counts.copy()
+    return binom.ppf(uniforms, counts, p).astype(np.int64)
 
 
 def _flip_generator(device: object) -> np.random.Generator:
@@ -923,10 +953,13 @@ def _flip_generator(device: object) -> np.random.Generator:
     random numbers (``model=``, which restores these generators between its
     two evaluations) cover the flips too.  A device without one, such as
     hardware, gets a generator seeded from torch's global generator, so
-    ``torch.manual_seed`` makes the flips repeat there.
+    ``torch.manual_seed`` makes the flips repeat there; that takes one draw
+    from torch's generator per sampled forward pass, which moves the draws
+    after it (dropout masks, trajectory noise) against a run without the
+    readout error.
     """
-    rng = getattr(device, "_rng", None)
-    if isinstance(rng, np.random.Generator):
+    rng = device_generator(device)
+    if rng is not None:
         return rng
     return np.random.default_rng(int(torch.randint(2**63 - 1, ())))
 
@@ -956,7 +989,8 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
     * *Generator.*  The flips are drawn from the device's own NumPy
       generator, the one the shots come from, so a layer built with ``seed``
       repeats them whatever torch's seed, and SPSA's common random numbers
-      cover them; a device without one gets a generator seeded from torch's.
+      cover them; a device without one gets a generator seeded from torch's
+      (one draw from it per forward pass).
     * *Trajectories.*  With ``noise_method="trajectories"`` in train mode an
       output is the mean of ``noise_trajectories`` draws of ``shots`` shots
       each; the flips are drawn on the pooled count of all of them.  The
@@ -966,7 +1000,9 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
     * *Gradient.*  A flipped count is piecewise constant in the weights, so
       its own derivative is zero almost everywhere.  The output therefore
       carries the gradient of ``readout_error_map`` of the sampled estimate,
-      ``(1 − p01 − p10)`` times the sampled gradient, as before #486: the
+      ``(1 − p01 − p10)`` times the sampled gradient, the same estimator as
+      before #486 (a seeded layer's values differ, as the flips now draw from
+      its generator before the backward pass's shots): the
       conditional mean of the flipped output given the shots is exactly that
       map, so with ``parameter-shift``'s unbiased sampled gradient this is an
       unbiased estimate of ``∂⟨Z'⟩/∂θ``.  SPSA uses the flipped values

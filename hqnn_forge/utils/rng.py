@@ -10,7 +10,8 @@ block raises -- so a seeded model or fit never reseeds, or advances, the
 stream the caller set up (#175).  Every seeded draw in the library goes
 through it, and SPSA's common random numbers go through the same
 :func:`rng_state` / :func:`set_rng_state` pair, so what "restored" covers is
-decided in one place.
+decided in one place.  Shot sampling draws from each device's own NumPy
+generator instead, which :func:`device_generator` finds.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import numbers
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
+import numpy as np
 import torch
 
 
@@ -96,3 +98,17 @@ def seeded_rng(seed: int | None) -> Iterator[Callable[[], None]]:
         yield lambda: _reseed(fixed)
     finally:
         set_rng_state(saved)
+
+
+def device_generator(device: object) -> np.random.Generator | None:
+    """
+    The NumPy generator ``device`` samples its shots from, or ``None``.
+
+    PennyLane's simulators keep it as a ``numpy.random.Generator`` in the
+    private ``_rng`` attribute (``default.qubit``, ``default.mixed`` and the
+    lightning devices do); a device without one, such as hardware, gives
+    ``None``.  SPSA's common random numbers and the readout flips of a
+    sampled layer both find the generator here, so they agree on it.
+    """
+    rng = getattr(device, "_rng", None)
+    return rng if isinstance(rng, np.random.Generator) else None

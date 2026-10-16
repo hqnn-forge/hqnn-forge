@@ -9,6 +9,7 @@ on a sampled layer, flipped shots (#486).
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,7 @@ from hqnn_forge.models import (
     ParallelHybridClassifier,
 )
 from hqnn_forge.noise import (
+    _binomial_by_inversion,
     _flip_generator,
     apply_depolarizing_noise,
     apply_readout_error,
@@ -64,6 +66,20 @@ def _on_shot_lattice(values: torch.Tensor, shots: int) -> bool:
     # by up to about 3e-8 · shots, far below the 1e-3 allowed.
     k = (values.detach().double() * shots + shots) / 2
     return bool(torch.allclose(k, k.round(), rtol=0, atol=1e-3))
+
+
+def _sampled(pair: tuple[float, float] | None, x: torch.Tensor) -> tuple[torch.Tensor, Any]:
+    """
+    A ``seed=7`` layer's output inside ``apply_shots(layer, 200)``, and the layer.
+
+    With ``pair`` the block also has ``apply_readout_error(layer, *pair)``;
+    with ``None`` it has none, so the output is the plain sampled estimate the
+    flips start from (the shots are the same either way).
+    """
+    layer = _layer(seed=7)
+    readout = nullcontext() if pair is None else apply_readout_error(layer, *pair)
+    with torch.no_grad(), apply_shots(layer, 200), readout:
+        return layer(x), layer
 
 
 def _confusion_kraus(p01: float, p10: float) -> list[torch.Tensor]:
@@ -147,12 +163,15 @@ class TestPostHoc:
     def test_composes_with_a_shots_block(self) -> None:
         # Inside apply_shots the shots are flipped, not the estimate mapped:
         # the output stays on the 200-shot lattice, which the map (scale
-        # 0.89) leaves.  TestFlippedShots checks the distribution.
+        # 0.89) leaves, and differs from the same shots without the error.
+        # TestFlippedShots checks the distribution.
         x = _x()
-        layer = _layer(seed=7)
-        with torch.no_grad(), apply_shots(layer, 200), apply_readout_error(layer, P01, P10):
-            both = layer(x)
+        both, _ = _sampled((P01, P10), x)
+        sampled, _ = _sampled(None, x)
         assert _on_shot_lattice(both, 200)
+        assert not torch.equal(both, sampled)
+        with torch.no_grad():
+            assert not torch.allclose(sampled, _layer()(x), atol=1e-3)  # really sampled
 
     def test_block_replaces_the_layer_s_own_training_readout(self) -> None:
         layer = _layer(readout_error=(0.3, 0.3))
@@ -396,6 +415,10 @@ class TestTraining:
                     outputs.append(layer(x))
         assert _on_shot_lattice(outputs[1], 200)
         torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
+        # Both really flip: the same seeded shots without an error differ.
+        unflipped = _layer(shots=200, seed=7, **SHIFT)
+        with torch.no_grad():
+            assert not torch.equal(unflipped(x), outputs[0])
 
     @pytest.mark.parametrize("channel", ["depolarizing", "amplitude_damping"])
     def test_with_trajectories_it_maps_the_mean_over_draws(self, channel: str) -> None:
@@ -566,15 +589,9 @@ class TestFlippedShots:
         # a 1 (⟨Z'⟩ = −1) and (0, 1) every 1 into a 0 (⟨Z'⟩ = +1).  Swapping
         # p01 and p10 in the draw swaps the last two.
         x = _x()
-        outputs: dict[tuple[float, float] | None, torch.Tensor] = {}
-        for pair in (None, (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)):
-            layer = _layer(seed=7)
-            with torch.no_grad(), apply_shots(layer, 200):
-                if pair is None:
-                    outputs[pair] = layer(x)
-                else:
-                    with apply_readout_error(layer, *pair):
-                        outputs[pair] = layer(x)
+        outputs = {
+            pair: _sampled(pair, x)[0] for pair in (None, (1.0, 1.0), (1.0, 0.0), (0.0, 1.0))
+        }
         sampled = outputs[None]
         with torch.no_grad():
             assert not torch.allclose(sampled, _layer()(x), atol=1e-3)  # really sampled
@@ -588,13 +605,8 @@ class TestFlippedShots:
         x = _x()
         outputs, states = [], []
         for pair in (None, (0.0, 0.0)):
-            layer = _layer(seed=7)
-            with torch.no_grad(), apply_shots(layer, 200):
-                if pair is None:
-                    outputs.append(layer(x))
-                else:
-                    with apply_readout_error(layer, *pair):
-                        outputs.append(layer(x))
+            out, layer = _sampled(pair, x)
+            outputs.append(out)
             states.append(layer.qlayer.qnode.device._rng.bit_generator.state)
         torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
         assert states[1] == states[0]
@@ -730,6 +742,57 @@ class TestFlippedShots:
         torch.testing.assert_close(plus, minus, atol=0, rtol=0)
         plus, minus = outputs(sync=False)
         assert not torch.equal(plus, minus)
+
+    def test_spsa_evaluations_stay_in_step_when_the_counts_differ(self) -> None:
+        # With the quantum weights perturbed the two evaluations see different
+        # counts of zeros.  Each flip still takes one uniform per binomial, so
+        # both leave the shared device generator in the same state, and the
+        # draws after the flips stay common.  numpy's binomial sampler takes a
+        # count-dependent number of uniforms at large n·p, which fails this.
+        model = HybridBinaryClassifier(
+            n_input_features=3,
+            n_qubits=3,
+            n_layers=1,
+            shots=1000,
+            seed=3,
+            readout_error=(0.1, 0.3),
+            **SHIFT,
+        )
+        model.train()
+        rng = model.quantum_layer.qlayer.qnode.device._rng
+        seen: list[tuple[torch.Tensor, dict[str, Any]]] = []
+        model.quantum_layer.register_forward_hook(
+            lambda _m, _i, out: seen.append((out.detach().clone(), rng.bit_generator.state))
+        )
+        x, y = _x(), torch.tensor([0.0, 1.0, 0.0, 1.0, 1.0])
+        opt = SPSA(model.quantum_layer.parameters(), perturbation=0.2, model=model)
+        opt.gradient_estimate(
+            lambda: nn.functional.binary_cross_entropy_with_logits(model(x).squeeze(-1), y)
+        )
+        (plus, plus_state), (minus, minus_state) = seen
+        assert not torch.equal(plus, minus)  # the counts really differ
+        assert plus_state == minus_state
+
+    def test_binomial_by_inversion_takes_one_uniform_per_element(self) -> None:
+        # Whatever the counts and p, exactly counts.size uniforms; p = 0 and
+        # p = 1 are exact even at a uniform of 1 (rng.random() returning 0).
+        counts = np.array([[0, 3, 400], [1000, 7, 0]])
+        for p in (0.0, 0.02, 0.5, 0.97, 1.0):
+            rng, reference = np.random.default_rng(1), np.random.default_rng(1)
+            draws = _binomial_by_inversion(counts, p, rng)
+            reference.random(counts.shape)
+            assert rng.bit_generator.state == reference.bit_generator.state
+            assert draws.dtype == np.int64
+            assert ((draws >= 0) & (draws <= counts)).all()
+
+        class Zero:
+            def random(self, shape: tuple[int, ...]) -> np.ndarray:
+                return np.zeros(shape)
+
+        top = _binomial_by_inversion(counts, 0.0, Zero())  # type: ignore[arg-type]
+        np.testing.assert_array_equal(top, 0)
+        np.testing.assert_array_equal(_binomial_by_inversion(counts, 1.0, Zero()), counts)  # type: ignore[arg-type]
+        np.testing.assert_array_equal(_binomial_by_inversion(counts, 0.3, Zero()), counts)  # type: ignore[arg-type]
 
     @pytest.mark.slow
     def test_shot_sweep_inside_the_block(self) -> None:

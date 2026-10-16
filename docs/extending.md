@@ -127,7 +127,11 @@ through `self._run_circuit`, and append `self._noise_repr()` to `extra_repr`, as
 layer does. The readout error is applied in `_run_circuit`, on the output: a layer without the
 mixin is refused by `apply_readout_error` (and by `noise_sweep(..., channel="readout")`), a
 `forward` that calls `self.qlayer` directly would skip it without any error, and the kernels,
-which replay `qlayer(prepare_inputs(x))`, do not see it.
+which replay `qlayer(prepare_inputs(x))`, do not see it. It also assumes every output is a
+single-qubit ⟨Z⟩ readout, as `measure_z` gives: on exact values it maps each one, and on a
+sampled layer it reads each output as the count of zeros among the shots and flips those shots,
+so an output that is not a single-qubit ⟨Z⟩ estimate (⟨X⟩, a product of Z's, a post-processed
+value) gets a wrong result, with no error.
 
 Beyond the protocol:
 
