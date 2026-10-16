@@ -10,7 +10,9 @@ exist, or is not rendered, fails the build.
 
 Resolution, for a role in the docstring of object ``obj``:
 
-* ``hqnn_forge.…`` -- qualified.
+* ``hqnn_forge.…`` -- qualified.  If it does not exist it is emitted as
+  written, whatever its owner: the rules below for members griffe cannot see
+  apply to unqualified targets only (#578).
 * anything else -- tried against ``obj``'s members, then each enclosing scope
   up to the package root; the first existing object wins.  If none exists,
   the reference is still emitted, at ``obj``'s module, so the build reports it.
@@ -86,7 +88,10 @@ def _members_known(obj: griffe.Object | griffe.Alias) -> bool:
     """Whether griffe sees every member of ``obj``: an in-package module, or an
     in-package class whose bases are all such classes.  griffe does not load
     other packages, so it knows neither the members a class inherits from
-    ``torch.nn.Module`` nor those of an attribute's value (a ``list``)."""
+    ``torch.nn.Module`` nor those of an attribute's value (a ``list``).  Of
+    instance attributes it sees only those assigned in ``__init__`` or
+    declared in the class body; one first assigned elsewhere (``self.fitted_``
+    in ``fit``) must be declared to be referenced."""
     try:
         obj = obj.final_target if obj.is_alias else obj  # type: ignore[union-attr]
     except (griffe.AliasResolutionError, griffe.CyclicAliasError):
