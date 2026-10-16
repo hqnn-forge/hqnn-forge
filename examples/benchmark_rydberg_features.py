@@ -274,12 +274,18 @@ and ``tuning_seconds``;
 :func:`hqnn_forge.diagnostics.separation_measures` on the features as the
 map returns them, before the standardisation of step 4 (for arm C the
 inputs), for the real rows of the training part (``train``) and for the
-test rows (``test``).  The distances are then in units of excitation
-probability, as ``docs/rydberg-model.md`` documents them, to hold against
-the shot error, and they record a collapse that the standardised scores
-do not show; the Fisher ratio is the same on either matrix (it does not
-change under an invertible affine map of the columns), the effective rank
-and the alignment are not.  On a training or test partition exceeding
+test rows (``test``).  The distances are then in the units of the
+features: excitation probabilities for arms A and B, as
+``docs/rydberg-model.md`` documents them, to hold against the shot error;
+Pauli expectation values in ``[−1, 1]`` for arm D; and for arm C the
+inputs, angles in ``(−π, π)``.  They record a collapse that the
+standardised scores do not show.  The Fisher ratio does not change under
+an invertible affine map of the columns, so it is the same on either
+matrix unless a direction falls below its rounding cutoff on one matrix
+only: the cutoff scales with the Frobenius norm of the whole matrix, not
+of each column, so a column far smaller than the others can be dropped
+from the raw matrix and kept in the standardised one.  The effective rank
+and the alignment do change.  On a training or test partition exceeding
 ``--max-separation-rows`` (default 2000), the measures are computed on a
 class-stratified subsample drawn with ``--separation-seed`` (default 0)
 to bound memory.  Train and test partitions are subsampled independently
@@ -307,7 +313,8 @@ Usage
 one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
-``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
+``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
+and ``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -834,7 +841,7 @@ class Split:
         """Positions of the real rows of the training part: training rows, then validation."""
         return np.concatenate(
             [
-                np.arange(self.n_train - self.n_synthetic),
+                self.real_train,
                 np.arange(self.n_train, self.n_train + self.n_val),
             ]
         )
@@ -999,6 +1006,10 @@ class Representation:
         inputs themselves.
     n_frozen_parameters:
         Parameters of the map that are fixed and never trained.
+    standardise:
+        Whether the heads see the features standardised (step 4 of the
+        module docstring) when ``Settings.standardise`` is on.  ``False``
+        for ``D-hybrid``, whose inputs are its circuit's rotation angles.
     """
 
     arm: str
@@ -1009,6 +1020,7 @@ class Representation:
     config: dict[str, Any] | None = None
     compute: Callable[[FloatArray], FloatArray] | None = None
     n_frozen_parameters: int = 0
+    standardise: bool = True
 
 
 def _rydberg_representation(
@@ -1098,7 +1110,9 @@ def representations(settings: Settings) -> list[Representation]:
         result.append(Representation(arm="C", kind="inputs", heads=HEADS))
     if "D" in settings.arms:
         result.append(_circuit_representation(settings, seeds["circuit_seed"], seeds["shot_seed"]))
-        result.append(Representation(arm="D-hybrid", kind="inputs", heads=("hybrid",)))
+        result.append(
+            Representation(arm="D-hybrid", kind="inputs", heads=("hybrid",), standardise=False)
+        )
     return result
 
 
@@ -1923,7 +1937,7 @@ def run_dataset(
             cached = features_of(rep, split, cache)
             # As the map returns them: for the separation measures and the feature dimension.
             matrix = cached.features
-            standardise = settings.standardise and rep.arm != "D-hybrid"
+            standardise = settings.standardise and rep.standardise
             head_matrix = head_features(matrix, split, standardise)
             separation = {
                 "train": separation_measures(
@@ -2111,8 +2125,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
             "ignoring conflicting grid, model, dataset-selection, and training options; "
-            "only --out, --cache-dir, --no-cache, --seed, --max-separation-rows, "
-            "and --separation-seed still apply"
+            "only --out, --cache-dir, --no-cache, --seed, --standardise/--no-standardise, "
+            "--max-separation-rows, and --separation-seed still apply"
         ),
     )
     parser.add_argument(
@@ -2287,8 +2301,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     (one fold, one small grid point) and explicitly selects the
     ``positive-control`` dataset, ignoring conflicting grid, model,
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
-    ``--no-cache``, ``--seed``, ``--max-separation-rows``, and
-    ``--separation-seed`` still apply.
+    ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
+    ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
     args = _parser().parse_args(argv)
     max_sep = (
@@ -2300,6 +2314,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         settings = dataclasses.replace(
             QUICK,
             random_state=args.seed,
+            standardise=args.standardise,
             max_separation_rows=max_sep,
             separation_seed=args.separation_seed,
         )

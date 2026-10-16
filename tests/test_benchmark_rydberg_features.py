@@ -1983,6 +1983,10 @@ class TestStandardisationInARun:
             bench.main([*flags, "--samples", "40", "--out", out, "--no-cache"])
             assert seen[-1].standardise is expected
             assert seen[-1].as_dict()["standardise"] is expected
+            # --quick replaces the settings by QUICK but keeps this switch.
+            bench.main(["--quick", *flags, "--out", out, "--no-cache"])
+            assert seen[-1].standardise is expected
+            assert seen[-1].n_atoms == QUICK.n_atoms
 
 
 # ---------------------------------------------------------------------------
