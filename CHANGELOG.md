@@ -555,6 +555,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `circuit_summary` raised `AttributeError` on PennyLane 0.46, whose `specs` resources drop
   `num_gates`, `gate_types` and `gate_sizes`; it now counts depth and gates on the decomposed
   tape itself and gives the same summary on 0.45 and 0.46 (#364)
+- `examples/benchmark_rydberg_features.py` served cached features computed by older code or
+  other library versions as hits. The cache key now also holds the Python, `hqnn_forge` and
+  package versions of `experiment.environment()` and a SHA-256 of the source of `hqnn_forge`
+  and of the script, so a change of either computes anew (entries of an earlier cache
+  directory are no longer read); each entry stores the environment it was computed in, and
+  the lines record it as `feature_environment`, and their `tuning` per tuning fold as
+  `feature_environments` and `feature_cache_hits` (#522, #543)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
