@@ -79,9 +79,32 @@ For a dataset ``(X, y)`` and one outer fold of :func:`stratified_kfold`
    synthetic rows are made once, in input space, so every arm trains on the
    same samples; validation and test rows are real rows only.
 4. **Features.**  Each arm maps those inputs (training rows with the
-   synthetic ones, validation rows, test rows) to its features.  A head
-   sees the features as the map returns them; nothing is rescaled in
-   between.
+   synthetic ones, validation rows, test rows) to its features, and every
+   column of them is then standardised (:func:`standardise_features`) with
+   its mean and standard deviation on the fold's **real training rows**:
+   the training rows without the synthetic ones, never validation or test
+   rows.  This is the same for A, B, C (the inputs) and D; the heads see
+   the standardised matrix.  ``--no-standardise`` (``"standardise":
+   false`` in ``settings``) hands them the features as the map returns
+   them instead.  ``D-hybrid`` is never standardised: its inputs are the
+   rotation angles of the circuit it trains, which their range
+   ``(−π, π)`` is part of.
+
+   *Why (#518).*  Under strong dephasing every excitation probability
+   tends to ½ (``docs/rydberg-model.md``, "Strong dephasing"), so the
+   features of all samples shrink towards one point.  With exact
+   expectation values that is a change of scale only, which a head could
+   undo with larger weights, but a head trained with Adam from the fixed
+   search space does not get there within its epochs: without this step a
+   score falls with ``γ/Ω`` because of the optimiser, not because the
+   features carry less.  Standardised, a matrix ``a_j + ε_j F[·, j]`` gives
+   the same input to the head for every ``ε_j > 0``, so the scores do not
+   depend on the scale of a collapse; **with exact features the collapse
+   then shows only through ``--shots``** (whether a small difference is
+   resolvable is a question about the measurement) and in the
+   ``separation`` distances, which stay on the unstandardised features
+   (below).  Arms whose features have different ranges (``[0, 1]``,
+   ``[−1, 1]``, ``(−π, π)``) are compared on one scale as well.
 5. **Tuning** (below), then **training** with :func:`train_model`: Adam,
    the loss of ``--loss``, MCC early stopping on the validation rows.
 6. **Scoring.**  The threshold is the one that maximises MCC on the
@@ -188,7 +211,10 @@ of the run that wrote the line.  The two differ only on a hit from another
 platform.
 
 The inputs are fitted per fold (step 2), so each fold has its own entries:
-"once" is once per grid point and input matrix.  The recorded
+"once" is once per grid point and input matrix.  An entry holds the
+features as the map returns them; the standardisation of step 4 is applied
+after it is read, so the key does not hold ``standardise`` and a run with
+``--no-standardise`` reads the entries of one without it.  The recorded
 ``feature_seconds`` is the simulation time measured when the features were
 computed, also on a cache hit; on a reused arm B line it is 0.
 
@@ -199,7 +225,8 @@ Every arm and head gets the same random-search budget: the same
 training settings (``lr``, ``batch_size``), each scored by the mean MCC
 over the same ``--inner-folds`` stratified folds of the fold's training
 part.  Inside an inner fold everything is refitted on its fitting rows
-(standardisation, PCA, SMOTE), as ``run_benchmark``'s ``Tuning`` does, and
+(standardisation, PCA, SMOTE, and the feature standardisation of step 4 on
+its real fitting rows), as ``run_benchmark``'s ``Tuning`` does, and
 the outer test rows are never used.  The budget is counted in trials, not
 seconds.  The architecture is not tuned.
 
@@ -244,9 +271,21 @@ computed in, read from the cache entry on a hit; ``null`` for arm C and
 ``D-hybrid``, which have no fixed map), ``train_seconds`` (the final fit)
 and ``tuning_seconds``;
 ``separation``, the measures of
-:func:`hqnn_forge.diagnostics.separation_measures` on the matrix the head
-receives, for the real rows of the training part (``train``) and for the
-test rows (``test``).  On a training or test partition exceeding
+:func:`hqnn_forge.diagnostics.separation_measures` on the features as the
+map returns them, before the standardisation of step 4 (for arm C the
+inputs), for the real rows of the training part (``train``) and for the
+test rows (``test``).  The distances are then in the units of the
+features: excitation probabilities for arms A and B, as
+``docs/rydberg-model.md`` documents them, to hold against the shot error;
+Pauli expectation values in ``[−1, 1]`` for arm D; and for arm C the
+inputs, angles in ``(−π, π)``.  They record a collapse that the
+standardised scores do not show.  The Fisher ratio does not change under
+an invertible affine map of the columns, so it is the same on either
+matrix unless a direction falls below its rounding cutoff on one matrix
+only: the cutoff scales with the Frobenius norm of the whole matrix, not
+of each column, so a column far smaller than the others can be dropped
+from the raw matrix and kept in the standardised one.  The effective rank
+and the alignment do change.  On a training or test partition exceeding
 ``--max-separation-rows`` (default 2000), the measures are computed on a
 class-stratified subsample drawn with ``--separation-seed`` (default 0)
 to bound memory.  Train and test partitions are subsampled independently
@@ -274,7 +313,8 @@ Usage
 one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
-``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
+``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
+and ``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -379,6 +419,10 @@ class Settings:
         A subset of :data:`ARMS`.
     hidden:
         Hidden width of the MLP head.
+    standardise:
+        Whether every head except ``D-hybrid``'s sees its features
+        standardised on the fold's real training rows (step 4 of the
+        module docstring) or as the map returns them.  Default ``True``.
     circuit_layers:
         Variational layers of arm D's circuit.
     n_splits, max_folds:
@@ -413,6 +457,7 @@ class Settings:
     shots: int | None = None
     arms: tuple[str, ...] = ARMS
     hidden: int = 8
+    standardise: bool = True
     circuit_layers: int = 2
     n_splits: int = 10
     max_folds: int | None = None
@@ -787,11 +832,16 @@ class Split:
         return slice(self.n_train + self.n_val, self.n_train + self.n_val + self.n_test)
 
     @property
+    def real_train(self) -> RowArray:
+        """Positions of the real training rows: the training block without its synthetic rows."""
+        return np.arange(self.n_train - self.n_synthetic)
+
+    @property
     def real(self) -> RowArray:
         """Positions of the real rows of the training part: training rows, then validation."""
         return np.concatenate(
             [
-                np.arange(self.n_train - self.n_synthetic),
+                self.real_train,
                 np.arange(self.n_train, self.n_train + self.n_val),
             ]
         )
@@ -956,6 +1006,10 @@ class Representation:
         inputs themselves.
     n_frozen_parameters:
         Parameters of the map that are fixed and never trained.
+    standardise:
+        Whether the heads see the features standardised (step 4 of the
+        module docstring) when ``Settings.standardise`` is on.  ``False``
+        for ``D-hybrid``, whose inputs are its circuit's rotation angles.
     """
 
     arm: str
@@ -966,6 +1020,7 @@ class Representation:
     config: dict[str, Any] | None = None
     compute: Callable[[FloatArray], FloatArray] | None = None
     n_frozen_parameters: int = 0
+    standardise: bool = True
 
 
 def _rydberg_representation(
@@ -1055,7 +1110,9 @@ def representations(settings: Settings) -> list[Representation]:
         result.append(Representation(arm="C", kind="inputs", heads=HEADS))
     if "D" in settings.arms:
         result.append(_circuit_representation(settings, seeds["circuit_seed"], seeds["shot_seed"]))
-        result.append(Representation(arm="D-hybrid", kind="inputs", heads=("hybrid",)))
+        result.append(
+            Representation(arm="D-hybrid", kind="inputs", heads=("hybrid",), standardise=False)
+        )
     return result
 
 
@@ -1347,10 +1404,154 @@ class FeatureCache:
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
-    """The matrix ``rep`` hands to its heads for the rows of ``split``, row for row."""
+    """
+    The features of ``rep`` for the rows of ``split``, row for row, as the map returns them.
+
+    The heads receive them through :func:`head_features`.
+    """
     if rep.compute is None or rep.config is None:
         return CachedFeatures(split.inputs, 0.0, False, None)
     return cache.fetch(split.inputs, split.labels, rep.config, rep.compute)
+
+
+def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatArray:
+    """
+    Every column of ``features`` centred and scaled by its statistics on ``fit_rows``.
+
+    Step 4 of the module docstring: :func:`run_dataset` passes each
+    split's real training rows (:attr:`Split.real_train`) unless
+    ``Settings.standardise`` is off.
+
+    Definition
+    ----------
+    For the matrix ``F`` (row ``r`` a sample, column ``j`` a feature) and
+    the ``n`` rows ``R = fit_rows``,
+
+    ::
+
+        μ_j  = (1/n) Σ_{r ∈ R} F[r, j]
+        σ_j² = (1/n) Σ_{r ∈ R} (F[r, j] − μ_j)²
+        Z[r, j] = (F[r, j] − μ_j) / σ_j          for every row r
+
+    with the population variance (``1/n``, not ``1/(n − 1)``), as
+    :func:`preprocess` scales the raw columns.  A column that is constant
+    on the fitting rows is only centred (``σ_j`` is replaced by 1; see
+    "Constant columns" below).  ``Z`` is dimensionless whatever the unit of
+    ``F``; on the fitting rows each column of ``Z`` has mean 0 and, unless
+    it is constant there, variance 1.  Rows outside ``R`` enter neither
+    ``μ`` nor ``σ``: changing one changes that row of ``Z`` and no other.
+
+    What it removes
+    ---------------
+    Replace column ``j`` by ``a_j + ε_j F[·, j]`` with ``ε_j > 0``.  Then
+    ``μ_j → a_j + ε_j μ_j`` and ``σ_j → ε_j σ_j``, so
+
+    ::
+
+        Z[r, j] → (a_j + ε_j F[r, j] − a_j − ε_j μ_j) / (ε_j σ_j) = Z[r, j]
+
+    ``Z`` does not depend on the offset or the scale of a column (a negative
+    ``ε_j`` flips the column's sign).  Features of the form ``½ + ε g``, the
+    shape of excitation probabilities collapsing under strong dephasing
+    (``docs/rydberg-model.md``, "Strong dephasing"), therefore give the
+    standardisation of ``g`` for every ``ε``.
+
+    That holds up to rounding.  The arithmetic is in float64: ``½ + ε g`` is
+    stored with an absolute error of up to ``2⁻⁵³ ≈ 1.1e-16``, which the
+    division turns into ``1.1e-16/(ε σ_g)`` in units of ``Z``.  Done after
+    the float32 cast of :func:`fit_and_score` instead, the error would be
+    ``2⁻²⁵ ≈ 3.0e-8`` at ½, divided by ``ε σ_g`` likewise.
+
+    Errors of the features
+    ----------------------
+    Let the features carry an error ``δ`` (a solver error, say): ``F + δ``.
+    Split it over the fitting rows into its least-squares fit on the
+    feature and a rest,
+
+    ::
+
+        δ[r, j] = c_j + b_j (F[r, j] − μ_j) + e[r, j]
+
+    so that ``e[·, j]`` has mean 0 on ``R`` and no covariance with
+    ``F[·, j]`` there.  Then ``F + δ = (μ_j + c_j) + (1 + b_j)(F − μ_j) + e``:
+    its mean on ``R`` is ``μ_j + c_j`` and its variance
+    ``(1 + b_j)² σ_j² + var_R(e[·, j])`` (no cross term), so for
+    ``1 + b_j > 0``
+
+    ::
+
+        Z'[r, j] = Z[r, j] + e[r, j] / ((1 + b_j) σ_j) + O(e²/σ_j²)
+
+    The part of ``δ`` that is an offset or a scale of the column drops out
+    exactly, as above; only the rest ``e`` reaches the head, magnified by
+    ``1/σ_j``.  On the positive control (fold 0, ``V/Ω = 1``, 200 steps
+    against 6400) the largest ``|δ|/σ_j`` of arm A was ``2.1e-2`` at
+    ``γ = 10 Ω`` and ``1.3e2`` at ``γ = 100 Ω``, but the largest
+    ``|Z' − Z|`` was ``9.3e-5`` and ``6.4e-4``: the stepping error there is
+    almost a scale of ``F − ½`` (#518).
+
+    Constant columns
+    ----------------
+    The variance computed from ``n`` values near ``μ_j`` carries a rounding
+    error of up to about ``n ε σ_j² + (n ε |μ_j|)²`` with ``ε = 2⁻⁵²``
+    (the bound of Chan, Golub and LeVeque for the two-pass algorithm, which
+    scikit-learn's ``StandardScaler`` applies).  A column whose computed
+    ``σ_j²`` does not exceed that bound cannot be told from a constant one,
+    whose variance is 0, and is only centred.  Scaled instead, its rounding
+    noise would become a feature of unit variance: a column of ½ and
+    ½ ± ``2⁻⁵³`` would turn into values of about ±1.2.
+
+    Parameters
+    ----------
+    features:
+        Shape ``(n_rows, d)``.
+    fit_rows:
+        Indices of the rows the statistics are taken over, at least one.
+        For a :class:`Split`, the real training rows are
+        :attr:`Split.real_train`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(n_rows, d)``, float64; row ``r`` and column ``j`` are those
+        of ``features``.
+
+    Raises
+    ------
+    ValueError
+        If ``features`` is not two-dimensional, ``fit_rows`` is empty, or a
+        fitting row holds a value that is not finite.
+    """
+    matrix = np.asarray(features, dtype=np.float64)
+    if matrix.ndim != 2:
+        raise ValueError(f"features must have shape (n_rows, d); got {matrix.shape}.")
+    rows = np.asarray(fit_rows)
+    if rows.size == 0:
+        raise ValueError("fit_rows must name at least one row.")
+    fitted = matrix[rows]
+    if not np.isfinite(fitted).all():
+        raise ValueError("features are not finite on the fitting rows.")
+    n = rows.size
+    eps = np.finfo(np.float64).eps
+    mean = fitted.mean(axis=0)
+    var = fitted.var(axis=0)
+    constant = var <= n * eps * var + (n * eps * mean) ** 2
+    std = np.where(constant, 1.0, np.sqrt(var))
+    result: FloatArray = (matrix - mean) / std
+    return result
+
+
+def head_features(features: FloatArray, split: Split, standardise: bool) -> FloatArray:
+    """
+    The matrix a head is trained, stopped and scored on (step 4 of the module docstring).
+
+    ``features`` standardised on ``split``'s real training rows
+    (:func:`standardise_features` with :attr:`Split.real_train`), or
+    ``features`` itself if ``standardise`` is false.
+    """
+    if not standardise:
+        return features
+    return standardise_features(features, split.real_train)
 
 
 # ---------------------------------------------------------------------------
@@ -1734,7 +1935,10 @@ def run_dataset(
                 continue
 
             cached = features_of(rep, split, cache)
+            # As the map returns them: for the separation measures and the feature dimension.
             matrix = cached.features
+            standardise = settings.standardise and rep.standardise
+            head_matrix = head_features(matrix, split, standardise)
             separation = {
                 "train": separation_measures(
                     matrix[split.real],
@@ -1750,7 +1954,10 @@ def run_dataset(
                 ).to_dict(),
             }
             tuning_cached = [features_of(rep, s, cache) for s in tuning_splits]
-            tuning_features = [c.features for c in tuning_cached]
+            tuning_features = [
+                head_features(c.features, s, standardise)
+                for c, s in zip(tuning_cached, tuning_splits, strict=True)
+            ]
             arm_b_records: list[dict[str, Any]] = []
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
@@ -1776,10 +1983,10 @@ def run_dataset(
                         "feature_environments": [c.environment for c in tuning_cached],
                     }
                 hyperparameters = {**settings.defaults, **chosen}
-                model = build_model(head, matrix.shape[1], settings, seeds["init_seed"])
+                model = build_model(head, head_matrix.shape[1], settings, seeds["init_seed"])
                 fit = fit_and_score(
                     model,
-                    matrix,
+                    head_matrix,
                     split,
                     hyperparameters,
                     loss=settings.loss,
@@ -1918,8 +2125,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
             "ignoring conflicting grid, model, dataset-selection, and training options; "
-            "only --out, --cache-dir, --no-cache, --seed, --max-separation-rows, "
-            "and --separation-seed still apply"
+            "only --out, --cache-dir, --no-cache, --seed, --standardise/--no-standardise, "
+            "--max-separation-rows, and --separation-seed still apply"
         ),
     )
     parser.add_argument(
@@ -1985,6 +2192,12 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=default.hidden,
         help="hidden-layer width of the MLP head",
+    )
+    parser.add_argument(
+        "--standardise",
+        action=argparse.BooleanOptionalAction,
+        default=default.standardise,
+        help="standardise each head's features on the fold's real training rows",
     )
     parser.add_argument(
         "--circuit-layers",
@@ -2088,8 +2301,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     (one fold, one small grid point) and explicitly selects the
     ``positive-control`` dataset, ignoring conflicting grid, model,
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
-    ``--no-cache``, ``--seed``, ``--max-separation-rows``, and
-    ``--separation-seed`` still apply.
+    ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
+    ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
     args = _parser().parse_args(argv)
     max_sep = (
@@ -2101,6 +2314,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         settings = dataclasses.replace(
             QUICK,
             random_state=args.seed,
+            standardise=args.standardise,
             max_separation_rows=max_sep,
             separation_seed=args.separation_seed,
         )
@@ -2114,6 +2328,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             shots=args.shots,
             arms=tuple(args.arms),
             hidden=args.hidden,
+            standardise=args.standardise,
             circuit_layers=args.circuit_layers,
             n_splits=args.folds,
             max_folds=args.max_folds,

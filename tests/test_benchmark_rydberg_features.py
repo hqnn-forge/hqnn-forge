@@ -19,7 +19,10 @@ What the numbers are checked against:
   and the JSON mapping;
 * ``hashlib`` over files listed with ``os.walk``, for the code digest in the
   feature cache's key (#522), and ``compare_environment`` for which entries
-  of the environment the key holds.
+  of the environment the key holds;
+* a matrix standardised by hand, scikit-learn's ``StandardScaler`` and the
+  standardisation of ``g`` for features ``½ + ε g``, for
+  ``standardise_features`` (#518).
 """
 
 from __future__ import annotations
@@ -198,6 +201,64 @@ def quick(tmp_path_factory: pytest.TempPathFactory) -> Any:
 def _line(run: Any, arm: str, head: str) -> dict[str, Any]:
     (found,) = [r for r in run.lines if r["arm"] == arm and r["head"] == head]
     return dict(found)
+
+
+def _standardised_by_hand(raw: np.ndarray, fold: Any) -> np.ndarray:
+    """
+    ``raw`` (the fold's rows stacked: training with synthetic, validation,
+    test) with every column centred and divided by its mean and population
+    standard deviation over the real training rows.  ``smote`` puts those
+    first, in their order, so no synthetic, validation or test row enters.
+    """
+    assert fold.train_inputs.shape[0] == fold.train_idx.size + fold.n_synthetic
+    fitting = raw[: fold.train_idx.size]
+    return np.asarray((raw - fitting.mean(axis=0)) / fitting.std(axis=0))
+
+
+def _assert_scores_by_hand(
+    record: dict[str, Any], fold: Any, y: np.ndarray, features: np.ndarray, head: str
+) -> None:
+    """
+    MCC, PR-AUC, threshold and epochs of ``record``, from a head built and
+    trained here on ``features`` (the fold's rows stacked as in
+    :func:`_standardised_by_hand`) with the recorded hyperparameters and the
+    fold's seeds, through ``train_model`` and not through the script.
+    """
+    x = torch.from_numpy(features.astype(np.float32))
+    n_train, n_val = fold.train_inputs.shape[0], fold.val_idx.size
+    x_train, x_val, x_test = x.split([n_train, n_val, fold.test_idx.size])
+    seed = fold.seeds["init_seed"]
+    d = features.shape[1]
+    model: nn.Module = (
+        LinearClassifier(d, init_seed=seed)
+        if head == "linear"
+        else ClassicalBaseline(d, [QUICK.hidden], init_seed=seed)
+    )
+    settings = record["hyperparameters"]
+    history = train_model(
+        model,
+        nn.BCEWithLogitsLoss(),
+        torch.optim.Adam(model.parameters(), lr=settings["lr"]),
+        x_train,
+        torch.from_numpy(fold.train_labels.astype(np.float32)),
+        x_val,
+        torch.from_numpy(y[fold.val_idx].astype(np.float32)),
+        max_epochs=settings["max_epochs"],
+        batch_size=settings["batch_size"],
+        monitor="mcc",
+        patience=settings["patience"],
+        generator=torch.Generator().manual_seed(fold.seeds["batch_seed"]),
+    )
+    assert isinstance(model, LinearClassifier | ClassicalBaseline)
+    probability = model.predict_proba(x_test)
+    truth = y[fold.test_idx]
+    assert history.best_threshold is not None
+    assert record["threshold"] == pytest.approx(history.best_threshold, abs=1e-6)
+    prediction = (probability >= history.best_threshold).long()
+    assert record["mcc"] == pytest.approx(matthews_corrcoef(truth, prediction), abs=1e-9)
+    assert record["pr_auc"] == pytest.approx(pr_auc(truth, probability), abs=1e-6)
+    assert record["epochs"] == history.n_epochs
+    assert 0.0 <= record["pr_auc"] <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +1646,350 @@ class TestCache:
 
 
 # ---------------------------------------------------------------------------
+# Standardising a feature matrix (#518)
+# ---------------------------------------------------------------------------
+
+
+def _collapsed(epsilon: float, n_synthetic: int = 8) -> tuple[Any, np.ndarray, np.ndarray]:
+    """
+    A split of 200 rows with features ``½ + ε g`` and the rows a fit may see.
+
+    ``g`` has four columns of unit normal noise, shifted by ``±0.8`` with
+    the label in the first two, so a head can learn it.  Blocks: 120
+    training rows whose last ``n_synthetic`` count as synthetic, 40
+    validation rows, 40 test rows.
+    """
+    rng = np.random.default_rng(518)
+    labels = (np.arange(200) % 2).astype(np.int64)
+    g = rng.standard_normal((200, 4))
+    g[:, :2] += 0.8 * (2.0 * labels[:, None] - 1.0)
+    split = bench.Split(
+        inputs=g, labels=labels, n_train=120, n_synthetic=n_synthetic, n_val=40, n_test=40
+    )
+    return split, 0.5 + epsilon * g, np.arange(120 - n_synthetic)
+
+
+class TestStandardiseFeatures:
+    def test_a_matrix_by_hand(self) -> None:
+        # Column 0 on the fitting rows: 1, 2, 3, so μ = 2 and σ² = (1 + 0 + 1)/3.
+        # Column 1 is constant there and is only centred.
+        features = np.array([[1.0, 0.5], [2.0, 0.5], [3.0, 0.5], [5.0, 0.7]])
+        result = bench.standardise_features(features, np.array([0, 1, 2]))
+        s = math.sqrt(2.0 / 3.0)
+        expected = np.array([[-1 / s, 0.0], [0.0, 0.0], [1 / s, 0.0], [3 / s, 0.2]])
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-15)
+        assert result.dtype == np.float64
+
+    def test_it_agrees_with_scikit_learn_fitted_on_the_fitting_rows(self) -> None:
+        from sklearn.preprocessing import StandardScaler
+
+        _, features, fit_rows = _collapsed(0.01)
+        expected = StandardScaler().fit(features[fit_rows]).transform(features)
+        result = bench.standardise_features(features, fit_rows)
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-11)
+        # On the fitting rows every column then has mean 0 and variance 1 (1/n).
+        np.testing.assert_allclose(result[fit_rows].mean(axis=0), 0.0, atol=1e-11)
+        np.testing.assert_allclose(result[fit_rows].std(axis=0), 1.0, atol=1e-11)
+
+    def test_rows_outside_the_fit_change_no_other_row(self) -> None:
+        split, features, fit_rows = _collapsed(0.01)
+        before = bench.standardise_features(features, fit_rows)
+        # Synthetic, validation and test rows: none of them is a fitting row.
+        outside = np.setdiff1d(np.arange(features.shape[0]), fit_rows)
+        assert outside[0] == split.n_train - split.n_synthetic
+        changed = features.copy()
+        changed[outside] = 0.5 + 7.0 * (changed[outside] - 0.5)
+        after = bench.standardise_features(changed, fit_rows)
+        np.testing.assert_array_equal(after[fit_rows], before[fit_rows])
+        mean, std = features[fit_rows].mean(axis=0), features[fit_rows].std(axis=0)
+        np.testing.assert_allclose(after[outside], (changed[outside] - mean) / std, rtol=1e-12)
+        assert np.abs(after[outside] - before[outside]).max() > 1.0
+        # A fitting row does enter: the same change there moves every row.
+        changed = features.copy()
+        changed[fit_rows[:20]] = 0.5 + 7.0 * (changed[fit_rows[:20]] - 0.5)
+        moved = bench.standardise_features(changed, fit_rows)
+        assert np.abs(moved[outside] - before[outside]).max() > 0.1
+
+    @pytest.mark.parametrize("epsilon", [1e-1, 1e-3, 1e-6])
+    def test_the_result_does_not_depend_on_offset_and_scale(self, epsilon: float) -> None:
+        # ½ + ε g has μ = ½ + ε μ_g and σ = ε σ_g, so its standardisation is that of g.
+        split, features, fit_rows = _collapsed(epsilon)
+        g = split.inputs
+        expected = (g - g[fit_rows].mean(axis=0)) / g[fit_rows].std(axis=0)
+        result = bench.standardise_features(features, fit_rows)
+        # ½ + ε g is rounded to 1.1e-16, which is 1.1e-16/(ε σ_g) after the division.
+        np.testing.assert_allclose(result, expected, rtol=0, atol=4 * 1.1e-16 / epsilon + 1e-13)
+        # A negative factor only flips the sign.
+        np.testing.assert_allclose(
+            bench.standardise_features(0.5 - epsilon * g, fit_rows),
+            -expected,
+            rtol=0,
+            atol=4 * 1.1e-16 / epsilon + 1e-13,
+        )
+
+    def test_a_constant_column_is_only_centred(self) -> None:
+        # σ = 0 on the fitting rows: no division by zero, the column becomes F − μ.
+        features = np.array([[0.5, 0.0], [0.5, 1.0], [0.5, 2.0], [0.75, 3.0], [0.25, 4.0]])
+        result = bench.standardise_features(features, np.array([0, 1, 2]))
+        assert np.isfinite(result).all()
+        np.testing.assert_array_equal(result[:, 0], [0.0, 0.0, 0.0, 0.25, -0.25])
+        np.testing.assert_allclose(result[:, 1], (features[:, 1] - 1.0) / math.sqrt(2 / 3))
+
+    def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
+        """
+        ½ and ½ ± one unit in the last place (2⁻⁵³): a computed variance of
+        about 8e-33, below the rounding bound ``(n ε |μ|)² ≈ 2.8e-28`` for
+        150 rows, so the column is only centred, as scikit-learn's
+        ``StandardScaler`` treats it; divided by its σ it would be ±1.2.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.default_rng(0)
+        ulp = 0.5 + rng.integers(-1, 2, size=(200, 1)) * 2.0**-53
+        spread = 0.5 + 1e-6 * rng.standard_normal((200, 1))  # small, far above rounding
+        features = np.hstack([ulp, spread])
+        rows = np.arange(150)
+        result = bench.standardise_features(features, rows)
+        np.testing.assert_allclose(result[:, 0], ulp[:, 0] - ulp[rows, 0].mean(), atol=0)
+        assert np.abs(result[:, 0]).max() < 2e-16
+        assert np.abs(ulp[:, 0] - ulp[rows, 0].mean()).max() / ulp[rows, 0].std() > 1.0
+        np.testing.assert_allclose(result[rows, 1].std(), 1.0, rtol=1e-9)
+        expected = StandardScaler().fit(features[rows]).transform(features)
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-9)
+
+    @pytest.mark.parametrize(
+        ("features", "rows", "message"),
+        [
+            (np.zeros(4), np.array([0, 1]), "features must have shape"),
+            (np.zeros((4, 2)), np.array([], dtype=np.intp), "fit_rows must name at least one row"),
+            (
+                np.array([[0.0, 1.0], [np.nan, 2.0], [1.0, 3.0]]),
+                np.array([0, 1]),
+                "not finite on the fitting rows",
+            ),
+        ],
+    )
+    def test_what_is_refused(self, features: np.ndarray, rows: np.ndarray, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            bench.standardise_features(features, rows)
+
+    @pytest.mark.parametrize("head", ["linear", "mlp"])
+    def test_scores_on_standardised_features_do_not_depend_on_epsilon(self, head: str) -> None:
+        settings = bench.Settings()
+        config = {"lr": 0.05, "max_epochs": 30, "batch_size": 32, "patience": None}
+
+        def score(epsilon: float, *, standardise: bool) -> Any:
+            split, features, fit_rows = _collapsed(epsilon)
+            if standardise:
+                features = bench.standardise_features(features, fit_rows)
+            model = bench.build_model(head, 4, settings, init_seed=3)
+            return bench.fit_and_score(model, features, split, config, loss="bce", batch_seed=5)
+
+        reference = score(1.0, standardise=True)
+        # The task is learnable, so equal scores are not equal failures.
+        assert reference.mcc > 0.5
+        assert reference.pr_auc > 0.8
+        for epsilon in (1e-2, 1e-4, 1e-6):
+            fit = score(epsilon, standardise=True)
+            assert fit.mcc == reference.mcc
+            assert fit.epochs == reference.epochs
+            assert fit.pr_auc == pytest.approx(reference.pr_auc, abs=1e-6)
+            assert fit.threshold == pytest.approx(reference.threshold, abs=1e-4)
+        # Without the step the same data at another ε is another training problem:
+        # the head starts from the same weights but its logits are ε times as wide.
+        raw = score(1.0, standardise=False)
+        small = score(1e-4, standardise=False)
+        assert small.pr_auc < raw.pr_auc - 0.05
+
+
+def _collapsed_representation(epsilon: float) -> Any:
+    """A fixed map with features ``½ + ε tanh(x)``: the shape of a collapse, at any ε."""
+
+    def compute(inputs: np.ndarray) -> np.ndarray:
+        return np.asarray(0.5 + epsilon * np.tanh(inputs))
+
+    return bench.Representation(
+        arm="A",
+        kind="collapsed",
+        heads=bench.HEADS,
+        config={"feature_map": "collapsed", "epsilon": epsilon},
+        compute=compute,
+    )
+
+
+class TestStandardisationInARun:
+    """Step 4 of the script's docstring through ``run_dataset`` (#518)."""
+
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, epsilon: float, standardise: bool
+    ) -> tuple[list[dict[str, Any]], Any, np.ndarray]:
+        settings = _replace(QUICK, arms=("A",), standardise=standardise)
+        monkeypatch.setattr(
+            bench, "representations", lambda s: [_collapsed_representation(epsilon)]
+        )
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        records = list(
+            bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None))
+        )
+        return records, _fold_by_hand(X, y, settings, 0), y
+
+    def test_scores_do_not_depend_on_epsilon_and_are_those_of_a_head_trained_by_hand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Features ``½ + ε tanh(x)``: every line, tuning included, is the same
+        for ε of 1, 1e-3 and 1e-6, and each is the score of a head trained by
+        hand on ``tanh(x)`` standardised with numpy on the real training rows
+        of the fold rebuilt by hand.  The separation measures stay on the
+        features the map returns: their distances scale with ε, the Fisher
+        ratio does not, and both are those of the library on those features.
+        """
+        lines = {}
+        for epsilon in (1.0, 1e-3, 1e-6):
+            records, fold, y = self._run(monkeypatch, epsilon, standardise=True)
+            stacked = np.concatenate(
+                [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+            )
+            # The standardisation of ½ + ε g is that of g, so the head is trained on g.
+            expected = _standardised_by_hand(np.tanh(stacked), fold)
+            real = np.concatenate([fold.train_idx, fold.val_idx])
+            separation = separation_measures(
+                0.5 + epsilon * np.tanh(fold.inputs[real]), y[real]
+            ).to_dict()
+            for record in records:
+                assert record["settings"]["standardise"] is True
+                assert record["tuning"] is not None
+                _assert_scores_by_hand(record, fold, y, expected, record["head"])
+                assert record["separation"]["train"] == pytest.approx(separation, rel=1e-6)
+            lines[epsilon] = {r["head"]: r for r in records}
+        assert set(lines[1.0]) == {"linear", "mlp"}
+        assert lines[1.0]["linear"]["mcc"] > 0.0
+        for epsilon in (1e-3, 1e-6):
+            for head, reference in lines[1.0].items():
+                line = lines[epsilon][head]
+                assert line["mcc"] == reference["mcc"]
+                assert line["epochs"] == reference["epochs"]
+                assert line["hyperparameters"] == reference["hyperparameters"]
+                assert line["tuning"]["scores"] == reference["tuning"]["scores"]
+                assert line["pr_auc"] == pytest.approx(reference["pr_auc"], abs=1e-6)
+                assert line["threshold"] == pytest.approx(reference["threshold"], abs=1e-4)
+                distance = line["separation"]["train"]["mean_between_distance"]
+                assert distance == pytest.approx(
+                    epsilon * reference["separation"]["train"]["mean_between_distance"],
+                    rel=1e-6,
+                )
+                assert line["separation"]["train"]["fisher_ratio"] == pytest.approx(
+                    reference["separation"]["train"]["fisher_ratio"], rel=1e-6
+                )
+
+    def test_without_standardisation_the_head_sees_the_features_as_returned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``standardise=False``: the scores of a head trained by hand on ``½ + ε tanh(x)``."""
+        scores = {}
+        for epsilon in (1.0, 1e-4):
+            records, fold, y = self._run(monkeypatch, epsilon, standardise=False)
+            stacked = np.concatenate(
+                [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+            )
+            for record in records:
+                assert record["settings"]["standardise"] is False
+                _assert_scores_by_hand(
+                    record, fold, y, 0.5 + epsilon * np.tanh(stacked), record["head"]
+                )
+            scores[epsilon] = [
+                (r["pr_auc"], r["threshold"], r["tuning"]["scores"]) for r in records
+            ]
+        assert scores[1e-4] != scores[1.0]
+
+    def test_statistics_are_those_of_the_real_training_rows_of_every_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Each call fits on the first rows of its split's training block, as
+        many as the split has real training rows (counted here from the
+        folds rebuilt by hand): no synthetic, validation or test row.  Arm C
+        is standardised too; ``D-hybrid`` never is.
+        """
+        calls: list[tuple[int, np.ndarray]] = []
+        original = bench.standardise_features
+
+        def spy(features: Any, fit_rows: np.ndarray) -> Any:
+            calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
+            return original(features, fit_rows)
+
+        monkeypatch.setattr(bench, "standardise_features", spy)
+        settings = _replace(QUICK, arms=("A", "C"))
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+        fold = _fold_by_hand(X, y, settings, 0)
+        n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
+        inner = stratified_kfold(
+            y[fold.train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
+        )
+        expected = [(n_outer, fold.train_idx.size)]
+        for fit, held_out in inner:
+            n_synthetic = len(smote(np.zeros((fit.size, 1)), y[fold.train_part][fit]).sources)
+            expected.append((fit.size + n_synthetic + held_out.size, fit.size))
+        assert [(n, rows.size) for n, rows in calls] == expected * 2  # arm A, then arm C
+        for _, rows in calls:
+            np.testing.assert_array_equal(rows, np.arange(rows.size))
+
+        calls.clear()
+        settings = _replace(QUICK, arms=("D",), n_trials=0, max_epochs=1)
+        list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+        assert [(n, rows.size) for n, rows in calls] == [(n_outer, fold.train_idx.size)]
+
+    def test_the_cache_holds_the_features_as_returned_and_serves_either_setting(
+        self, tmp_path: Path
+    ) -> None:
+        """A run without the step reads every entry of a run with it, and scores otherwise."""
+        settings = _replace(QUICK, arms=("A", "B"), n_trials=0)
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        on = bench.run(data, settings, tmp_path / "on.jsonl", cache_dir=cache)
+        stored = sorted(p.name for p in cache.iterdir())
+        off = bench.run(
+            data, _replace(settings, standardise=False), tmp_path / "off.jsonl", cache_dir=cache
+        )
+        assert sorted(p.name for p in cache.iterdir()) == stored
+        assert not any(r["feature_cache_hit"] for r in on)
+        assert all(r["feature_cache_hit"] for r in off)
+        for a, b in zip(on, off, strict=True):
+            assert (a["settings"]["standardise"], b["settings"]["standardise"]) == (True, False)
+            assert a["separation"] == b["separation"]
+        assert [(r["pr_auc"], r["threshold"]) for r in on] != [
+            (r["pr_auc"], r["threshold"]) for r in off
+        ]
+
+    def test_the_command_line_switches_it_and_defaults_to_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert bench.Settings().standardise is True
+        assert QUICK.standardise is True
+        seen: list[Any] = []
+
+        def run(datasets: Any, settings: Any, *args: Any, **kwargs: Any) -> list[Any]:
+            seen.append(settings)
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        out = str(tmp_path / "out.jsonl")
+        for flags, expected in (
+            ([], True),
+            (["--no-standardise"], False),
+            (["--standardise"], True),
+        ):
+            bench.main([*flags, "--samples", "40", "--out", out, "--no-cache"])
+            assert seen[-1].standardise is expected
+            assert seen[-1].as_dict()["standardise"] is expected
+            # --quick replaces the settings by QUICK but keeps this switch.
+            bench.main(["--quick", *flags, "--out", out, "--no-cache"])
+            assert seen[-1].standardise is expected
+            assert seen[-1].n_atoms == QUICK.n_atoms
+
+
+# ---------------------------------------------------------------------------
 # Strict JSON
 # ---------------------------------------------------------------------------
 
@@ -2148,9 +2553,10 @@ class TestQuick:
         )
 
     @pytest.mark.parametrize("arm", ["A", "B", "C", "D", "D-hybrid"])
-    def test_separation_measures_of_the_matrix_the_head_receives(
+    def test_separation_measures_of_the_features_the_map_returns(
         self, quick: Any, arm: str
     ) -> None:
+        """On the unstandardised features (#518), although the heads see them standardised."""
         train, test, real = self._features(quick, arm)
         expected = {
             "train": separation_measures(train, quick.y[real]).to_dict(),
@@ -2193,9 +2599,12 @@ class TestQuick:
         MCC, PR-AUC, threshold and epochs of a line, from a model built and
         trained here with the recorded hyperparameters on the fold rebuilt by
         hand.  For arm C with the linear head this is the logistic regression.
+        The features are standardised by hand with the mean and population
+        standard deviation of the real training rows (#518).
         """
         fold = quick.fold
         record = _line(quick, arm, head)
+        assert record["settings"]["standardise"] is True
 
         # One matrix for the fold's rows, as the script evolves them: a batch
         # of another size may round differently in the last digit (#509).
@@ -2203,47 +2612,14 @@ class TestQuick:
             [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
         )
         if arm == "C":
-            features = torch.from_numpy(stacked.astype(np.float32))
+            raw = stacked
         elif arm == "D":
             circuit_seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
-            features = torch.from_numpy(_circuit_by_hand(stacked, circuit_seed)).to(torch.float32)
+            raw = _circuit_by_hand(stacked, circuit_seed)
         else:
             fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
-            features = fmap.transform(stacked).to(torch.float32)
-        n_train, n_val = fold.train_inputs.shape[0], fold.val_idx.size
-        x_train, x_val, x_test = features.split([n_train, n_val, fold.test_idx.size])
-
-        seed = fold.seeds["init_seed"]
-        model: nn.Module = (
-            LinearClassifier(4, init_seed=seed)
-            if head == "linear"
-            else ClassicalBaseline(4, [QUICK.hidden], init_seed=seed)
-        )
-        settings = record["hyperparameters"]
-        history = train_model(
-            model,
-            nn.BCEWithLogitsLoss(),
-            torch.optim.Adam(model.parameters(), lr=settings["lr"]),
-            x_train,
-            torch.from_numpy(fold.train_labels.astype(np.float32)),
-            x_val,
-            torch.from_numpy(quick.y[fold.val_idx].astype(np.float32)),
-            max_epochs=settings["max_epochs"],
-            batch_size=settings["batch_size"],
-            monitor="mcc",
-            patience=settings["patience"],
-            generator=torch.Generator().manual_seed(fold.seeds["batch_seed"]),
-        )
-        assert isinstance(model, LinearClassifier | ClassicalBaseline)
-        probability = model.predict_proba(x_test)
-        truth = quick.y[fold.test_idx]
-        assert history.best_threshold is not None
-        assert record["threshold"] == pytest.approx(history.best_threshold, abs=1e-6)
-        prediction = (probability >= history.best_threshold).long()
-        assert record["mcc"] == pytest.approx(matthews_corrcoef(truth, prediction), abs=1e-9)
-        assert record["pr_auc"] == pytest.approx(pr_auc(truth, probability), abs=1e-6)
-        assert record["epochs"] == history.n_epochs
-        assert 0.0 <= record["pr_auc"] <= 1.0
+            raw = fmap.transform(stacked).numpy()
+        _assert_scores_by_hand(record, fold, quick.y, _standardised_by_hand(raw, fold), head)
 
     def test_records_returned_are_the_lines_written(self, quick: Any) -> None:
         assert len(quick.records) == len(quick.lines)
