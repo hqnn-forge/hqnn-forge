@@ -178,11 +178,13 @@ class TestTheSampler:
         z = torch.stack([rz.data[0] for rz, _ in pairs])
         x = torch.stack([rx.data[0] for _, rx in pairs])
         assert z.shape == x.shape == (len(pairs), batch)
+
         # Angles are 0 or π only: a bit per gate.
         for angles in (z, x):
             assert set(angles.unique().tolist()) <= {0.0, torch.pi}
+
         z_bits, x_bits = (z == torch.pi).long(), (x == torch.pi).long()
-        counts = {name: 0 for name in PAULIS}
+        counts = dict.fromkeys(PAULIS, 0)
         for zb in (0, 1):
             for xb in (0, 1):
                 counts[_pauli_of(zb, xb)] += int(((z_bits == zb) & (x_bits == xb)).sum())

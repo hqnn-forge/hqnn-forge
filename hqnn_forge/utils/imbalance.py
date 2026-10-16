@@ -137,7 +137,7 @@ class FocalLoss(nn.Module):
 
         if self.reduction == "mean":
             return focal_loss.mean()
-        elif self.reduction == "sum":
+        if self.reduction == "sum":
             return focal_loss.sum()
         return focal_loss  # "none"
 
@@ -289,6 +289,6 @@ def weighted_bce_loss(
 
     if reduction == "mean":
         return weighted.mean()
-    elif reduction == "sum":
+    if reduction == "sum":
         return weighted.sum()
     return weighted

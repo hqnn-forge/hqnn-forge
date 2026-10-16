@@ -361,6 +361,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dephasing rate and fold (#519, #520)
 
 ### Changed
+- `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
+  its probabilities and score across `n_repeats` without changing finite-shot sampling (#532)
+- `numpy.random.seed` no longer makes the shot samples of an unseeded device repeat: the
+  built-in simulators now draw an unseeded device's generator from OS entropy.  Pass the
+  layer's or classifier's `seed` for repeatable shot-based results (#533)
 - The package metadata links the repository, issue tracker and changelog, and the README's
   image and file links are absolute, so both work on PyPI (#327)
 - The README links the API reference site near the top and from Quick Start, Architecture and
@@ -485,13 +490,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   few 1e-17 for an IQP layer at 12): the default 5000 pairs of a 2-layer angle layer went
   from 35 s to 8 s at 4 qubits and from 78 s to 15 s at 8. A circuit whose operations do not
   take a batch of parameters runs tape by tape as before (#374)
+- `examples/benchmark_rydberg_features.py`: every option has a help string, and `--help`
+  shows its default (#526)
+- `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
+  smoke-test configuration on the positive control and ignores conflicting grid, model,
+  dataset-selection, and training options (#563)
 
 ### Fixed
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
   spread was scaled by `|1 − p01 − p10|`, too small for every ⟨Z⟩ and zero at
-  `p01 + p10 = 1`. Gradients are unchanged; exact layers are unaffected (#486, #546)
+  `p01 + p10 = 1`. Gradients are unchanged in expectation, but a seeded layer's sampled
+  gradients take other values, as the flips now draw from the device's generator before the
+  backward pass; exact layers are unaffected (#486, #546)
+- Pin PyPI diagram links to their release README, replace tilde-fenced Mermaid blocks and blocks
+  with whitespace before `mermaid`, and use GitHub-compatible anchors for whitespace, inline links,
+  closing `#` sequences and repeated headings (#534)
+- Building a classifier or encoding layer on a built-in simulator (`default.qubit` or a
+  lightning device), with or without `init_seed`, no longer advances NumPy's global RNG, and
+  neither do train-mode density noise, `encoded_states`, `quantum_kernel_matrix`,
+  `encoded_density_matrices`, `QuantumKernelClassifier.fit` or `expressibility`: their devices
+  get an explicit `seed=None` instead of PennyLane's default, which draws from `np.random` (#533)
 - Replace Mermaid diagrams with links to the GitHub repository in the package description at release
   time, so PyPI does not display raw diagram source (#485)
 - Encoding layers raise a construction-time `ValueError` when a resolved device has finite
@@ -541,6 +561,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `circuit_summary` raised `AttributeError` on PennyLane 0.46, whose `specs` resources drop
   `num_gates`, `gate_types` and `gate_sizes`; it now counts depth and gates on the decomposed
   tape itself and gives the same summary on 0.45 and 0.46 (#364)
+- `examples/benchmark_rydberg_features.py` served cached features computed by older code or
+  other library versions as hits. The cache key now also holds the Python, `hqnn_forge` and
+  package versions of `experiment.environment()` and a SHA-256 of the source of `hqnn_forge`
+  and of the script, so a change of either computes anew (entries of an earlier cache
+  directory are no longer read); each entry stores the environment it was computed in, and
+  the lines record it as `feature_environment`, and their `tuning` per tuning fold as
+  `feature_environments` and `feature_cache_hits` (#522, #543)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
