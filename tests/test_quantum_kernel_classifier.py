@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any
 
 import numpy as np
@@ -330,3 +331,12 @@ def test_predict_proba_follows_the_fit_not_set_params() -> None:
     proba = est.predict_proba(X)
     est.set_params(probability=False)
     np.testing.assert_array_equal(est.predict_proba(X), proba)
+
+
+def test_a_seeded_fit_leaves_the_global_numpy_rng_alone(
+    numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
+) -> None:
+    # #417: the kernel's state simulation must not draw from np.random.
+    X, y = _data(n=12)
+    with numpy_rng_untouched():
+        QuantumKernelClassifier(random_state=3).fit(X, y)

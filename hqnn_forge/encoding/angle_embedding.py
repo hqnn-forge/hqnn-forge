@@ -514,8 +514,9 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         readout is estimated from that many samples, as on hardware.  Needs
         ``diff_method="parameter-shift"``; with training noise, only
         ``noise_method="trajectories"``.  The samples come from the device's
-        own generator, which ``torch.manual_seed`` does not reach: pass
-        ``seed`` for samples that repeat run to run.  The ``shots`` attribute
+        own generator, which neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` reaches: pass ``seed`` for samples that repeat
+        run to run.  The ``shots`` attribute
         reads the QNode the layer runs, so it follows
         :func:`hqnn_forge.noise.apply_shots`.
     seed:

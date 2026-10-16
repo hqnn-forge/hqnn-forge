@@ -220,7 +220,8 @@ def _simulate(
     }
     tape = qml.workflow.construct_tape(qlayer.qnode, level=0)(prepared, **weights)
     tape = tape.copy(measurements=[qml.state()])
-    device = qml.device("default.qubit", wires=n_qubits)
+    # seed=None: the default ("global") would draw from np.random (#417).
+    device = qml.device("default.qubit", wires=n_qubits, seed=None)
     (result,) = qml.execute([tape], device, diff_method="backprop" if differentiable else None)
     states = torch.as_tensor(result).to(torch.complex128)
     return states.reshape(prepared.shape[0], 2**n_qubits)
@@ -796,7 +797,8 @@ def _simulate_density(
     else:
         tape = qml.workflow.construct_tape(qlayer.qnode, level=0)(prepared, **weights)
     tape = tape.copy(measurements=[qml.density_matrix(wires=range(n_qubits))])
-    device = qml.device("default.mixed", wires=n_qubits)
+    # seed=None: the default ("global") would draw from np.random (#417).
+    device = qml.device("default.mixed", wires=n_qubits, seed=None)
     (result,) = qml.execute([tape], device, diff_method="backprop" if differentiable else None)
     return torch.as_tensor(result).to(torch.complex128).reshape(n_rows, dim, dim)
 
