@@ -10,7 +10,10 @@ exist, or is not rendered, fails the build.
 
 Resolution, for a role in the docstring of object ``obj``:
 
-* ``hqnn_forge.…`` -- qualified.
+* ``hqnn_forge.…`` -- qualified. For non-module roles a shadowed module yields
+  to its same-named member as below; if that member cannot be resolved, the
+  target is emitted as written, and the strict build reports the unrendered
+  module.
 * anything else -- tried against ``obj``'s members, then each enclosing scope
   up to the package root; the first existing object wins. For non-module
   roles, a module shadowing a member of the same name yields to that member
@@ -61,7 +64,7 @@ def _canonical(package: griffe.Module, path: str, role: str = "obj") -> str | No
         return None
     try:
         found = package[path[len(PACKAGE) + 1 :]]
-        if found.is_module and role in NON_MODULE_ROLES and found.name in found.members:
+        if role in NON_MODULE_ROLES and found.is_module and found.name in found.members:
             found = found.members[found.name]
             if found.is_module:
                 return None

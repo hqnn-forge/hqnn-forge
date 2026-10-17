@@ -83,6 +83,19 @@ def test_module_and_object_roles_keep_the_module(package: object, role: str) -> 
     )
 
 
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("func", "hqnn_forge.diagnostics.expressibility.expressibility"),
+        ("mod", "hqnn_forge.diagnostics.expressibility"),
+    ],
+)
+def test_a_qualified_target_passes_the_role_on(package: object, role: str, expected: str) -> None:
+    obj = package["diagnostics.fisher"]  # type: ignore[index]
+    target = "hqnn_forge.diagnostics.expressibility"
+    assert convert(f":{role}:`{target}`", obj, package) == f"[`{target}`][{expected}]"  # type: ignore[arg-type]
+
+
 def test_a_shadowed_alias_resolves_to_its_definition() -> None:
     package = griffe.Module("hqnn_forge")
     module = griffe.Module("work")
