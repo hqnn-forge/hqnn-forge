@@ -25,8 +25,10 @@ Checked structurally (fast, no training):
 
 Not checked here: the published MCC (0.5758 ± 0.0371) and MCC/kParam
 (4.720) come from 5-fold CV on the 284,807-row Kaggle dataset with SMOTE and
-100 epochs.  That run is ``tests/test_published_shnn_reproduction.py``, opt-in
-because it needs the dataset (not redistributable) and days of simulation.
+up to 100 epochs.  That run is ``tests/test_published_shnn_reproduction.py``,
+opt-in because it needs the dataset (not redistributable) and about 2 hours of
+simulation; its measured result is in
+``docs/results/published-shnn-reproduction.md``.
 """
 
 from __future__ import annotations

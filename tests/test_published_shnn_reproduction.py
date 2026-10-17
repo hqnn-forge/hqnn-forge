@@ -15,8 +15,10 @@ record is the discrepancy, not a wider tolerance.
 
 Opt-in only
 -----------
-The run needs the Kaggle dataset (not redistributable) and days of state-vector
-simulation at ~2 s per 256-sample batch, so it is skipped unless
+The run needs the Kaggle dataset (not redistributable) and about 2 hours of
+state-vector simulation on a laptop CPU (measured 2026-10-16 on the default
+``auto`` backend, ~0.05 s per 256-sample batch; see
+``docs/results/published-shnn-reproduction.md``), so it is skipped unless
 ``HQNN_FORGE_REPRODUCE=1`` is set, skipped without the dataset, and marked
 ``reproducibility``, ``slow`` and ``may_skip`` (so the skip does not fail CI
 under ``HQNN_FORGE_FAIL_ON_SKIP=1``).  Run it deliberately with::
@@ -222,7 +224,9 @@ def test_recipe_runs_end_to_end() -> None:
 @pytest.mark.may_skip  # opt-in: skips in CI even under HQNN_FORGE_FAIL_ON_SKIP=1
 def test_published_mcc_is_reproduced() -> None:
     if os.environ.get(REPRODUCE_ENV) != "1":
-        pytest.skip(f"opt-in: set {REPRODUCE_ENV}=1 (days of simulation; see module docstring)")
+        pytest.skip(
+            f"opt-in: set {REPRODUCE_ENV}=1 (about 2 hours of simulation; see module docstring)"
+        )
     from hqnn_forge.data import DatasetNotFoundError, load_credit_card_fraud
 
     try:
