@@ -50,6 +50,7 @@ import numpy.typing as npt
 import hqnn_forge
 
 __all__: list[str] = [
+    "COMPARED_VERSIONS",
     "RECORDED_PACKAGES",
     "RECORD_FORMAT_VERSION",
     "compare_environment",

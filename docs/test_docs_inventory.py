@@ -68,6 +68,22 @@ def test_empty_all_is_explicit_and_imports_are_not_api(
     assert checker.missing(docs, site) == []
 
 
+def test_a_public_definition_left_out_of_all_fails(
+    fixture_site: tuple[Path, Path, Path],
+) -> None:
+    package, docs, site = fixture_site
+    (package / "sample.py").write_text(
+        "import os\nfrom math import pi\n__all__ = ['present']\n"
+        "LIMIT = 3\n_private = 1\ndef present(): pass\ndef forgotten(): pass\n"
+    )
+    (docs / "api/sample.md").write_text("::: hqnn_forge.sample\n")
+    write_inventory(site, "hqnn_forge.sample.present", "hqnn_forge.sample.forgotten")
+    assert checker.missing(docs, site) == [
+        "sample.md: hqnn_forge.sample.LIMIT is defined but not in __all__",
+        "sample.md: hqnn_forge.sample.forgotten is defined but not in __all__",
+    ]
+
+
 def test_a_public_module_without_a_page_still_fails(fixture_site: tuple[Path, Path, Path]) -> None:
     package, docs, site = fixture_site
     (package / "sample.py").write_text("__all__ = []\n")
@@ -128,19 +144,3 @@ def test_cli_returns_failure_and_prints_each_problem(
     write_inventory(site)
     assert checker.main() == 1
     assert capsys.readouterr().err == "::error::sample.md: hqnn_forge.sample has no __all__\n"
-
-
-def test_every_rendered_repository_module_declares_all() -> None:
-    root = SCRIPT.parents[2]
-    package = griffe.load("hqnn_forge", search_paths=[str(root)])
-    rendered = {
-        path
-        for page in (root / "docs/api").glob("*.md")
-        for path in checker.DIRECTIVE.findall(page.read_text())
-    }
-    missing = []
-    for path in sorted(rendered):
-        obj = package if path == "hqnn_forge" else package[path[len("hqnn_forge.") :]]
-        if obj.is_module and obj.exports is None:
-            missing.append(path)
-    assert missing == []

@@ -254,8 +254,8 @@ and cross-reference with Sphinx roles (`` :func:`gradient_variance` ``,
 them into links, so a reference to something that does not exist fails the build. Constants are
 documented with `#:` comments above the assignment. A new public module needs a page under
 `docs/api/` and an entry in the `nav` of `mkdocs.yml`; the workflow fails if a top-level
-module has no page, a rendered module has no explicit `__all__`, or an exported name
-has no inventory entry. Every rendered module must declare its public API in `__all__`;
+module has no page, a rendered module has no explicit `__all__` or defines a public name its
+`__all__` leaves out, or an exported name has no inventory entry. Every rendered module must declare its public API in `__all__`;
 imports that are implementation details do not belong in that list. Root-package exports are
 checked too, with only `hqnn_forge.__version__` explicitly exempt because it has no API page.
 
