@@ -259,8 +259,8 @@ def rydberg_hamiltonian(
         v = torch.triu(register.interaction_matrix(c6), diagonal=1).to(delta.device)
         diagonal = diagonal + ((bits @ v) * bits).sum(dim=-1)
 
-    h = torch.diag_embed(diagonal)
+    h = torch.diag_embed(diagonal.to(torch.complex128))
     # Drive: Ω_i/2 at (k, k XOR 2^(n-1-i)), the index with atom i's bit flipped.
     for i in range(n):
-        h[..., index, index ^ (1 << (n - 1 - i))] = omega[..., i, None] / 2
-    return h.to(torch.complex128)
+        h[..., index, index ^ (1 << (n - 1 - i))] = (omega[..., i, None] / 2).to(torch.complex128)
+    return h
