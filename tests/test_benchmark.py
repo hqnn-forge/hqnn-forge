@@ -310,14 +310,18 @@ class TestAcrossDatasets:
         *,
         n_seeds: int = 1,
     ) -> BenchmarkResult:
-        # Six folds per dataset. All folds/seeds initially have these MCCs;
-        # .125, -.25, .5 are binary-exact differences, avoiding round-off ties.
+        # Six folds per dataset, every fold with these mean MCCs; .125, -.25,
+        # .5 are binary-exact differences, avoiding round-off ties. With two
+        # seeds the models get opposite offsets, so any single seed's
+        # differences (-.0625, -.4375, .3125 or .3125, -.0625, .6875) rank
+        # differently from the seed-averaged ones.
+        offsets = {"hybrid": (-0.0625, 0.0625), "control": (0.125, -0.125)}
         scores = iter(
             score
-            for hybrid, control in pairs
+            for means in pairs
             for _fold in range(6)
-            for mean in (hybrid, control)
-            for score in ([mean] if n_seeds == 1 else [mean - 0.0625, mean + 0.0625])
+            for model, mean in zip(("hybrid", "control"), means, strict=True)
+            for score in ([mean] if n_seeds == 1 else [mean + o for o in offsets[model]])
         )
         monkeypatch.setattr(
             benchmark,
@@ -353,6 +357,7 @@ class TestAcrossDatasets:
         assert comparison["datasets"] == ("d0", "d1", "d2")
         assert comparison["models"] == ("hybrid", "control")
         assert comparison["n_datasets"] == comparison["n_pairs"] == 3
+        assert [row["mcc_mean"] for row in result.records] == [0.375, 0.25, 0.0, 0.25, 0.75, 0.25]
         # Differences .125, -.25, .5 have signed ranks +1, -2, +3.
         # W+ = 4; six of the eight sign assignments are at least as extreme.
         assert comparison["wilcoxon_statistic"] == 4.0
@@ -392,6 +397,29 @@ class TestAcrossDatasets:
             else:
                 # The undefined test occupies the third (unrejectable) slot.
                 assert row["wilcoxon_p_holm"] == 3 / 32
+
+    def test_round_off_between_means_is_a_tie(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Dataset d0 has the same three fold MCCs in reverse order, so its
+        # mean MCCs differ only by round-off; d1 and d2 favour the hybrid.
+        folds = {"d0": [(0.1, 0.3), (0.2, 0.2), (0.3, 0.1)], "d1": [(0.5, 0.25)] * 3}
+        folds["d2"] = folds["d1"]
+        scores = iter(score for name in folds for fold in folds[name] for score in fold)
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(next(scores), 0.5, 0.01, 1, 0.2, 0.1),
+        )
+        result = _run(
+            {name: _data(i) for i, name in enumerate(folds)}, n_splits=3, oversample=False
+        )
+        hybrid, control = result.records[:2]
+        assert hybrid["mcc_mean"] != control["mcc_mean"]  # the round-off is there
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["n_pairs"] == 2
+        assert comparison["wilcoxon_statistic"] == 3.0
+        assert comparison["wilcoxon_p"] == comparison["wilcoxon_min_p"] == 0.5
+        assert comparison["rank_biserial"] == 1.0
 
     def test_all_dataset_means_tied(self, monkeypatch: pytest.MonkeyPatch) -> None:
         result = self.scored(monkeypatch, [(0.25, 0.25), (0.5, 0.5)])
