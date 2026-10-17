@@ -423,7 +423,7 @@ def _evaluate_config(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         model = _build(model_name, hybrid, X.shape[1])
-        mcc = _fit_and_score(
+        return _fit_and_score(
             model,
             loss,
             X_fit,
@@ -438,7 +438,6 @@ def _evaluate_config(
             patience=settings["patience"],
             batch_seed=seed,
         ).mcc
-    return mcc
 
 
 def _tune(
@@ -712,7 +711,7 @@ def run_benchmark(
         seed_stds: dict[str, list[float]] = {m: [] for m in MODELS}
         briers: dict[str, list[float]] = {m: [] for m in MODELS}
         eces: dict[str, list[float]] = {m: [] for m in MODELS}
-        seconds: dict[str, float] = {m: 0.0 for m in MODELS}
+        seconds: dict[str, float] = dict.fromkeys(MODELS, 0.0)
         n_parameters: dict[str, int] = {}
         architecture: dict[str, str] = {}
 

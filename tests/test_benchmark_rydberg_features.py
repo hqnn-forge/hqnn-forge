@@ -16,15 +16,23 @@ What the numbers are checked against:
   measures of a ``--quick`` run;
 * a circuit written out gate by gate in PennyLane, for arm D;
 * hand computations, for the positive control's labels, the parameter counts
-  and the JSON mapping.
+  and the JSON mapping;
+* ``hashlib`` over files listed with ``os.walk``, for the code digest in the
+  feature cache's key (#522), and ``compare_environment`` for which entries
+  of the environment the key holds;
+* a matrix standardised by hand, scikit-learn's ``StandardScaler`` and the
+  standardisation of ``g`` for features ``½ + ε g``, for
+  ``standardise_features`` (#518).
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
 import math
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -37,11 +45,17 @@ import pytest
 import torch
 import torch.nn as nn
 
+import hqnn_forge
 from hqnn_forge.benchmark import _sample_configs, fingerprint
 from hqnn_forge.data import load_iranian_churn
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
-from hqnn_forge.experiment import environment
+from hqnn_forge.experiment import (
+    COMPARED_VERSIONS,
+    RECORDED_PACKAGES,
+    compare_environment,
+    environment,
+)
 from hqnn_forge.models import ClassicalBaseline, HybridBinaryClassifier, LinearClassifier
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
 from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
@@ -187,6 +201,64 @@ def quick(tmp_path_factory: pytest.TempPathFactory) -> Any:
 def _line(run: Any, arm: str, head: str) -> dict[str, Any]:
     (found,) = [r for r in run.lines if r["arm"] == arm and r["head"] == head]
     return dict(found)
+
+
+def _standardised_by_hand(raw: np.ndarray, fold: Any) -> np.ndarray:
+    """
+    ``raw`` (the fold's rows stacked: training with synthetic, validation,
+    test) with every column centred and divided by its mean and population
+    standard deviation over the real training rows.  ``smote`` puts those
+    first, in their order, so no synthetic, validation or test row enters.
+    """
+    assert fold.train_inputs.shape[0] == fold.train_idx.size + fold.n_synthetic
+    fitting = raw[: fold.train_idx.size]
+    return np.asarray((raw - fitting.mean(axis=0)) / fitting.std(axis=0))
+
+
+def _assert_scores_by_hand(
+    record: dict[str, Any], fold: Any, y: np.ndarray, features: np.ndarray, head: str
+) -> None:
+    """
+    MCC, PR-AUC, threshold and epochs of ``record``, from a head built and
+    trained here on ``features`` (the fold's rows stacked as in
+    :func:`_standardised_by_hand`) with the recorded hyperparameters and the
+    fold's seeds, through ``train_model`` and not through the script.
+    """
+    x = torch.from_numpy(features.astype(np.float32))
+    n_train, n_val = fold.train_inputs.shape[0], fold.val_idx.size
+    x_train, x_val, x_test = x.split([n_train, n_val, fold.test_idx.size])
+    seed = fold.seeds["init_seed"]
+    d = features.shape[1]
+    model: nn.Module = (
+        LinearClassifier(d, init_seed=seed)
+        if head == "linear"
+        else ClassicalBaseline(d, [QUICK.hidden], init_seed=seed)
+    )
+    settings = record["hyperparameters"]
+    history = train_model(
+        model,
+        nn.BCEWithLogitsLoss(),
+        torch.optim.Adam(model.parameters(), lr=settings["lr"]),
+        x_train,
+        torch.from_numpy(fold.train_labels.astype(np.float32)),
+        x_val,
+        torch.from_numpy(y[fold.val_idx].astype(np.float32)),
+        max_epochs=settings["max_epochs"],
+        batch_size=settings["batch_size"],
+        monitor="mcc",
+        patience=settings["patience"],
+        generator=torch.Generator().manual_seed(fold.seeds["batch_seed"]),
+    )
+    assert isinstance(model, LinearClassifier | ClassicalBaseline)
+    probability = model.predict_proba(x_test)
+    truth = y[fold.test_idx]
+    assert history.best_threshold is not None
+    assert record["threshold"] == pytest.approx(history.best_threshold, abs=1e-6)
+    prediction = (probability >= history.best_threshold).long()
+    assert record["mcc"] == pytest.approx(matthews_corrcoef(truth, prediction), abs=1e-9)
+    assert record["pr_auc"] == pytest.approx(pr_auc(truth, probability), abs=1e-6)
+    assert record["epochs"] == history.n_epochs
+    assert 0.0 <= record["pr_auc"] <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -840,6 +912,114 @@ class TestCommandLine:
         assert parser.description is None
         assert parser.parse_args(["--quick"]).quick is True
 
+    def test_every_parser_option_has_help(self) -> None:
+        """Every optional argument of _parser() must carry a non-empty help string (#526).
+
+        ``ArgumentDefaultsHelpFormatter`` only prints a default next to an option
+        that already has a ``help=`` string; without one, both the description and
+        the default are invisible to users running ``--help``.
+        """
+        parser = bench._parser()
+        missing = [
+            action.option_strings
+            for action in parser._actions
+            if action.option_strings  # skip the positional catch-all action
+            and action.help in (None, argparse.SUPPRESS, "")
+        ]
+        assert missing == [], f"Options without a help string: {missing}"
+
+    def test_quick_help_clarifies_overrides_and_effective_options(self) -> None:
+        """--quick help must document overrides and preserved options (#549)."""
+        parser = bench._parser()
+        # Inspect the help text belonging specifically to the --quick action,
+        # so assertions do not pass merely because options appear elsewhere in --help.
+        quick_action = next(a for a in parser._actions if "--quick" in a.option_strings)
+        assert isinstance(quick_action.help, str)
+        quick_help = quick_action.help
+
+        # Predefined QUICK smoke-test configuration
+        assert "QUICK" in quick_help
+        assert "smoke test" in quick_help
+
+        # Positive control
+        assert "positive control" in quick_help
+
+        # Other applicable command-line settings are overridden or ignored
+        assert "overrid" in quick_help.lower() or "ignor" in quick_help.lower()
+
+        # Options that remain effective are explicitly listed in --quick's help text
+        effective_options = [
+            "--out",
+            "--cache-dir",
+            "--no-cache",
+            "--seed",
+            "--max-separation-rows",
+            "--separation-seed",
+        ]
+        for opt in effective_options:
+            assert opt in quick_help
+
+    def test_quick_behavior_overrides_conflicting_options_and_preserves_effective_ones(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--quick must select positive-control and predefined QUICK settings (#549)."""
+        captured: dict[str, Any] = {}
+
+        def mock_run(
+            datasets: Any,
+            settings: Any,
+            out: Any,
+            *,
+            cache_dir: Any = None,
+        ) -> list[dict[str, Any]]:
+            captured["datasets"] = datasets
+            captured["settings"] = settings
+            captured["out"] = out
+            captured["cache_dir"] = cache_dir
+            return []
+
+        monkeypatch.setattr(bench, "run", mock_run)
+
+        out_path = tmp_path / "custom_out.jsonl"
+        cache_dir = tmp_path / "custom_cache"
+
+        bench.main(
+            [
+                "--quick",
+                "--n-atoms",
+                "6",
+                "--patience",
+                "5",
+                "--dataset",
+                "iranian-churn",
+                "--seed",
+                "7",
+                "--separation-seed",
+                "13",
+                "--out",
+                str(out_path),
+                "--cache-dir",
+                str(cache_dir),
+            ]
+        )
+
+        # Selected dataset must only be positive-control
+        assert list(captured["datasets"].keys()) == ["positive-control"]
+
+        # Settings must equal predefined QUICK with only preserved seed fields changed
+        expected_settings = _replace(QUICK, random_state=7, separation_seed=13)
+        assert captured["settings"] == expected_settings
+
+        # Conflicting options must not have been honored
+        assert captured["settings"].n_atoms == QUICK.n_atoms
+        assert captured["settings"].n_atoms != 6
+        assert captured["settings"].patience == QUICK.patience
+        assert captured["settings"].patience != 5
+
+        # Explicit out and cache_dir paths are preserved
+        assert captured["out"] == out_path
+        assert captured["cache_dir"] == cache_dir
+
 
 # ---------------------------------------------------------------------------
 # Inputs: fitted on the training rows, oversampled once
@@ -954,6 +1134,36 @@ class TestInputs:
 # ---------------------------------------------------------------------------
 
 
+def _sources(package: Path) -> list[Path]:
+    """Every ``*.py`` file below ``package``, found with ``os.walk``."""
+    return [
+        Path(directory) / name
+        for directory, _, names in os.walk(package)
+        for name in names
+        if name.endswith(".py")
+    ]
+
+
+def _code_by_hand() -> str:
+    """The code digest of the cache key: file names and content hashes, hashed."""
+    package = Path(hqnn_forge.__file__).parent
+    hashes = {
+        f"hqnn_forge/{p.relative_to(package).as_posix()}": hashlib.sha256(
+            p.read_bytes()
+        ).hexdigest()
+        for p in _sources(package)
+    }
+    script = ROOT / "examples" / "benchmark_rydberg_features.py"
+    hashes[script.name] = hashlib.sha256(script.read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+
+
+def _change_id(change: dict[str, Any]) -> str:
+    packages = change.get("packages", {})
+    names = [*(k for k in change if k != "packages"), *packages]
+    return "-".join(names) + ("-absent" if None in packages.values() else "")
+
+
 class TestCache:
     inputs = np.random.default_rng(8).uniform(-3, 3, size=(12, 4))
     labels = np.array([0, 1] * 6)
@@ -1036,15 +1246,304 @@ class TestCache:
         }
         assert cache.fetch(self.inputs, self.labels, rebuilt, compute).hit is True
 
-    def test_the_key_is_the_hash_of_the_fingerprint_and_the_config(self, tmp_path: Path) -> None:
+    def test_the_key_is_the_hash_of_the_data_the_config_the_versions_and_the_code(
+        self, tmp_path: Path
+    ) -> None:
+        """The key by hand: canonical JSON of the four parts, hashed."""
         config = {"config": _map_by_hand(4, 1.0, 0.5, 50).get_config()}
+        env = environment()
         text = json.dumps(
-            {"data": fingerprint(self.inputs, self.labels), "config": config}, sort_keys=True
+            {
+                "data": fingerprint(self.inputs, self.labels),
+                "config": config,
+                "environment": {
+                    "python": env["python"],
+                    "implementation": env["implementation"],
+                    "hqnn_forge": env["hqnn_forge"],
+                    "packages": env["packages"],
+                },
+                "code": _code_by_hand(),
+            },
+            sort_keys=True,
         )
         expected = hashlib.sha256(text.encode()).hexdigest()
         path = bench.FeatureCache(tmp_path).path(self.inputs, self.labels, config)
         assert path == tmp_path / f"{expected}.npz"
-        assert bench.cache_key(fingerprint(self.inputs, self.labels), config) == expected
+        assert (
+            bench.cache_key(fingerprint(self.inputs, self.labels), config, env, _code_by_hand())
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"hqnn_forge": "0.0.0+other"},
+            {"python": "3.0.0"},
+            {"implementation": "pypy"},
+            *({"packages": {name: "0.0.0+other"}} for name in RECORDED_PACKAGES),
+            {"packages": {"torch": None}},
+            {"code_sha256": "0" * 64},
+        ],
+        ids=_change_id,
+    )
+    def test_an_entry_written_under_another_version_or_other_code_is_a_miss(
+        self, tmp_path: Path, change: dict[str, Any]
+    ) -> None:
+        """
+        Each entry of the environment that ``compare_environment`` compares,
+        and the code digest: features stored under another value are not
+        served, and stay the entry of that other value.
+        """
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        env = environment()
+        other_env = {
+            **env,
+            **{k: v for k, v in change.items() if k not in ("packages", "code_sha256")},
+            "packages": {**env["packages"], **change.get("packages", {})},
+        }
+        other_code = change.get("code_sha256")
+        # the change is one a record's reader would be told about, or one of the code
+        assert bool(compare_environment(other_env)) is (other_code is None)
+
+        def other() -> Any:
+            return bench.FeatureCache(tmp_path, env=other_env, code_sha256=other_code)
+
+        marked = np.full((12, 4), 7.0)
+        assert other().fetch(self.inputs, self.labels, config, lambda x: marked).hit is False
+        here = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (here.hit, calls) == (False, [12])
+        np.testing.assert_array_equal(
+            here.features, _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs)
+        )
+        again = other().fetch(self.inputs, self.labels, config, compute)
+        assert (again.hit, calls) == (True, [12])
+        np.testing.assert_array_equal(again.features, marked)
+        assert len(list(tmp_path.glob("*.npz"))) == 2
+
+    def test_an_entry_under_the_key_without_versions_is_a_miss(self, tmp_path: Path) -> None:
+        """A cache directory filled before #522 (data and config only) is not read."""
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        text = json.dumps(
+            {"data": fingerprint(self.inputs, self.labels), "config": config}, sort_keys=True
+        )
+        old = tmp_path / f"{hashlib.sha256(text.encode()).hexdigest()}.npz"
+        np.savez(old, features=np.full((12, 4), 7.0), seconds=np.float64(1.0))
+        fetched = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (fetched.hit, calls) == (False, [12])
+        np.testing.assert_array_equal(
+            fetched.features, _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs)
+        )
+
+    def test_the_platform_is_not_in_the_key_and_a_hit_says_where_it_was_computed(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        ``compare_environment`` does not compare the platform string and the
+        key does not hold it: such a hit carries the environment of the entry.
+        """
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        env = environment()
+        elsewhere = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        assert compare_environment(elsewhere) == {}
+        first = bench.FeatureCache(tmp_path, env=elsewhere).fetch(
+            self.inputs, self.labels, config, compute
+        )
+        assert (first.hit, first.environment) == (False, elsewhere)
+        second = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, config, compute)
+        assert (second.hit, calls) == (True, [12])
+        assert second.environment == elsewhere != env
+        # a miss, and a request without a directory, carry the running environment
+        other_config = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
+        third = bench.FeatureCache(tmp_path).fetch(self.inputs, self.labels, other_config, compute)
+        assert (third.hit, third.environment) == (False, env)
+        fourth = bench.FeatureCache(None).fetch(self.inputs, self.labels, config, compute)
+        assert (fourth.hit, fourth.environment) == (False, env)
+
+    def test_the_key_holds_exactly_what_compare_environment_compares(self) -> None:
+        """Each entry of ``environment()`` is in the key if and only if a change of it is a difference."""
+        env = environment()
+        assert set(bench.key_environment(env)) == {*COMPARED_VERSIONS, "packages"}
+        for name in sorted(set(env) - {"packages"}):
+            changed = {**env, name: "other"}
+            in_key = bench.key_environment(changed) != bench.key_environment(env)
+            assert in_key is bool(compare_environment(changed)), name
+
+    def test_the_code_digest_by_hand(self, tmp_path: Path) -> None:
+        """Every ``*.py`` below the package and the script, by name and content."""
+        package = tmp_path / "pkg"
+        (package / "sub").mkdir(parents=True)
+        (package / "a.py").write_bytes(b"A = 1\n")
+        (package / "sub" / "b.py").write_bytes(b"B = 2\n")
+        (package / "notes.txt").write_bytes(b"not code\n")
+        script = tmp_path / "elsewhere" / "run.py"
+        script.parent.mkdir()
+        script.write_bytes(b"print(1)\n")
+
+        def digest() -> str:
+            return str(bench.code_fingerprint(bench.code_files(package, script)))
+
+        assert bench.code_files(package, script) == {
+            "pkg/a.py": package / "a.py",
+            "pkg/sub/b.py": package / "sub" / "b.py",
+            "run.py": script,
+        }
+        by_hand = {
+            "pkg/a.py": hashlib.sha256(b"A = 1\n").hexdigest(),
+            "pkg/sub/b.py": hashlib.sha256(b"B = 2\n").hexdigest(),
+            "run.py": hashlib.sha256(b"print(1)\n").hexdigest(),
+        }
+        first = digest()
+        assert first == hashlib.sha256(json.dumps(by_hand, sort_keys=True).encode()).hexdigest()
+        # what is not Python source does not enter
+        (package / "notes.txt").write_bytes(b"other notes\n")
+        assert digest() == first
+        # one byte of a module, one byte of the script, a new module, a module that moves
+        seen = {first}
+        (package / "sub" / "b.py").write_bytes(b"B = 3\n")
+        seen.add(digest())
+        script.write_bytes(b"print(2)\n")
+        seen.add(digest())
+        (package / "c.py").write_bytes(b"")
+        seen.add(digest())
+        (package / "a.py").rename(package / "sub" / "a.py")
+        seen.add(digest())
+        assert len(seen) == 5
+        # bytecode Python wrote beside the source is not a module of its own
+        (package / "__pycache__").mkdir()
+        (package / "__pycache__" / "c.cpython-312.pyc").write_bytes(b"")
+        assert digest() in seen
+
+    @pytest.mark.parametrize("name", ["sub/d.pyc", "e.cpython-312-x86_64-linux-gnu.so", "f.pyd"])
+    def test_a_module_that_is_not_source_is_refused(self, tmp_path: Path, name: str) -> None:
+        """Its code would not enter the digest, so a change of it would be a hit."""
+        package = tmp_path / "pkg"
+        (package / "sub").mkdir(parents=True)
+        (package / "a.py").write_bytes(b"A = 1\n")
+        (package / name).write_bytes(b"")
+        with pytest.raises(RuntimeError, match="not Python source.*--no-cache"):
+            bench.code_files(package, tmp_path / "run.py")
+
+    def test_the_code_digest_covers_the_package_and_the_script(self) -> None:
+        """The files listed another way, among them the modules the features come from."""
+        package = Path(hqnn_forge.__file__).parent
+        files = bench.code_files()
+        assert files == {
+            **{f"hqnn_forge/{p.relative_to(package).as_posix()}": p for p in _sources(package)},
+            "benchmark_rydberg_features.py": Path(str(bench.__file__)),
+        }
+        hashed = {p.resolve() for p in files.values()}
+        for obj in (RydbergFeatureMap, bench.QuantumEncodingLayer, PCANormalizer, bench):
+            module = obj if isinstance(obj, ModuleType) else sys.modules[obj.__module__]
+            assert module.__file__ is not None
+            assert Path(module.__file__).resolve() in hashed, module.__name__
+        # every module of the package this process has imported
+        loaded = {
+            Path(str(m.__file__)).resolve()
+            for name, m in list(sys.modules.items())
+            if name.split(".")[0] == "hqnn_forge" and getattr(m, "__file__", None)
+        }
+        assert len(loaded) > 20 and loaded <= hashed
+        assert bench.code_fingerprint() == bench.code_fingerprint(files) == _code_by_hand()
+        assert bench.CODE_SHA256 == _code_by_hand()
+
+    def test_an_edit_after_the_import_does_not_rename_the_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The digest in the key is the one read when the script was imported:
+        a file that changes before the cache is built (while the datasets
+        load) is not the code this process computes with, and its digest
+        would file the features of the old code under the name of the new.
+        """
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.py").write_bytes(b"MARK = 1\n")
+        script = ROOT / "examples" / "benchmark_rydberg_features.py"
+        by_hand = {
+            "hqnn_forge/__init__.py": hashlib.sha256(b"MARK = 1\n").hexdigest(),
+            script.name: hashlib.sha256(script.read_bytes()).hexdigest(),
+        }
+        at_import = hashlib.sha256(json.dumps(by_hand, sort_keys=True).encode()).hexdigest()
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        fresh = _script()
+        assert fresh.CODE_SHA256 == at_import
+
+        (package / "__init__.py").write_bytes(b"MARK = 2\n")
+        assert fresh.code_fingerprint() != at_import
+        cache = fresh.FeatureCache(tmp_path / "cache")
+        assert cache.code_sha256 == at_import
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        key = fresh.cache_key(
+            fingerprint(self.inputs, self.labels), config, environment(), at_import
+        )
+        assert cache.path(self.inputs, self.labels, config) == tmp_path / "cache" / f"{key}.npz"
+
+    def test_a_package_without_source_files_is_refused_unless_nothing_is_stored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Compiled files only: no digest, so no key; without a directory it still runs."""
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.pyc").write_bytes(b"")
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.pyc"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        sourceless = _script()  # imported from such a package: the import itself still works
+        assert sourceless.CODE_SHA256 is None
+        with pytest.raises(RuntimeError, match="--no-cache"):
+            sourceless.FeatureCache(tmp_path / "cache")
+        assert not (tmp_path / "cache").exists()
+        compute, calls = self._counting()
+        fetched = sourceless.FeatureCache(None).fetch(self.inputs, self.labels, {}, compute)
+        assert (fetched.hit, calls) == (False, [12])
+
+    def test_a_digest_that_could_not_be_read_at_the_import_is_not_read_later(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        No digest when the script was imported, files that can be read when
+        the cache is built: their digest is of the files as they are then,
+        not of the code the process has loaded, so the directory is refused
+        instead of being filled under it.
+        """
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+        late = _script()  # no __init__.py yet: nothing to fingerprint
+        assert late.CODE_SHA256 is None
+
+        (package / "__init__.py").write_bytes(b"MARK = 2\n")
+        assert len(late.code_fingerprint()) == 64  # readable now
+        with pytest.raises(RuntimeError, match="when the script was imported.*--no-cache"):
+            late.FeatureCache(tmp_path / "cache")
+        assert not (tmp_path / "cache").exists()
+        assert late.FeatureCache(tmp_path / "cache", code_sha256="c" * 64).code_sha256 == "c" * 64
+        assert late.FeatureCache(None).path(self.inputs, self.labels, {}) is None
+
+    def test_files_that_cannot_be_read_are_refused_with_a_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable module: no digest at the import, and the error names ``--no-cache``."""
+        package = tmp_path / "hqnn_forge"
+        package.mkdir()
+        (package / "__init__.py").write_bytes(b"MARK = 1\n")
+        monkeypatch.setattr(hqnn_forge, "__file__", str(package / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "benchmark_rydberg_features", bench)  # put back after
+
+        def unreadable(path: Path) -> bytes:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(Path, "read_bytes", unreadable)
+        locked = _script()
+        assert locked.CODE_SHA256 is None
+        with pytest.raises(RuntimeError, match="cannot be read.*--no-cache") as raised:
+            locked.FeatureCache(tmp_path / "cache")
+        assert isinstance(raised.value.__cause__, PermissionError)
+        assert not (tmp_path / "cache").exists()
 
     def test_without_a_directory_every_request_computes(self) -> None:
         compute, calls = self._counting()
@@ -1075,6 +1574,419 @@ class TestCache:
                 before["threshold"],
             )
             assert after["separation"] == before["separation"]
+
+    def test_a_run_under_another_version_computes_and_one_elsewhere_records_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Through ``run``: after a change of a package version no line is a
+        hit; after a change of the platform string alone every line is, and
+        carries the environment its features were computed in.
+        """
+        settings = _replace(QUICK, arms=FAST, n_trials=0)
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        env = environment()
+        first = bench.run(data, settings, tmp_path / "a.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 2  # arms A and B, no tuning folds
+        for record in first:
+            assert record["feature_cache_hit"] is False
+            assert record["feature_environment"] == (None if record["arm"] == "C" else env)
+
+        upgraded = {**env, "packages": {**env["packages"], "torch": "0.0.0+other"}}
+        monkeypatch.setattr(bench, "environment", lambda: upgraded)
+        second = bench.run(data, settings, tmp_path / "b.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 4
+        for record in second:
+            assert record["feature_cache_hit"] is False
+            assert record["environment"] == upgraded
+            assert record["feature_environment"] == (None if record["arm"] == "C" else upgraded)
+
+        moved = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        monkeypatch.setattr(bench, "environment", lambda: moved)
+        third = bench.run(data, settings, tmp_path / "c.jsonl", cache_dir=cache)
+        assert len(list(cache.iterdir())) == 4
+        for record, line in zip(third, bench.read_records(tmp_path / "c.jsonl"), strict=True):
+            assert record["feature_cache_hit"] is (record["arm"] != "C")
+            assert record["environment"] == moved
+            assert record["feature_environment"] == (None if record["arm"] == "C" else env)
+            assert line["feature_environment"] == record["feature_environment"]
+        for before, after in zip(first, third, strict=True):
+            assert (after["mcc"], after["pr_auc"]) == (before["mcc"], before["pr_auc"])
+
+    def test_the_tuning_folds_record_their_hits_and_environments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The features of the tuning folds come through the cache too: a hit
+        computed elsewhere is recorded per tuning fold in ``tuning``, not
+        only for the fold the head is scored on.
+        """
+        settings = _replace(QUICK, arms=("A", "C"), n_trials=2, search_space={"lr": (0.01, 0.1)})
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        env = environment()
+        moved = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        monkeypatch.setattr(bench, "environment", lambda: moved)
+        first = bench.run(data, settings, tmp_path / "a.jsonl", cache_dir=cache)
+        monkeypatch.setattr(bench, "environment", lambda: env)
+        second = bench.run(data, settings, tmp_path / "b.jsonl", cache_dir=cache)
+        assert first and second
+        for records, hit, where in ((first, False, moved), (second, True, env)):
+            for record in records:
+                fixed = record["arm"] != "C"
+                tuning = record["tuning"]
+                assert tuning["feature_cache_hits"] == [hit and fixed] * settings.inner_folds
+                assert tuning["feature_environments"] == (
+                    [moved if fixed else None] * settings.inner_folds
+                )
+                assert record["environment"] == where
+        for line, record in zip(bench.read_records(tmp_path / "b.jsonl"), second, strict=True):
+            assert line["tuning"] == record["tuning"]
+
+
+# ---------------------------------------------------------------------------
+# Standardising a feature matrix (#518)
+# ---------------------------------------------------------------------------
+
+
+def _collapsed(epsilon: float, n_synthetic: int = 8) -> tuple[Any, np.ndarray, np.ndarray]:
+    """
+    A split of 200 rows with features ``½ + ε g`` and the rows a fit may see.
+
+    ``g`` has four columns of unit normal noise, shifted by ``±0.8`` with
+    the label in the first two, so a head can learn it.  Blocks: 120
+    training rows whose last ``n_synthetic`` count as synthetic, 40
+    validation rows, 40 test rows.
+    """
+    rng = np.random.default_rng(518)
+    labels = (np.arange(200) % 2).astype(np.int64)
+    g = rng.standard_normal((200, 4))
+    g[:, :2] += 0.8 * (2.0 * labels[:, None] - 1.0)
+    split = bench.Split(
+        inputs=g, labels=labels, n_train=120, n_synthetic=n_synthetic, n_val=40, n_test=40
+    )
+    return split, 0.5 + epsilon * g, np.arange(120 - n_synthetic)
+
+
+class TestStandardiseFeatures:
+    def test_a_matrix_by_hand(self) -> None:
+        # Column 0 on the fitting rows: 1, 2, 3, so μ = 2 and σ² = (1 + 0 + 1)/3.
+        # Column 1 is constant there and is only centred.
+        features = np.array([[1.0, 0.5], [2.0, 0.5], [3.0, 0.5], [5.0, 0.7]])
+        result = bench.standardise_features(features, np.array([0, 1, 2]))
+        s = math.sqrt(2.0 / 3.0)
+        expected = np.array([[-1 / s, 0.0], [0.0, 0.0], [1 / s, 0.0], [3 / s, 0.2]])
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-15)
+        assert result.dtype == np.float64
+
+    def test_it_agrees_with_scikit_learn_fitted_on_the_fitting_rows(self) -> None:
+        from sklearn.preprocessing import StandardScaler
+
+        _, features, fit_rows = _collapsed(0.01)
+        expected = StandardScaler().fit(features[fit_rows]).transform(features)
+        result = bench.standardise_features(features, fit_rows)
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-11)
+        # On the fitting rows every column then has mean 0 and variance 1 (1/n).
+        np.testing.assert_allclose(result[fit_rows].mean(axis=0), 0.0, atol=1e-11)
+        np.testing.assert_allclose(result[fit_rows].std(axis=0), 1.0, atol=1e-11)
+
+    def test_rows_outside_the_fit_change_no_other_row(self) -> None:
+        split, features, fit_rows = _collapsed(0.01)
+        before = bench.standardise_features(features, fit_rows)
+        # Synthetic, validation and test rows: none of them is a fitting row.
+        outside = np.setdiff1d(np.arange(features.shape[0]), fit_rows)
+        assert outside[0] == split.n_train - split.n_synthetic
+        changed = features.copy()
+        changed[outside] = 0.5 + 7.0 * (changed[outside] - 0.5)
+        after = bench.standardise_features(changed, fit_rows)
+        np.testing.assert_array_equal(after[fit_rows], before[fit_rows])
+        mean, std = features[fit_rows].mean(axis=0), features[fit_rows].std(axis=0)
+        np.testing.assert_allclose(after[outside], (changed[outside] - mean) / std, rtol=1e-12)
+        assert np.abs(after[outside] - before[outside]).max() > 1.0
+        # A fitting row does enter: the same change there moves every row.
+        changed = features.copy()
+        changed[fit_rows[:20]] = 0.5 + 7.0 * (changed[fit_rows[:20]] - 0.5)
+        moved = bench.standardise_features(changed, fit_rows)
+        assert np.abs(moved[outside] - before[outside]).max() > 0.1
+
+    @pytest.mark.parametrize("epsilon", [1e-1, 1e-3, 1e-6])
+    def test_the_result_does_not_depend_on_offset_and_scale(self, epsilon: float) -> None:
+        # ½ + ε g has μ = ½ + ε μ_g and σ = ε σ_g, so its standardisation is that of g.
+        split, features, fit_rows = _collapsed(epsilon)
+        g = split.inputs
+        expected = (g - g[fit_rows].mean(axis=0)) / g[fit_rows].std(axis=0)
+        result = bench.standardise_features(features, fit_rows)
+        # ½ + ε g is rounded to 1.1e-16, which is 1.1e-16/(ε σ_g) after the division.
+        np.testing.assert_allclose(result, expected, rtol=0, atol=4 * 1.1e-16 / epsilon + 1e-13)
+        # A negative factor only flips the sign.
+        np.testing.assert_allclose(
+            bench.standardise_features(0.5 - epsilon * g, fit_rows),
+            -expected,
+            rtol=0,
+            atol=4 * 1.1e-16 / epsilon + 1e-13,
+        )
+
+    def test_a_constant_column_is_only_centred(self) -> None:
+        # σ = 0 on the fitting rows: no division by zero, the column becomes F − μ.
+        features = np.array([[0.5, 0.0], [0.5, 1.0], [0.5, 2.0], [0.75, 3.0], [0.25, 4.0]])
+        result = bench.standardise_features(features, np.array([0, 1, 2]))
+        assert np.isfinite(result).all()
+        np.testing.assert_array_equal(result[:, 0], [0.0, 0.0, 0.0, 0.25, -0.25])
+        np.testing.assert_allclose(result[:, 1], (features[:, 1] - 1.0) / math.sqrt(2 / 3))
+
+    def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
+        """
+        ½ and ½ ± one unit in the last place (2⁻⁵³): a computed variance of
+        about 8e-33, below the rounding bound ``(n ε |μ|)² ≈ 2.8e-28`` for
+        150 rows, so the column is only centred, as scikit-learn's
+        ``StandardScaler`` treats it; divided by its σ it would be ±1.2.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.default_rng(0)
+        ulp = 0.5 + rng.integers(-1, 2, size=(200, 1)) * 2.0**-53
+        spread = 0.5 + 1e-6 * rng.standard_normal((200, 1))  # small, far above rounding
+        features = np.hstack([ulp, spread])
+        rows = np.arange(150)
+        result = bench.standardise_features(features, rows)
+        np.testing.assert_allclose(result[:, 0], ulp[:, 0] - ulp[rows, 0].mean(), atol=0)
+        assert np.abs(result[:, 0]).max() < 2e-16
+        assert np.abs(ulp[:, 0] - ulp[rows, 0].mean()).max() / ulp[rows, 0].std() > 1.0
+        np.testing.assert_allclose(result[rows, 1].std(), 1.0, rtol=1e-9)
+        expected = StandardScaler().fit(features[rows]).transform(features)
+        np.testing.assert_allclose(result, expected, rtol=0, atol=1e-9)
+
+    @pytest.mark.parametrize(
+        ("features", "rows", "message"),
+        [
+            (np.zeros(4), np.array([0, 1]), "features must have shape"),
+            (np.zeros((4, 2)), np.array([], dtype=np.intp), "fit_rows must name at least one row"),
+            (
+                np.array([[0.0, 1.0], [np.nan, 2.0], [1.0, 3.0]]),
+                np.array([0, 1]),
+                "not finite on the fitting rows",
+            ),
+        ],
+    )
+    def test_what_is_refused(self, features: np.ndarray, rows: np.ndarray, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            bench.standardise_features(features, rows)
+
+    @pytest.mark.parametrize("head", ["linear", "mlp"])
+    def test_scores_on_standardised_features_do_not_depend_on_epsilon(self, head: str) -> None:
+        settings = bench.Settings()
+        config = {"lr": 0.05, "max_epochs": 30, "batch_size": 32, "patience": None}
+
+        def score(epsilon: float, *, standardise: bool) -> Any:
+            split, features, fit_rows = _collapsed(epsilon)
+            if standardise:
+                features = bench.standardise_features(features, fit_rows)
+            model = bench.build_model(head, 4, settings, init_seed=3)
+            return bench.fit_and_score(model, features, split, config, loss="bce", batch_seed=5)
+
+        reference = score(1.0, standardise=True)
+        # The task is learnable, so equal scores are not equal failures.
+        assert reference.mcc > 0.5
+        assert reference.pr_auc > 0.8
+        for epsilon in (1e-2, 1e-4, 1e-6):
+            fit = score(epsilon, standardise=True)
+            assert fit.mcc == reference.mcc
+            assert fit.epochs == reference.epochs
+            assert fit.pr_auc == pytest.approx(reference.pr_auc, abs=1e-6)
+            assert fit.threshold == pytest.approx(reference.threshold, abs=1e-4)
+        # Without the step the same data at another ε is another training problem:
+        # the head starts from the same weights but its logits are ε times as wide.
+        raw = score(1.0, standardise=False)
+        small = score(1e-4, standardise=False)
+        assert small.pr_auc < raw.pr_auc - 0.05
+
+
+def _collapsed_representation(epsilon: float) -> Any:
+    """A fixed map with features ``½ + ε tanh(x)``: the shape of a collapse, at any ε."""
+
+    def compute(inputs: np.ndarray) -> np.ndarray:
+        return np.asarray(0.5 + epsilon * np.tanh(inputs))
+
+    return bench.Representation(
+        arm="A",
+        kind="collapsed",
+        heads=bench.HEADS,
+        config={"feature_map": "collapsed", "epsilon": epsilon},
+        compute=compute,
+    )
+
+
+class TestStandardisationInARun:
+    """Step 4 of the script's docstring through ``run_dataset`` (#518)."""
+
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, epsilon: float, standardise: bool
+    ) -> tuple[list[dict[str, Any]], Any, np.ndarray]:
+        settings = _replace(QUICK, arms=("A",), standardise=standardise)
+        monkeypatch.setattr(
+            bench, "representations", lambda s: [_collapsed_representation(epsilon)]
+        )
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        records = list(
+            bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None))
+        )
+        return records, _fold_by_hand(X, y, settings, 0), y
+
+    def test_scores_do_not_depend_on_epsilon_and_are_those_of_a_head_trained_by_hand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Features ``½ + ε tanh(x)``: every line, tuning included, is the same
+        for ε of 1, 1e-3 and 1e-6, and each is the score of a head trained by
+        hand on ``tanh(x)`` standardised with numpy on the real training rows
+        of the fold rebuilt by hand.  The separation measures stay on the
+        features the map returns: their distances scale with ε, the Fisher
+        ratio does not, and both are those of the library on those features.
+        """
+        lines = {}
+        for epsilon in (1.0, 1e-3, 1e-6):
+            records, fold, y = self._run(monkeypatch, epsilon, standardise=True)
+            stacked = np.concatenate(
+                [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+            )
+            # The standardisation of ½ + ε g is that of g, so the head is trained on g.
+            expected = _standardised_by_hand(np.tanh(stacked), fold)
+            real = np.concatenate([fold.train_idx, fold.val_idx])
+            separation = separation_measures(
+                0.5 + epsilon * np.tanh(fold.inputs[real]), y[real]
+            ).to_dict()
+            for record in records:
+                assert record["settings"]["standardise"] is True
+                assert record["tuning"] is not None
+                _assert_scores_by_hand(record, fold, y, expected, record["head"])
+                assert record["separation"]["train"] == pytest.approx(separation, rel=1e-6)
+            lines[epsilon] = {r["head"]: r for r in records}
+        assert set(lines[1.0]) == {"linear", "mlp"}
+        assert lines[1.0]["linear"]["mcc"] > 0.0
+        for epsilon in (1e-3, 1e-6):
+            for head, reference in lines[1.0].items():
+                line = lines[epsilon][head]
+                assert line["mcc"] == reference["mcc"]
+                assert line["epochs"] == reference["epochs"]
+                assert line["hyperparameters"] == reference["hyperparameters"]
+                assert line["tuning"]["scores"] == reference["tuning"]["scores"]
+                assert line["pr_auc"] == pytest.approx(reference["pr_auc"], abs=1e-6)
+                assert line["threshold"] == pytest.approx(reference["threshold"], abs=1e-4)
+                distance = line["separation"]["train"]["mean_between_distance"]
+                assert distance == pytest.approx(
+                    epsilon * reference["separation"]["train"]["mean_between_distance"],
+                    rel=1e-6,
+                )
+                assert line["separation"]["train"]["fisher_ratio"] == pytest.approx(
+                    reference["separation"]["train"]["fisher_ratio"], rel=1e-6
+                )
+
+    def test_without_standardisation_the_head_sees_the_features_as_returned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``standardise=False``: the scores of a head trained by hand on ``½ + ε tanh(x)``."""
+        scores = {}
+        for epsilon in (1.0, 1e-4):
+            records, fold, y = self._run(monkeypatch, epsilon, standardise=False)
+            stacked = np.concatenate(
+                [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+            )
+            for record in records:
+                assert record["settings"]["standardise"] is False
+                _assert_scores_by_hand(
+                    record, fold, y, 0.5 + epsilon * np.tanh(stacked), record["head"]
+                )
+            scores[epsilon] = [
+                (r["pr_auc"], r["threshold"], r["tuning"]["scores"]) for r in records
+            ]
+        assert scores[1e-4] != scores[1.0]
+
+    def test_statistics_are_those_of_the_real_training_rows_of_every_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Each call fits on the first rows of its split's training block, as
+        many as the split has real training rows (counted here from the
+        folds rebuilt by hand): no synthetic, validation or test row.  Arm C
+        is standardised too; ``D-hybrid`` never is.
+        """
+        calls: list[tuple[int, np.ndarray]] = []
+        original = bench.standardise_features
+
+        def spy(features: Any, fit_rows: np.ndarray) -> Any:
+            calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
+            return original(features, fit_rows)
+
+        monkeypatch.setattr(bench, "standardise_features", spy)
+        settings = _replace(QUICK, arms=("A", "C"))
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+        fold = _fold_by_hand(X, y, settings, 0)
+        n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
+        inner = stratified_kfold(
+            y[fold.train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
+        )
+        expected = [(n_outer, fold.train_idx.size)]
+        for fit, held_out in inner:
+            n_synthetic = len(smote(np.zeros((fit.size, 1)), y[fold.train_part][fit]).sources)
+            expected.append((fit.size + n_synthetic + held_out.size, fit.size))
+        assert [(n, rows.size) for n, rows in calls] == expected * 2  # arm A, then arm C
+        for _, rows in calls:
+            np.testing.assert_array_equal(rows, np.arange(rows.size))
+
+        calls.clear()
+        settings = _replace(QUICK, arms=("D",), n_trials=0, max_epochs=1)
+        list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+        assert [(n, rows.size) for n, rows in calls] == [(n_outer, fold.train_idx.size)]
+
+    def test_the_cache_holds_the_features_as_returned_and_serves_either_setting(
+        self, tmp_path: Path
+    ) -> None:
+        """A run without the step reads every entry of a run with it, and scores otherwise."""
+        settings = _replace(QUICK, arms=("A", "B"), n_trials=0)
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        cache = tmp_path / "cache"
+        on = bench.run(data, settings, tmp_path / "on.jsonl", cache_dir=cache)
+        stored = sorted(p.name for p in cache.iterdir())
+        off = bench.run(
+            data, _replace(settings, standardise=False), tmp_path / "off.jsonl", cache_dir=cache
+        )
+        assert sorted(p.name for p in cache.iterdir()) == stored
+        assert not any(r["feature_cache_hit"] for r in on)
+        assert all(r["feature_cache_hit"] for r in off)
+        for a, b in zip(on, off, strict=True):
+            assert (a["settings"]["standardise"], b["settings"]["standardise"]) == (True, False)
+            assert a["separation"] == b["separation"]
+        assert [(r["pr_auc"], r["threshold"]) for r in on] != [
+            (r["pr_auc"], r["threshold"]) for r in off
+        ]
+
+    def test_the_command_line_switches_it_and_defaults_to_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert bench.Settings().standardise is True
+        assert QUICK.standardise is True
+        seen: list[Any] = []
+
+        def run(datasets: Any, settings: Any, *args: Any, **kwargs: Any) -> list[Any]:
+            seen.append(settings)
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        out = str(tmp_path / "out.jsonl")
+        for flags, expected in (
+            ([], True),
+            (["--no-standardise"], False),
+            (["--standardise"], True),
+        ):
+            bench.main([*flags, "--samples", "40", "--out", out, "--no-cache"])
+            assert seen[-1].standardise is expected
+            assert seen[-1].as_dict()["standardise"] is expected
+            # --quick replaces the settings by QUICK but keeps this switch.
+            bench.main(["--quick", *flags, "--out", out, "--no-cache"])
+            assert seen[-1].standardise is expected
+            assert seen[-1].n_atoms == QUICK.n_atoms
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +2386,7 @@ FIELDS = {
     "epochs",
     "feature_seconds",
     "feature_cache_hit",
+    "feature_environment",
     "train_seconds",
     "tuning_seconds",
     "separation",
@@ -1534,6 +2447,10 @@ class TestQuick:
             assert record["n_positives"] == int(quick.y.sum())
             assert record["n_raw_features"] == 15
             assert record["environment"] == environment()
+            # computed in this run, in this environment; arms without a fixed map have none
+            assert record["feature_environment"] == (
+                environment() if record["arm"] in ("A", "B", "D") else None
+            )
             assert record["settings"] == json.loads(json.dumps(QUICK.as_dict()))
             assert record["measurement"] == "exact"
             assert record["shots"] is None
@@ -1636,9 +2553,10 @@ class TestQuick:
         )
 
     @pytest.mark.parametrize("arm", ["A", "B", "C", "D", "D-hybrid"])
-    def test_separation_measures_of_the_matrix_the_head_receives(
+    def test_separation_measures_of_the_features_the_map_returns(
         self, quick: Any, arm: str
     ) -> None:
+        """On the unstandardised features (#518), although the heads see them standardised."""
         train, test, real = self._features(quick, arm)
         expected = {
             "train": separation_measures(train, quick.y[real]).to_dict(),
@@ -1681,9 +2599,12 @@ class TestQuick:
         MCC, PR-AUC, threshold and epochs of a line, from a model built and
         trained here with the recorded hyperparameters on the fold rebuilt by
         hand.  For arm C with the linear head this is the logistic regression.
+        The features are standardised by hand with the mean and population
+        standard deviation of the real training rows (#518).
         """
         fold = quick.fold
         record = _line(quick, arm, head)
+        assert record["settings"]["standardise"] is True
 
         # One matrix for the fold's rows, as the script evolves them: a batch
         # of another size may round differently in the last digit (#509).
@@ -1691,47 +2612,14 @@ class TestQuick:
             [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
         )
         if arm == "C":
-            features = torch.from_numpy(stacked.astype(np.float32))
+            raw = stacked
         elif arm == "D":
             circuit_seed = _draw(np.random.SeedSequence([QUICK.random_state, 1 << 16]), 3)[2]
-            features = torch.from_numpy(_circuit_by_hand(stacked, circuit_seed)).to(torch.float32)
+            raw = _circuit_by_hand(stacked, circuit_seed)
         else:
             fmap = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A")
-            features = fmap.transform(stacked).to(torch.float32)
-        n_train, n_val = fold.train_inputs.shape[0], fold.val_idx.size
-        x_train, x_val, x_test = features.split([n_train, n_val, fold.test_idx.size])
-
-        seed = fold.seeds["init_seed"]
-        model: nn.Module = (
-            LinearClassifier(4, init_seed=seed)
-            if head == "linear"
-            else ClassicalBaseline(4, [QUICK.hidden], init_seed=seed)
-        )
-        settings = record["hyperparameters"]
-        history = train_model(
-            model,
-            nn.BCEWithLogitsLoss(),
-            torch.optim.Adam(model.parameters(), lr=settings["lr"]),
-            x_train,
-            torch.from_numpy(fold.train_labels.astype(np.float32)),
-            x_val,
-            torch.from_numpy(quick.y[fold.val_idx].astype(np.float32)),
-            max_epochs=settings["max_epochs"],
-            batch_size=settings["batch_size"],
-            monitor="mcc",
-            patience=settings["patience"],
-            generator=torch.Generator().manual_seed(fold.seeds["batch_seed"]),
-        )
-        assert isinstance(model, LinearClassifier | ClassicalBaseline)
-        probability = model.predict_proba(x_test)
-        truth = quick.y[fold.test_idx]
-        assert history.best_threshold is not None
-        assert record["threshold"] == pytest.approx(history.best_threshold, abs=1e-6)
-        prediction = (probability >= history.best_threshold).long()
-        assert record["mcc"] == pytest.approx(matthews_corrcoef(truth, prediction), abs=1e-9)
-        assert record["pr_auc"] == pytest.approx(pr_auc(truth, probability), abs=1e-6)
-        assert record["epochs"] == history.n_epochs
-        assert 0.0 <= record["pr_auc"] <= 1.0
+            raw = fmap.transform(stacked).numpy()
+        _assert_scores_by_hand(record, fold, quick.y, _standardised_by_hand(raw, fold), head)
 
     def test_records_returned_are_the_lines_written(self, quick: Any) -> None:
         assert len(quick.records) == len(quick.lines)

@@ -116,7 +116,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from hqnn_forge.utils.rng import rng_state, set_rng_state
+from hqnn_forge.utils.rng import device_generator, rng_state, set_rng_state
 
 __all__ = ["SPSA", "device_generators"]
 
@@ -152,8 +152,8 @@ def device_generators(model: nn.Module) -> list[np.random.Generator]:
             getattr(qlayer, "qnode", None),
             getattr(module, "_training_noise_qnode", None),
         ):
-            rng = getattr(getattr(qnode, "device", None), "_rng", None)
-            if isinstance(rng, np.random.Generator):
+            rng = device_generator(getattr(qnode, "device", None))
+            if rng is not None:
                 found.setdefault(id(rng), rng)
     return list(found.values())
 

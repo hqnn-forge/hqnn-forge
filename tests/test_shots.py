@@ -11,6 +11,7 @@ errors, and the variance against the binomial ``(1 − ⟨Z⟩²) / shots``.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,10 @@ from typing import Any
 import pennylane as qml
 import pytest
 import torch
+from pennylane.exceptions import DeviceError
 
 from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
-from hqnn_forge.encoding._common import resolve_device
+from hqnn_forge.encoding._common import resolve_device, validate_device_shots
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import (
     HybridBinaryClassifier,
@@ -298,13 +300,75 @@ class TestApplyShots:
 
 
 class TestShotSweep:
+    @pytest.mark.parametrize("n_repeats", [1, 5])
+    @pytest.mark.parametrize("multiclass", [False, True], ids=["binary", "multiclass"])
+    def test_exact_reference_is_evaluated_and_scored_once(
+        self, monkeypatch: pytest.MonkeyPatch, n_repeats: int, multiclass: bool
+    ) -> None:
+        model: Any
+        if multiclass:
+            model = MulticlassHybridClassifier(
+                n_input_features=2, n_qubits=2, n_layers=1, n_classes=3, **EXACT
+            )
+            # Zero head weights give softmax(log(1), log(2), log(5)) = (1, 2, 5) / 8.
+            biases = torch.tensor([0.0, math.log(2), math.log(5)])
+            expected_row = torch.tensor([[0.125, 0.25, 0.625]] * 4)
+            y = torch.tensor([0, 2, 2, 1])
+        else:
+            model = HybridBinaryClassifier(n_input_features=2, n_qubits=2, n_layers=1, **EXACT)
+            # Zero head weights give sigmoid(log(3)) = 3 / (1 + 3).
+            biases = torch.tensor([math.log(3)])
+            expected_row = torch.tensor([0.75] * 4)
+            y = torch.tensor([0, 1, 1, 0])
+        with torch.no_grad():
+            model.head.weight.zero_()
+            model.head.bias.copy_(biases)
+        x = torch.zeros(4, 2)
+        original = model.quantum_layer.qlayer.qnode
+        predict = model.predict_proba
+        predict_counts: list[int | None] = []
+        score_calls = 0
+
+        def counted_predict(inputs: torch.Tensor) -> torch.Tensor:
+            predict_counts.append(model.quantum_layer.shots)
+            return predict(inputs)
+
+        def accuracy(labels: torch.Tensor, probabilities: torch.Tensor) -> float:
+            nonlocal score_calls
+            score_calls += 1
+            predicted = probabilities.argmax(-1) if multiclass else probabilities > 0.5
+            return float(predicted.eq(labels).float().mean())
+
+        monkeypatch.setattr(model, "predict_proba", counted_predict)
+        counts = [40, None, 400, None]
+        points = shot_sweep(model, x, counts, n_repeats=n_repeats, y=y, score_fn=accuracy)
+        assert predict_counts == [40] * n_repeats + [None] + [400] * n_repeats + [None]
+        assert score_calls == 2 * n_repeats + 2
+        assert [point.shots for point in points] == counts
+        for point in points:
+            # Axis 0 is repetition, axis 1 is sample, and multiclass axis 2 is class.
+            torch.testing.assert_close(
+                point.probabilities, torch.stack([expected_row] * n_repeats), rtol=0, atol=1e-7
+            )
+            # Each set of labels contains exactly two correct predictions out of four.
+            assert point.scores == [0.5] * n_repeats
+        if n_repeats > 1:
+            # The repeated exact rows are copies, not views of one row.
+            exact = points[1].probabilities
+            exact[0] = 0.0
+            torch.testing.assert_close(exact[1], expected_row, rtol=0, atol=1e-7)
+        assert model.quantum_layer.qlayer.qnode is original
+
     def test_spread_falls_like_one_over_root_shots(self) -> None:
         torch.manual_seed(0)
         model = HybridBinaryClassifier(n_input_features=4, n_qubits=3, n_layers=2, **EXACT)
         x = torch.randn(20, 4)
         exact, few, many = shot_sweep(model, x, [None, 40, 4000], n_repeats=6)
         assert exact.probabilities.shape == (6, 20)
-        assert (exact.probabilities == exact.probabilities[0]).all()
+        # Every exact row matches a separate exact call, sample for sample (up
+        # to float rounding: the sweep runs its own parameter-shift QNode).
+        reference = model.predict_proba(x)
+        torch.testing.assert_close(exact.probabilities, reference.expand(6, -1), rtol=0, atol=1e-6)
         spread_few = few.probabilities.std(0).mean()
         spread_many = many.probabilities.std(0).mean()
         # sqrt(4000 / 40) = 10; the estimate of a mean std over 6 repeats is
@@ -390,7 +454,7 @@ def test_finite_shot_device_rejection_and_sampled_execution(
 
     monkeypatch.setattr(f"{module_name}.resolve_device", fake_resolve)
 
-    with pytest.raises(ValueError, match="device samples"):
+    with pytest.raises(ValueError, match="has finite shots"):
         layer_cls(**kwargs, device_name="custom.sampling.device")
 
     torch.manual_seed(0)
@@ -406,3 +470,224 @@ def test_finite_shot_device_rejection_and_sampled_execution(
     with torch.no_grad():
         # each <Z> estimate has standard deviation <= 1/sqrt(10 000) = 0.01; allow 5 sigma
         torch.testing.assert_close(sampled(x), exact(x), atol=0.05, rtol=0)
+
+
+class StubSamplingDevice(qml.devices.Device):
+    """Stub device refusing analytic execution via no_analytic without device-level shots."""
+
+    def __init__(self, wires: int) -> None:
+        super().__init__(wires=wires, shots=None)
+        self._inner = qml.device("default.qubit", wires=wires)
+
+    @property
+    def name(self) -> str:
+        return "custom.sampling.device"
+
+    def preprocess(
+        self, execution_config: qml.devices.ExecutionConfig | None = None
+    ) -> tuple[qml.transforms.core.CompilePipeline, qml.devices.ExecutionConfig]:
+        program, config = self._inner.preprocess(execution_config)
+        program.add_transform(qml.devices.preprocess.no_analytic, name=self.name)
+        return program, config
+
+    def execute(self, circuits: Any, execution_config: Any = None) -> Any:
+        return self._inner.execute(circuits, execution_config)
+
+
+@pytest.mark.parametrize(
+    "layer_cls, module_name, kwargs, in_features",
+    [
+        (
+            QuantumEncodingLayer,
+            "hqnn_forge.encoding.angle_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            IQPEncodingLayer,
+            "hqnn_forge.encoding.iqp_embedding",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+        (
+            AmplitudeEncodingLayer,
+            "hqnn_forge.encoding.amplitude_embedding",
+            {"n_features": 4, "n_qubits": 2, "n_layers": 1},
+            4,
+        ),
+        (
+            DataReuploadingLayer,
+            "hqnn_forge.encoding.data_reuploading",
+            {"n_qubits": 3, "n_layers": 1},
+            3,
+        ),
+    ],
+)
+def test_sampling_only_device_without_device_shots_rejection_and_sampled_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_cls: Any,
+    module_name: str,
+    kwargs: dict[str, Any],
+    in_features: int,
+) -> None:
+    def fake_resolve(
+        device_name: str, n_qubits: int, *, seed: int | None = None
+    ) -> qml.devices.Device:
+        if device_name == "custom.sampling.device":
+            return StubSamplingDevice(wires=n_qubits)
+        return resolve_device(device_name, n_qubits, seed=seed)
+
+    monkeypatch.setattr(f"{module_name}.resolve_device", fake_resolve)
+
+    with pytest.raises(ValueError, match="does not support analytic execution"):
+        layer_cls(**kwargs, device_name="custom.sampling.device")
+
+    torch.manual_seed(0)
+    exact = layer_cls(**kwargs)
+    sampled = layer_cls(
+        **kwargs,
+        device_name="custom.sampling.device",
+        shots=10_000,
+        diff_method="parameter-shift",
+    )
+    sampled.load_state_dict(exact.state_dict())
+    x = torch.rand(2, in_features)
+    with torch.no_grad():
+        torch.testing.assert_close(sampled(x), exact(x), atol=0.05, rtol=0)
+
+
+@pytest.mark.requires_lightning
+def test_analytic_plugin_device_is_accepted_with_shots_none() -> None:
+    """An analytic plugin device (lightning.qubit) passes the probe and runs exactly."""
+    torch.manual_seed(0)
+    layer = QuantumEncodingLayer(
+        n_qubits=2,
+        n_layers=1,
+        device_name="lightning.qubit",
+        diff_method="adjoint",
+        shots=None,
+    )
+    exact = QuantumEncodingLayer(n_qubits=2, n_layers=1, **EXACT)
+    exact.load_state_dict(layer.state_dict())
+    assert layer.qlayer.qnode.device.name == "lightning.qubit"
+    x = torch.rand(2, 2)
+    with torch.no_grad():
+        torch.testing.assert_close(layer(x), exact(x), atol=1e-6, rtol=0)
+
+
+class StubRejectingProbeDevice(qml.devices.Device):
+    """Stub device that rejects the probe tape with DeviceError regardless of shots."""
+
+    def __init__(self, wires: int) -> None:
+        super().__init__(wires=wires, shots=None)
+        self._inner = qml.device("default.qubit", wires=wires)
+
+    @property
+    def name(self) -> str:
+        return "custom.probe_rejecting.device"
+
+    def preprocess(
+        self, execution_config: qml.devices.ExecutionConfig | None = None
+    ) -> tuple[qml.transforms.core.CompilePipeline, qml.devices.ExecutionConfig]:
+        @qml.transform
+        def fail_probe(
+            tape: qml.tape.QuantumScript,
+        ) -> tuple[Sequence[qml.tape.QuantumScript], Callable[[Any], Any]]:
+            if len(tape.operations) == 0:
+                raise DeviceError("Circuits with 0 operations are not supported on this device.")
+            return [tape], lambda res: res[0]
+
+        program, config = self._inner.preprocess(execution_config)
+        program.add_transform(fail_probe)
+        return program, config
+
+    def execute(self, circuits: Any, execution_config: Any = None) -> Any:
+        return self._inner.execute(circuits, execution_config)
+
+
+def test_device_rejecting_probe_for_other_reason_still_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device rejecting the probe for a reason unrelated to analytic shots still constructs."""
+
+    def fake_resolve(
+        device_name: str, n_qubits: int, *, seed: int | None = None
+    ) -> qml.devices.Device:
+        if device_name == "custom.probe_rejecting.device":
+            return StubRejectingProbeDevice(wires=n_qubits)
+        return resolve_device(device_name, n_qubits, seed=seed)
+
+    monkeypatch.setattr("hqnn_forge.encoding.angle_embedding.resolve_device", fake_resolve)
+
+    torch.manual_seed(0)
+    layer = QuantumEncodingLayer(
+        n_qubits=2,
+        n_layers=1,
+        device_name="custom.probe_rejecting.device",
+        diff_method="parameter-shift",
+        shots=None,
+    )
+    exact = QuantumEncodingLayer(n_qubits=2, n_layers=1, **EXACT)
+    exact.load_state_dict(layer.state_dict())
+    x = torch.rand(2, 2)
+    with torch.no_grad():
+        torch.testing.assert_close(layer(x), exact(x), atol=1e-6, rtol=0)
+
+
+class StubCheckingDevice(qml.devices.Device):
+    """Stub device whose preprocessing runs *check* on every tape, which may raise."""
+
+    def __init__(
+        self, wires: Sequence[Any], check: Callable[[qml.tape.QuantumScript], None]
+    ) -> None:
+        super().__init__(wires=wires, shots=None)
+        self._inner = qml.device("default.qubit", wires=wires)
+        self._check = check
+
+    @property
+    def name(self) -> str:
+        return "custom.checking.device"
+
+    def preprocess(
+        self, execution_config: qml.devices.ExecutionConfig | None = None
+    ) -> tuple[qml.transforms.core.CompilePipeline, qml.devices.ExecutionConfig]:
+        check = self._check
+
+        @qml.transform
+        def run_check(
+            tape: qml.tape.QuantumScript,
+        ) -> tuple[Sequence[qml.tape.QuantumScript], Callable[[Any], Any]]:
+            check(tape)
+            return [tape], lambda res: res[0]
+
+        program, config = self._inner.preprocess(execution_config)
+        program.add_transform(run_check)
+        return program, config
+
+    def execute(self, circuits: Any, execution_config: Any = None) -> Any:
+        return self._inner.execute(circuits, execution_config)
+
+
+def _reject_analytic(tape: qml.tape.QuantumScript) -> None:
+    if not tape.shots:
+        raise ValueError("analytic mode not supported")
+
+
+def _reject_always(tape: qml.tape.QuantumScript) -> None:
+    raise ValueError("unsupported circuit")
+
+
+@pytest.mark.parametrize("wires", [[0, 1], ["a", "b"], [3, 5]])
+def test_sampling_only_device_is_rejected_whatever_the_exception_and_wire_labels(
+    wires: list[Any],
+) -> None:
+    """Only the analytic probe failing marks the device sampling-only, on its own first wire."""
+    device = StubCheckingDevice(wires, _reject_analytic)
+    with pytest.raises(ValueError, match="does not support analytic execution"):
+        validate_device_shots(device, None)
+    validate_device_shots(device, 100)
+
+
+def test_device_rejecting_both_probes_is_not_diagnosed_as_sampling() -> None:
+    """When the finite-shot probe fails too, the failure says nothing about shots."""
+    validate_device_shots(StubCheckingDevice([0, 1], _reject_always), None)

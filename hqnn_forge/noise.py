@@ -49,7 +49,9 @@ measurement.  It is classical, so it acts on the expectation values directly
 :func:`apply_readout_error` applies it post hoc, ``noise_sweep(...,
 channel="readout")`` sweeps it, and the layers' and classifiers'
 ``readout_error=(p01, p10)`` trains with it (#358).  The symmetric case
-``p01 = p10 = p`` is exactly ``"bit_flip"`` at ``"end"``.  Because the map is
+``p01 = p10 = p`` is exactly ``"bit_flip"`` at ``"end"``.  On a sampled
+layer each shot is flipped instead, from the device's generator (#486; see
+:func:`apply_readout_error`).  Because the map is
 applied to the layer's output rather than in its QNode, it exists only where
 the layer runs its circuit through :meth:`TrainingNoiseMixin._run_circuit`:
 a direct ``layer.qlayer(...)`` call is unaffected, as are the kernels, which
@@ -194,9 +196,11 @@ from typing import Literal, NamedTuple
 import numpy as np
 import pennylane as qml
 import torch
+from scipy.stats import binom
 from torch import nn
 
 from hqnn_forge._resolve import resolve_encoding_layer
+from hqnn_forge.utils.rng import device_generator
 
 Position = Literal["all", "end"]
 NoiseMethod = Literal["density", "trajectories"]
@@ -287,7 +291,12 @@ def validate_noise(
 def _noisy_qnode(
     qnode: qml.QNode, n_qubits: int, p: float, position: Position, channel: Channel
 ) -> qml.QNode:
-    device = qml.device("default.mixed", wires=n_qubits)
+    # Explicit seed=None: PennyLane's default ("global") draws a seed from
+    # np.random, which would advance the caller's NumPy RNG on every build
+    # (#417).  The channel is simulated exactly, so the seed draws nothing:
+    # density noise with shots is refused when the layer is built
+    # (TrainingNoiseMixin._init_training_noise); revisit this if that ever changes.
+    device = qml.device("default.mixed", wires=n_qubits, seed=None)
     base = qml.QNode(qnode.func, device, diff_method="backprop", interface="torch")
     return qml.noise.insert(base, CHANNELS[channel].op, p, position=position)
 
@@ -700,16 +709,53 @@ class TrainingNoiseMixin:
         :func:`apply_depolarizing_noise` block the layer's own is not applied,
         like the rest of its training noise (see
         :func:`run_with_training_noise`), so a ``p = 0`` block stays the
-        noiseless model.
+        noiseless model.  On exact values the error is
+        :func:`readout_error_map`; on a sampled layer the shots behind each
+        output are flipped (:func:`_flip_shots`), with the map's gradient.
         """
         out = self._run_qnode(x)
         readout = getattr(self.qlayer, "_hqnn_readout_error", None)
         if readout is None and self.training and getattr(self.qlayer, "_hqnn_noise_depth", 0) == 0:
             # getattr: a layer pickled whole before #358 has no such attribute.
             readout = getattr(self, "readout_error", None)
-        if readout is not None:
-            out = readout_error_map(out, *readout)
-        return out
+        if readout is None:
+            return out
+        shots = self.shots
+        if shots is None or readout == (0.0, 0.0):
+            # Exact values: the map is the whole effect.  (0, 0) flips nothing.
+            return readout_error_map(out, *readout)
+        p01, p10 = readout
+        flipped = _flip_shots(
+            out,
+            shots * self._draws_per_output(),
+            p01,
+            p10,
+            _flip_generator(self.qlayer.qnode.device),
+        )
+        if not out.requires_grad:
+            return flipped
+        # The value of the flipped shots, the gradient of the map (see
+        # _flip_shots): mapped - mapped.detach() is exactly zero.
+        mapped = readout_error_map(out, *readout)
+        return flipped + (mapped - mapped.detach())
+
+    def _draws_per_output(self) -> int:
+        """
+        How many trajectory draws :meth:`_run_qnode` averages into each output.
+
+        ``noise_trajectories`` when it runs the train-mode noise QNode through
+        :func:`run_with_training_noise` (train mode, noise built, no
+        :func:`apply_depolarizing_noise` block open), else 1.  On a sampled
+        layer each draw has its own ``shots``, so an output is an estimate
+        from ``shots`` times this many shots.
+        """
+        if (
+            self.training
+            and self._training_noise_qnode is not None
+            and getattr(self.qlayer, "_hqnn_noise_depth", 0) == 0
+        ):
+            return self.noise_trajectories
+        return 1
 
     def _run_qnode(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -827,14 +873,95 @@ def readout_error_map(expectations: torch.Tensor, p01: float, p10: float) -> tor
     exactly, for every single-qubit ⟨Z⟩ readout, which is all the layers
     measure.  ``p01 = p10 = p`` is ``"bit_flip"`` at ``position="end"``.
 
-    On a shot-based layer the map is applied to the sampled estimate, not to
-    each shot.  The mean is exact, but the shot noise is scaled by
-    ``|1 − p01 − p10|``, where flipped shots would give the standard
-    deviation ``sqrt((1 − ⟨Z'⟩²) / shots)`` of the mapped value ``⟨Z'⟩``.
-    That is larger for every ``⟨Z⟩``, so the spread under a readout error
-    comes out too small, and is zero at ``p01 + p10 = 1`` (#486).
+    This is the effect on exact expectation values.  A sampled layer
+    (``shots``, or inside :func:`apply_shots`) flips its shots instead
+    (#486), so that the spread is that of a device with this readout error;
+    the map is then the mean of that output and gives its gradient (see
+    :func:`apply_readout_error`).
     """
     return (1.0 - p01 - p10) * expectations + (p10 - p01)
+
+
+def _flip_shots(
+    estimates: torch.Tensor, shots: int, p01: float, p10: float, rng: np.random.Generator
+) -> torch.Tensor:
+    """
+    Sampled ⟨Z⟩ estimates with each of their ``shots`` shots read through the error.
+
+    Outcome 0 is ``Z = +1``, so an estimate ``ẑ`` from ``N = shots`` shots
+    is ``k = N (1 + ẑ) / 2`` zeros and ``N − k`` ones (``ẑ = (2k − N)/N``).
+    A 0 reads 1 with probability ``p01`` and a 1 reads 0 with ``p10``, each
+    shot independently, so the zeros read out are
+
+        k' = Binomial(k, 1 − p01) + Binomial(N − k, p10),
+
+    exactly in distribution, with no access to the individual shots; the
+    result is ``(2k' − N)/N``.  Given ``k``, ``E[k'] = k (1 − p01) + (N − k)
+    p10``, so ``E[ẑ' | ẑ] = (1 − p01 − p10) ẑ + (p10 − p01)``, the map of
+    :func:`readout_error_map`.  Unconditionally, for ``N`` independent shots,
+    each flipped shot reads 0 with probability ``(1 + ⟨Z'⟩)/2``, so ``k'`` is
+    ``Binomial(N, (1 + ⟨Z'⟩)/2)``: mean ``⟨Z'⟩`` and variance
+    ``(1 − ⟨Z'⟩²)/N``.
+
+    ``k`` is rounded to the nearest integer in ``[0, N]``: a float32 estimate
+    places it within about ``3e-8 · N`` of one, so this is exact below about
+    10⁷ shots.  Elementwise, any shape; the zeros' draws come first, from
+    ``rng``.  Returns a tensor without gradient, in ``estimates``' dtype and
+    device.
+
+    Each binomial is drawn by inversion (:func:`_binomial_by_inversion`), from
+    one uniform per element, not with ``rng.binomial``: that one's rejection
+    sampler takes a number of uniforms that depends on the count, so SPSA's
+    two evaluations, whose counts differ, would leave the shared generator
+    out of step after the first such element.  By inversion every call takes
+    exactly ``2 · estimates.numel()`` uniforms, and the flipped count rises
+    with the uniform, so the two sides stay coupled.
+    """
+    values = estimates.detach().to("cpu", torch.float64).numpy()
+    zeros = np.clip(np.rint(shots * (1.0 + values) / 2.0), 0, shots).astype(np.int64)
+    flipped = _binomial_by_inversion(zeros, 1.0 - p01, rng) + _binomial_by_inversion(
+        shots - zeros, p10, rng
+    )
+    result = torch.from_numpy((2.0 * flipped - shots) / shots)
+    return result.to(dtype=estimates.dtype, device=estimates.device)
+
+
+def _binomial_by_inversion(counts: np.ndarray, p: float, rng: np.random.Generator) -> np.ndarray:
+    """
+    ``Binomial(counts, p)`` elementwise, as the quantile of one uniform each.
+
+    Takes exactly ``counts.size`` uniforms from ``rng`` whatever the counts
+    and ``p``.  ``p = 0`` and ``p = 1`` are set exactly, so that a uniform at
+    the end of its range cannot give the one count they exclude.
+    """
+    uniforms = 1.0 - rng.random(counts.shape)  # in (0, 1]: the quantile at 0 is -1
+    if p == 0.0:
+        return np.zeros_like(counts)
+    if p == 1.0:
+        return counts.copy()
+    return binom.ppf(uniforms, counts, p).astype(np.int64)
+
+
+def _flip_generator(device: object) -> np.random.Generator:
+    """
+    The generator a sampled layer's readout flips are drawn from.
+
+    ``device``'s own NumPy generator, the one its shots are sampled with:
+    PennyLane's simulators keep it in ``_rng`` (``default.qubit``,
+    ``default.mixed`` and the lightning devices do), so a layer built with
+    ``seed`` repeats its flips as it repeats its shots, and SPSA's common
+    random numbers (``model=``, which restores these generators between its
+    two evaluations) cover the flips too.  A device without one, such as
+    hardware, gets a generator seeded from torch's global generator, so
+    ``torch.manual_seed`` makes the flips repeat there; that takes one draw
+    from torch's generator per sampled forward pass, which moves the draws
+    after it (dropout masks, trajectory noise) against a run without the
+    readout error.
+    """
+    rng = device_generator(device)
+    if rng is not None:
+        return rng
+    return np.random.default_rng(int(torch.randint(2**63 - 1, ())))
 
 
 @contextmanager
@@ -846,8 +973,43 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
     and eval mode alike, without touching the weights, and on top of an open
     :func:`apply_depolarizing_noise` or :func:`apply_shots` block.  A layer's
     own training-time ``readout_error`` is replaced, not added to, while the
-    block is open.  On sampled outputs the mean is exact and the shot noise
-    too small; see :func:`readout_error_map`.
+    block is open.
+
+    **Sampled layers** (#486).  With ``shots`` (the layer's own, or an
+    :func:`apply_shots` block's) the error flips every shot rather than
+    rescaling the estimate: each output has the distribution of the mean of
+    ``shots`` flipped shots, mean ``⟨Z'⟩`` and variance
+    ``(1 − ⟨Z'⟩²)/shots``, which is what a device with this readout error
+    gives.  An estimate ``ẑ`` from ``N`` shots is ``k = N (1 + ẑ)/2``
+    zeros (outcome 0 is ``Z = +1``); the zeros read out are
+    ``Binomial(k, 1 − p01) + Binomial(N − k, p10)``, exactly in
+    distribution, and the output is ``(2k' − N)/N``.  The same applies
+    to the layer's own ``readout_error`` in train mode.
+
+    * *Generator.*  The flips are drawn from the device's own NumPy
+      generator, the one the shots come from, so a layer built with ``seed``
+      repeats them whatever torch's seed, and SPSA's common random numbers
+      cover them; a device without one gets a generator seeded from torch's
+      (one draw from it per forward pass).
+    * *Trajectories.*  With ``noise_method="trajectories"`` in train mode an
+      output is the mean of ``noise_trajectories`` draws of ``shots`` shots
+      each; the flips are drawn on the pooled count of all of them.  The
+      shots are flipped independently, and a sum of independent binomials
+      with the same probability is the binomial of the summed count, so this
+      is the same in distribution as flipping each draw's shots.
+    * *Gradient.*  A flipped count is piecewise constant in the weights, so
+      its own derivative is zero almost everywhere.  The output therefore
+      carries the gradient of ``readout_error_map`` of the sampled estimate,
+      ``(1 − p01 − p10)`` times the sampled gradient, the same estimator as
+      before #486 (a seeded layer's values differ, as the flips now draw from
+      its generator before the backward pass's shots): the
+      conditional mean of the flipped output given the shots is exactly that
+      map, so with ``parameter-shift``'s unbiased sampled gradient this is an
+      unbiased estimate of ``∂⟨Z'⟩/∂θ``.  SPSA uses the flipped values
+      themselves.
+    * ``(0, 0)`` draws nothing and returns the sampled estimate unchanged.
+
+    On exact values (``shots=None``) the map is the whole effect, unchanged.
 
     The map is applied where the layer runs its circuit
     (:meth:`TrainingNoiseMixin._run_circuit`), not inside the QNode, so the
@@ -1211,7 +1373,7 @@ class ShotSweepPoint(NamedTuple):
     #: for a binary classifier, ``(n_repeats, n_samples, n_classes)`` for
     #: :class:`~hqnn_forge.models.MulticlassHybridClassifier`.
     probabilities: torch.Tensor
-    #: Scores of the repeated evaluations, or None without ``score_fn``.
+    #: One score per row of ``probabilities``, or None without ``score_fn``.
     scores: list[float] | None
 
 
@@ -1225,11 +1387,15 @@ def shot_sweep(
     score_fn: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
 ) -> list[ShotSweepPoint]:
     """
-    Predict ``X`` ``n_repeats`` times at each shot count, without retraining.
+    Predict ``X`` ``n_repeats`` times at each finite shot count, without retraining.
 
     The repeats show the spread shot noise alone puts on the predictions and
-    on the score; ``None`` in ``shots`` gives the exact reference (its repeats
-    agree).  Arguments as for :func:`noise_sweep`.
+    on the score; ``None`` in ``shots`` gives the exact reference, evaluated
+    and scored once with its probabilities and score repeated ``n_repeats``
+    times.  That assumes ``predict_proba`` is deterministic at ``shots=None``,
+    as it is for the hqnn_forge models, which predict in eval mode; a custom
+    one that leaves dropout on would have its spread hidden.  Arguments as for
+    :func:`noise_sweep`.
 
     Raises
     ------
@@ -1256,11 +1422,16 @@ def shot_sweep(
     points = []
     for count in counts:
         with apply_shots(model, count):
-            runs = torch.stack([predict(X) for _ in range(n_repeats)])
+            runs = torch.stack([predict(X) for _ in range(1 if count is None else n_repeats)])
         scores = (
             [float(score_fn(y, row)) for row in runs]
             if score_fn is not None and y is not None
             else None
         )
+        if count is None:
+            # Materialise the repeated rows so each remains independently writable.
+            runs = runs.expand(n_repeats, *runs.shape[1:]).clone()
+            if scores is not None:
+                scores *= n_repeats
         points.append(ShotSweepPoint(count, runs, scores))
     return points

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any
 
 import pennylane as qml
@@ -1095,3 +1097,31 @@ class TestNoisyKernel:
     def test_density_kernel_shape_checks(self) -> None:
         with pytest.raises(ValueError, match="stacks of equal square matrices"):
             kernels.kernel_from_density_matrices(torch.zeros(2, 4, 4), torch.zeros(2, 2, 2))
+
+
+class TestGlobalNumpyRng:
+    """The analytic simulators leave NumPy's global RNG alone (#417)."""
+
+    @pytest.mark.parametrize(
+        "compute",
+        [
+            pytest.param(lambda X, layer: kernels.encoded_states(X, layer), id="states"),
+            pytest.param(lambda X, layer: quantum_kernel_matrix(X, layer), id="kernel"),
+            pytest.param(
+                lambda X, layer: kernels.encoded_density_matrices(X, layer, noise_level=0.05),
+                id="density-noisy",
+            ),
+            pytest.param(
+                lambda X, layer: kernels.encoded_density_matrices(X, layer, noise_level=0.0),
+                id="density-exact",
+            ),
+        ],
+    )
+    def test_left_exactly_as_it_was(
+        self,
+        compute: Callable[[torch.Tensor, DataReuploadingLayer], torch.Tensor],
+        numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
+    ) -> None:
+        layer, X = _reuploading(), _angles(3)
+        with numpy_rng_untouched():
+            compute(X, layer)
