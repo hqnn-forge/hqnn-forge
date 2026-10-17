@@ -1,0 +1,163 @@
+{
+  "description": "Full-data published SHNN measurement; both unchanged opt-in bands pass, with a lower mean than the published point estimate.",
+  "measured_commit": "ef61672915da05fb8b317f2ddbeb2bf20dbdba93",
+  "started_utc": "2026-10-16T20:09:26.322316+00:00",
+  "finished_utc": "2026-10-16T22:10:09.597599+00:00",
+  "elapsed_seconds": 7243.592374324799,
+  "test_exit_code": 0,
+  "test_result": "1 passed, 2 deselected",
+  "command": [
+    ".venv/bin/python",
+    "-u",
+    "-m",
+    "pytest",
+    "tests/test_published_shnn_reproduction.py",
+    "-m",
+    "reproducibility",
+    "-s",
+    "-p",
+    "metrics_observer"
+  ],
+  "command_note": "Interpreter path made relative; metrics_observer was a temporary external pytest plugin, not a repository dependency.",
+  "environment": {
+    "HQNN_FORGE_REPRODUCE": "1",
+    "HQNN_FORGE_FAIL_ON_SKIP": "1",
+    "OMP_NUM_THREADS": "4",
+    "MKL_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "4"
+  },
+  "dataset": {
+    "filename": "creditcard.csv",
+    "size_bytes": 150828752,
+    "csv_sha256": "76274b691b16a6c49d3f159c883398e03ccd6d1ee12d9d8ee38f4b4b98551a89",
+    "loader": "load_credit_card_fraud(drop_time=True, strict=True)",
+    "expected_rows": 284807,
+    "expected_positives": 492,
+    "resolution": "HQNN_FORGE_DATA pointed to the existing private dataset directory; no data was downloaded."
+  },
+  "recipe": {
+    "harness": "tests/test_published_shnn_reproduction.py::run_published_recipe",
+    "benchmark_reference_commit_as_documented_by_harness": "cade1ea",
+    "model_preset": "HybridBinaryClassifier.published_shnn()",
+    "model_overrides": {},
+    "folds": 5,
+    "max_epochs": 100,
+    "patience": 20,
+    "batch_size": 256,
+    "root_seed": 42,
+    "trainable_parameters": 122,
+    "optimizer_state": "One Adam optimizer per fold persists across all one-epoch train_model calls.",
+    "documented_differences": [
+      "Library stratified_kfold and smote draws differ from scikit-learn and imblearn.",
+      "BCEWithLogitsLoss replaces Sigmoid plus BCELoss."
+    ],
+    "classical_init": "Classical layers are reset to the default nn.Linear initialization, as the benchmark's SHNN leaves them; this matches the benchmark and is not a difference from it."
+  },
+  "backend": {
+    "device": "default.qubit",
+    "diff_method": "backprop",
+    "shots": null,
+    "resolution_evidence": "Eight-qubit analytic preset deterministically resolves auto to default.qubit/backprop; separately instantiated identical-preset probe confirmed the resolved device and method."
+  },
+  "platform": "Linux-7.2.9-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 7 250 w/ Radeon 780M Graphics",
+  "python": "3.13.15 (main, Sep  1 2026, 14:18:08) [Clang 22.1.3 ]",
+  "package_versions": {
+    "hqnn-forge": "0.1.0",
+    "pennylane": "0.45.1",
+    "pennylane-lightning": "0.45.0",
+    "torch": "2.14.1",
+    "numpy": "2.5.3",
+    "scikit-learn": "1.9.1",
+    "scipy": "1.18.1"
+  },
+  "thread_probe": {
+    "scope": "separate setup-equivalent pytest process after autouse fixtures; active training process not introspected",
+    "torch_num_threads": 4,
+    "torch_num_interop_threads": 8
+  },
+  "thread_source_review": "No set_num_threads or set_num_interop_threads calls exist in hqnn_forge or tests at measured commit; root conftest has no thread-count override.",
+  "conventions": {
+    "fold_index": "zero based, in stratified_kfold return order; model and shuffle seed is 42 + fold",
+    "scores": "Restored best model in each fold scored on the same held-out 20% test split.",
+    "threshold_printed": "Two decimal places as logged by the harness; all selected the upper end of its fixed 0.05..0.94 grid.",
+    "sample_std_mcc": "Across the five model scores, with denominator 5 - 1; not a confidence interval.",
+    "mcc_per_kparam": "One kParam is 1000 parameters; the 122 total parameters are 0.122 kParam, so efficiency is mean_mcc / 0.122 in units of MCC/kParam."
+  },
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_epoch": 1,
+      "threshold_printed": 0.94,
+      "completed_utc": "2026-10-16T20:33:27.134500+00:00",
+      "test_mcc": 0.5388079551672847,
+      "epochs_run": 21,
+      "model_and_shuffle_seed": 42
+    },
+    {
+      "fold": 1,
+      "best_epoch": 1,
+      "threshold_printed": 0.94,
+      "completed_utc": "2026-10-16T20:56:55.291578+00:00",
+      "test_mcc": 0.5647225690689046,
+      "epochs_run": 21,
+      "model_and_shuffle_seed": 43
+    },
+    {
+      "fold": 2,
+      "best_epoch": 1,
+      "threshold_printed": 0.94,
+      "completed_utc": "2026-10-16T21:20:22.015546+00:00",
+      "test_mcc": 0.560491430009446,
+      "epochs_run": 21,
+      "model_and_shuffle_seed": 44
+    },
+    {
+      "fold": 3,
+      "best_epoch": 2,
+      "threshold_printed": 0.94,
+      "completed_utc": "2026-10-16T21:45:42.319347+00:00",
+      "test_mcc": 0.5590728227490259,
+      "epochs_run": 22,
+      "model_and_shuffle_seed": 45
+    },
+    {
+      "fold": 4,
+      "best_epoch": 1,
+      "threshold_printed": 0.94,
+      "completed_utc": "2026-10-16T22:10:08.139970+00:00",
+      "test_mcc": 0.48802314084303144,
+      "epochs_run": 21,
+      "model_and_shuffle_seed": 46
+    }
+  ],
+  "aggregate": {
+    "mean_mcc": 0.5422235835675385,
+    "sample_std_mcc": 0.03191069543316142,
+    "mcc_per_kparam": 4.444455603012611,
+    "mean_mcc_difference_from_published": -0.03357641643246145
+  },
+  "published_comparison": {
+    "mcc": 0.5758,
+    "mcc_tolerance": 0.0371,
+    "mcc_per_kparam": 4.72,
+    "mcc_per_kparam_tolerance": 0.3040983606557377,
+    "mcc_band_passes": true,
+    "mcc_per_kparam_band_passes": true,
+    "interpretation": "Passes both requested fixed bands on this run; does not establish exact numerical replication or statistical equivalence."
+  },
+  "capture": {
+    "method": "Temporary pytest plugin called the original run_published_recipe with unchanged arguments, serialized its returned score list and returned the same list. Per-fold epochs and thresholds came from timestamped stdout.",
+    "observer_sha256": "b8a861806e6a2cc0cce0ed41969e5b47a1d6322659afcc34b3abdaf19cebf1f8",
+    "independent_aggregate_check": "stdlib math.fsum and explicit sample variance; cross-checked with statistics.stdev"
+  },
+  "source_sha256_note": "Hashes of selected files on the run's path only, for quick spot checks; measured_commit is what pins the code that was run.",
+  "source_sha256": {
+    "uv.lock": "913ce5a328fcd18b6683520f9db775f3a65dd42172033b45640aa80ef207b82e",
+    "tests/test_published_shnn_reproduction.py": "b375a59902fe2395d6ad0a7e9d0a09a15bb4c0d4864b24454ed8884a6d370ff3",
+    "hqnn_forge/models/hybrid_classifier.py": "573043e301fac00d2c22059938f0ddffbd24ea9eead12059a33997b87d9a280a",
+    "hqnn_forge/training/trainer.py": "0f7b6061772082d642bae60e42aa85929794166199f5dc991dfee8a881b648c0",
+    "hqnn_forge/preprocessing/cv.py": "22030cd85eeb076595d326d9fe24db917364950cb842557fd279c3bfb7903bb2",
+    "hqnn_forge/encoding/_common.py": "2af54db0e4cfa6babcee9a748508d3cb1ae4d096c1f3f31b9fee0f67f8c10815"
+  }
+}

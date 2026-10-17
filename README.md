@@ -481,8 +481,8 @@ hqnn_forge/
 `HybridBinaryClassifier.published_shnn()` matches the published model structurally, and
 `tests/test_published_shnn_parity.py` pins that. Whether the library also reproduces the
 published *numbers* (MCC 0.5758 ± 0.0371, MCC/kParam 4.720) is checked by an opt-in run of the
-benchmark's recipe: 5-fold CV with SMOTE on the training folds, 100 epochs. It needs the Kaggle
-dataset and takes days of simulation:
+benchmark's recipe: 5-fold CV with SMOTE on the training folds, up to 100 epochs. It needs the
+Kaggle dataset and took about 2 hours on the default backend (measured below):
 
 ```bash
 HQNN_FORGE_REPRODUCE=1 HQNN_FORGE_DATA=data/raw \
@@ -490,7 +490,15 @@ HQNN_FORGE_REPRODUCE=1 HQNN_FORGE_DATA=data/raw \
 ```
 
 The module docstring lists the recipe and every deliberate deviation from the benchmark code.
-**Status:** not yet measured. The numbers go here once a full run has finished.
+**Measured on 2026-10-16 (UTC):** mean MCC **0.5422 ± 0.0319** (sample standard deviation over
+five folds) and MCC/kParam **4.444**, so both published bands pass, with the mean 0.0336 below
+the published 0.5758. Every fold's best validation MCC came at epoch 1 or 2, though, and early
+stopping ended each fold at epoch 21 or 22, so these scores reflect one or two epochs of
+training, not the 100-epoch budget; every restored threshold sits at the 0.94 top of the
+benchmark's grid. Why is still open (#588). The
+[results page](https://hqnn-forge.github.io/hqnn-forge/results/published-shnn-reproduction/)
+has all folds, the run's environment and its limits, and
+`docs/results/published_shnn_reproduction.json` the full-precision record and provenance.
 
 ---
 
