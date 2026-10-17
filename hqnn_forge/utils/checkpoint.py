@@ -81,6 +81,14 @@ import torch
 import hqnn_forge
 from hqnn_forge.initializers.restricted_variance import _not_restricting_ignored
 
+__all__: list[str] = [
+    "FORMAT_VERSION",
+    "WEIGHT_SAFE_ARGS",
+    "PathLike",
+    "load_checkpoint",
+    "save_checkpoint",
+]
+
 if TYPE_CHECKING:
     # Type-only: importing this at runtime would be circular, since
     # hqnn_forge.models imports hqnn_forge.utils.
@@ -156,6 +164,7 @@ _NO_LEGACY_DEFAULT: frozenset[str] = frozenset()
 #: read back and so can never be caught again.
 _FORCED_OVERRIDES_ATTR = "_forced_overrides"
 
+#: File paths accepted by the checkpoint readers and writers.
 PathLike = str | os.PathLike[str]
 
 

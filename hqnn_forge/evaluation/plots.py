@@ -24,6 +24,15 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 
+__all__: list[str] = [
+    "confusion_matrix",
+    "pareto_frontier",
+    "plot_confusion_matrix",
+    "plot_efficiency_frontier",
+    "plot_fold_metric_boxplot",
+    "plot_reliability_diagram",
+]
+
 if TYPE_CHECKING:  # pragma: no cover
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure

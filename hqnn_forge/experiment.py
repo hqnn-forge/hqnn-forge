@@ -49,6 +49,18 @@ import numpy.typing as npt
 
 import hqnn_forge
 
+__all__: list[str] = [
+    "COMPARED_VERSIONS",
+    "RECORDED_PACKAGES",
+    "RECORD_FORMAT_VERSION",
+    "compare_environment",
+    "environment",
+    "load_record",
+    "rerun_benchmark",
+    "save_record",
+    "to_record",
+]
+
 if TYPE_CHECKING:
     from hqnn_forge.benchmark import BenchmarkResult
 

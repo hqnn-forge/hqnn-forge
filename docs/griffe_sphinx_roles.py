@@ -12,9 +12,14 @@ Resolution, for a role in the docstring of object ``obj``:
 
 * ``hqnn_forge.…`` -- qualified.  If it does not exist it is emitted as
   written, whatever its owner: the rules below for members griffe cannot see
-  apply to unqualified targets only (#578).
+  apply to unqualified targets only (#578).  For non-module roles a shadowed
+  module yields to its same-named member as below; if that member cannot be
+  resolved, the target is emitted as written too, and the strict build reports
+  the unrendered module.
 * anything else -- tried against ``obj``'s members, then each enclosing scope
-  up to the package root; the first existing object wins.  If none exists,
+  up to the package root; the first existing object wins.  For non-module
+  roles, a module shadowing a member of the same name yields to that member
+  (or the next scope if it cannot be resolved as a non-module).  If none exists,
   the reference is still emitted, at ``obj``'s module, so the build reports it.
 * A re-export resolves to the object's canonical path, where it is rendered:
   ``hqnn_forge.models.HybridBinaryClassifier`` and the class in
@@ -45,7 +50,8 @@ from typing import Any
 
 import griffe
 
-ROLE = re.compile(r":(?:class|func|meth|mod|data|attr|exc|obj):`(~?)([^`<>]+)`")
+ROLE = re.compile(r":(class|func|meth|mod|data|attr|exc|obj):`(~?)([^`<>]+)`")
+NON_MODULE_ROLES = {"class", "func", "meth", "data", "attr", "exc"}
 PACKAGE = "hqnn_forge"
 # As ``docstring_style`` in mkdocs.yml.
 DOCSTRING_STYLE = "numpy"
@@ -64,13 +70,24 @@ def _lookup(package: griffe.Module, path: str) -> griffe.Object | griffe.Alias:
     return package if path == PACKAGE else package[path[len(PACKAGE) + 1 :]]
 
 
-def _canonical(package: griffe.Module, path: str) -> str | None:
+def _canonical(package: griffe.Module, path: str, role: str = "obj") -> str | None:
     """The canonical path of the object at ``path`` (an import resolved to its
-    definition, where the page renders it), or None if there is none."""
+    definition, where the page renders it), or None if there is none.
+
+    For non-module roles, a module with a same-named member is a shadowed
+    export: resolve that member instead, or continue searching if it is
+    itself a module or an unresolved alias. Module and object roles retain
+    the module, as do modules without a same-named member.
+    """
     if not _in_package(path):
         return None
     try:
-        return str(_lookup(package, path).canonical_path)
+        found = _lookup(package, path)
+        if role in NON_MODULE_ROLES and found.is_module and found.name in found.members:
+            found = found.members[found.name]
+            if found.is_module:
+                return None
+        return str(found.canonical_path)
     except (KeyError, griffe.AliasResolutionError, griffe.CyclicAliasError):
         return None
 
@@ -106,7 +123,9 @@ def _members_known(obj: griffe.Object | griffe.Alias) -> bool:
     return len(bases) == len(obj.bases) and all(_members_known(b) for b in bases)  # type: ignore[union-attr]
 
 
-def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | None:
+def resolve(
+    target: str, obj: griffe.Object, package: griffe.Module, role: str = "obj"
+) -> str | None:
     """The object path ``target`` refers to from ``obj``, or None for plain code.
 
     Search scopes innermost first.  An unresolved dotted target is checked in
@@ -125,10 +144,10 @@ def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | No
     if any(p.startswith("_") and not _is_dunder(p) for p in parts):
         return None
     if parts[0] == PACKAGE:
-        return _canonical(package, target) or target
+        return _canonical(package, target, role) or target
     root_scope = None
     for scope in _scopes(obj):
-        found = _canonical(package, f"{scope}.{target}")
+        found = _canonical(package, f"{scope}.{target}", role)
         if found is not None:
             return found if _in_package(found) else None
         if root_scope is None and parts[0] in _lookup(package, scope).all_members:
@@ -158,8 +177,8 @@ def resolve(target: str, obj: griffe.Object, package: griffe.Module) -> str | No
 
 def convert(text: str, obj: griffe.Object, package: griffe.Module) -> str:
     def replace(match: re.Match[str]) -> str:
-        short, target = match.group(1), match.group(2)
-        path = resolve(target, obj, package)
+        role, short, target = match.groups()
+        path = resolve(target, obj, package, role)
         shown = target.strip().split(".")[-1] if short else target.strip()
         if path is None:
             return f"`{shown}`"
