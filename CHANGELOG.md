@@ -378,6 +378,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `numpy.random.seed` no longer makes the shot samples of an unseeded device repeat: the
   built-in simulators now draw an unseeded device's generator from OS entropy.  Pass the
   layer's or classifier's `seed` for repeatable shot-based results (#533)
+- The remaining rendered API modules declare `__all__`, keeping implementation imports out
+  of star imports and ensuring documentation checks cover every declared export (#550)
 - The package metadata links the repository, issue tracker and changelog, and the README's
   image and file links are absolute, so both work on PyPI (#327)
 - The README links the API reference site near the top and from Quick Start, Architecture and
