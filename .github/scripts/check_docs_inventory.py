@@ -5,8 +5,9 @@ under ``docs/api/`` that renders a package or module (``::: hqnn_forge.x``),
 the module must declare ``__all__``, every public name the module defines
 itself (not imports or submodules) must be in it, and every name in it must
 appear in the built site's ``objects.inv``: a name exported but missing from
-the reference is a hole in the documentation that the strict build does not see.  ``__all__`` is read
-statically with griffe, so the check needs neither torch nor PennyLane.
+the reference is a hole in the documentation that the strict build does not
+see.  ``__all__`` is read statically with griffe, so the check needs neither
+torch nor PennyLane.
 Root-package exports are also checked, even without a root page; only
 ``hqnn_forge.__version__`` is explicitly exempt from an API entry.
 """
