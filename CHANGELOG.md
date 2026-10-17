@@ -8,9 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Full-data published SHNN baseline: MCC 0.54222358 ± 0.03191070 (sample standard
-  deviation) and MCC/kParam 4.44445560; both unchanged published tolerance bands pass.
-  The README and full-precision record include all five folds and run provenance (#583)
 - Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the
@@ -370,6 +367,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `separation` distances, which stay on the features as the map returns them. On by default,
   recorded as `standardise` in `settings`; `--no-standardise` restores the features as returned
   and reads the same cache entries (#518, #545)
+- Full-data published SHNN baseline: MCC 0.5422 ± 0.0319 (sample standard deviation) and
+  MCC/kParam 4.444, inside both unchanged published bands, though every fold peaked at epoch 1
+  or 2. Recorded with all five folds and its provenance on a results page in the docs
+  (#184, #583)
 
 ### Changed
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating

@@ -49,8 +49,9 @@
     "optimizer_state": "One Adam optimizer per fold persists across all one-epoch train_model calls.",
     "documented_differences": [
       "Library stratified_kfold and smote draws differ from scikit-learn and imblearn.",
-      "BCEWithLogitsLoss replaces Sigmoid plus BCELoss; classical layers are reset to the benchmark default nn.Linear initialization."
-    ]
+      "BCEWithLogitsLoss replaces Sigmoid plus BCELoss."
+    ],
+    "classical_init": "Classical layers are reset to the default nn.Linear initialization, as the benchmark's SHNN leaves them; this matches the benchmark and is not a difference from it."
   },
   "backend": {
     "device": "default.qubit",
@@ -150,6 +151,7 @@
     "observer_sha256": "b8a861806e6a2cc0cce0ed41969e5b47a1d6322659afcc34b3abdaf19cebf1f8",
     "independent_aggregate_check": "stdlib math.fsum and explicit sample variance; cross-checked with statistics.stdev"
   },
+  "source_sha256_note": "Hashes of selected files on the run's path only, for quick spot checks; measured_commit is what pins the code that was run.",
   "source_sha256": {
     "uv.lock": "913ce5a328fcd18b6683520f9db775f3a65dd42172033b45640aa80ef207b82e",
     "tests/test_published_shnn_reproduction.py": "b375a59902fe2395d6ad0a7e9d0a09a15bb4c0d4864b24454ed8884a6d370ff3",

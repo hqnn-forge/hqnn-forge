@@ -481,8 +481,8 @@ hqnn_forge/
 `HybridBinaryClassifier.published_shnn()` matches the published model structurally, and
 `tests/test_published_shnn_parity.py` pins that. Whether the library also reproduces the
 published *numbers* (MCC 0.5758 ± 0.0371, MCC/kParam 4.720) is checked by an opt-in run of the
-benchmark's recipe: 5-fold CV with SMOTE on the training folds, up to 100 epochs. It needs the Kaggle
-dataset and can take hours to days of simulation, depending on the backend:
+benchmark's recipe: 5-fold CV with SMOTE on the training folds, up to 100 epochs. It needs the
+Kaggle dataset and took about 2 hours on the default backend (measured below):
 
 ```bash
 HQNN_FORGE_REPRODUCE=1 HQNN_FORGE_DATA=data/raw \
@@ -490,33 +490,15 @@ HQNN_FORGE_REPRODUCE=1 HQNN_FORGE_DATA=data/raw \
 ```
 
 The module docstring lists the recipe and every deliberate deviation from the benchmark code.
-**Measured on 2026-10-16 (UTC):** mean MCC **0.54222358 ± 0.03191070**
-(sample standard deviation over five folds), MCC/kParam **4.44445560** using all
-122 parameters. Both unchanged opt-in assertions passed (exit 0): mean MCC in
-[0.5387, 0.6129] and MCC/kParam within ±0.30409836 of 4.720. The measured mean is
-0.03357642 below the published 0.5758. This run meets the requested bands; it does not
-establish exact numerical replication or statistical equivalence.
-
-| Fold (zero based) | Test MCC | Best epoch | Validation threshold | Epochs run |
-|---|---:|---:|---:|---:|
-| 0 | 0.53880796 | 1 | 0.94 | 21 |
-| 1 | 0.56472257 | 1 | 0.94 | 21 |
-| 2 | 0.56049143 | 1 | 0.94 | 21 |
-| 3 | 0.55907282 | 2 | 0.94 | 22 |
-| 4 | 0.48802314 | 1 | 0.94 | 21 |
-
-Each restored model was scored on the same held-out 20% test set; the remaining 80% supplied
-the five training/validation folds. All thresholds reached the fixed grid's upper end, 0.94.
-The fold/SMOTE draws remain the library's, and the loss remains `BCEWithLogitsLoss` rather than
-the benchmark's `Sigmoid` + `BCELoss`; no recipe or tolerance was changed for this measurement.
-
-The run used commit `ef61672915da05fb8b317f2ddbeb2bf20dbdba93`, the full
-284,807-row/492-fraud dataset, and analytic `default.qubit` with `backprop` (the preset's
-resolved `auto` backend). With `OMP_NUM_THREADS=4`, `MKL_NUM_THREADS=4` and
-`OPENBLAS_NUM_THREADS=4` on an AMD Ryzen 7 250 CPU, it took about 2 hours. The
-[full-precision result and provenance](https://github.com/hqnn-forge/hqnn-forge/blob/main/docs/results/published_shnn_2026-10-16.json) records all
-scores, package versions, dataset/code hashes and capture details. A separate pytest setup
-probe reported Torch intra-op/inter-op counts of 4/8; it did not introspect the active run.
+**Measured on 2026-10-16 (UTC):** mean MCC **0.5422 ± 0.0319** (sample standard deviation over
+five folds) and MCC/kParam **4.444**, so both published bands pass, with the mean 0.0336 below
+the published 0.5758. Every fold's best validation MCC came at epoch 1 or 2, though, and early
+stopping ended each fold at epoch 21 or 22, so these scores reflect one or two epochs of
+training, not the 100-epoch budget; every restored threshold sits at the 0.94 top of the
+benchmark's grid. Why is still open (#588). The
+[results page](https://hqnn-forge.github.io/hqnn-forge/results/published-shnn-reproduction/)
+has all folds, the run's environment and its limits, and
+`docs/results/published_shnn_reproduction.json` the full-precision record and provenance.
 
 ---
 
