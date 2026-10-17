@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
+  rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
+  p-values in the records and CSV; experiment records retain the comparison (#586)
 - Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the
