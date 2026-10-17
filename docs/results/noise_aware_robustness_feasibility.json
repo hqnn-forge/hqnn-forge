@@ -1,0 +1,244 @@
+{
+  "status": "BOUNDED PROBES ONLY; NO ROBUSTNESS RESULTS COLLECTED",
+  "base_commit": "8bea1c003e42a9686b4d1a8a7afca246d08f811b",
+  "datasets": [
+    {
+      "dataset": "credit-card",
+      "rows": 284807,
+      "positives": 492,
+      "features": 29,
+      "finite": true,
+      "strict_source_check": true
+    },
+    {
+      "dataset": "taiwan",
+      "rows": 6819,
+      "positives": 220,
+      "features": 95,
+      "finite": true,
+      "strict_source_check": true
+    },
+    {
+      "dataset": "churn",
+      "rows": 3150,
+      "positives": 495,
+      "features": 13,
+      "finite": true,
+      "strict_source_check": true
+    },
+    {
+      "dataset": "cervical",
+      "rows": 668,
+      "positives": 45,
+      "features": 30,
+      "finite": true,
+      "strict_source_check": true
+    }
+  ],
+  "credit_card_source_sha256": "76274b691b16a6c49d3f159c883398e03ccd6d1ee12d9d8ee38f4b4b98551a89",
+  "timing_environment": {
+    "python": "3.13.15",
+    "pennylane": "0.45.1",
+    "torch": "2.14.1+cu130",
+    "device": "default.qubit",
+    "diff_method": "backprop",
+    "torch_threads": 4,
+    "torch_interop_threads": 1,
+    "hardware": "CPU"
+  },
+  "timing_procedure": "Synthetic random inputs, seed 0, focal loss, Adam lr=0.05, one warm-up step and two timed optimizer steps per configuration. Timings inherited from the preceding bounded feasibility probes on the same base; source dataset checks independently repeated for this draft. Not convergence or robustness measurements.",
+  "synthetic_step_probes": [
+    {
+      "qubits": 4,
+      "method": "density",
+      "k": null,
+      "channel": "depolarizing",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.3005593570123892,
+        0.2208491860073991
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 4,
+      "method": "density",
+      "k": null,
+      "channel": "amplitude_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.16724206099752337,
+        0.17596118900110014
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 4,
+      "method": "density",
+      "k": null,
+      "channel": "phase_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.15994428901467472,
+        0.14886406698497012
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 4,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "depolarizing",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.06686316497507505,
+        0.06416987199918367
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 4,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "amplitude_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.038405487983254716,
+        0.037843475001864135
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 4,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "phase_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.06264119100524113,
+        0.06318506898242049
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "density",
+      "k": null,
+      "channel": "depolarizing",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        10.698249823995866,
+        9.284507573000155
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "density",
+      "k": null,
+      "channel": "amplitude_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        7.315509831998497,
+        7.351901321992045
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "density",
+      "k": null,
+      "channel": "phase_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        7.354556912992848,
+        7.458318806980969
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "depolarizing",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.15059362599276938,
+        0.14275801900657825
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "amplitude_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.0862442459911108,
+        0.08859907899750397
+      ],
+      "finite_loss": true
+    },
+    {
+      "qubits": 6,
+      "method": "trajectories",
+      "k": 8,
+      "channel": "phase_damping",
+      "p": 0.2,
+      "position": "all",
+      "batch": 256,
+      "n_inputs": 29,
+      "layers": 2,
+      "seconds": [
+        0.14251456898637116,
+        0.19110816298052669
+      ],
+      "finite_loss": true
+    }
+  ]
+}
