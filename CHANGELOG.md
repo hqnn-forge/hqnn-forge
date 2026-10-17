@@ -8,9 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
-  rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
-  p-values in the records and CSV; experiment records retain the comparison (#586)
 - Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the
@@ -374,6 +371,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCC/kParam 4.444, inside both unchanged published bands, though every fold peaked at epoch 1
   or 2. Recorded with all five folds and its provenance on a results page in the docs
   (#184, #583)
+- `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
+  rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
+  p-values in the records and CSV; experiment records retain the comparison (#586)
 
 ### Changed
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
