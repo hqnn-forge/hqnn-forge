@@ -14,6 +14,7 @@ by ``qml.matrix`` for the same operator written in PennyLane.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import pennylane as qml
 import pytest
@@ -398,6 +399,72 @@ class TestAtomCount:
         )
         # each row holds one entry Ω/2 per atom
         assert h.real.sum(dim=1)[0].item() == pytest.approx(n * 1.0, rel=1e-14)
+
+
+class TestAllocation:
+    @pytest.mark.parametrize("batched", [False, True])
+    def test_no_intermediate_float64_dense_hamiltonian(
+        self, batched: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dense Hamiltonian is allocated once as complex128 without float64 intermediate (#529, #591)."""
+        n = 3
+        dim = 2**n
+        register = AtomRegister.chain(n, 5.0)
+        omega: float | torch.Tensor = 2.0
+        delta: list[float] | torch.Tensor = [0.1, 0.2, 0.3]
+        if batched:
+            omega = torch.tensor([[2.0], [3.0]], dtype=torch.float64)
+            delta = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=torch.float64)
+
+        dense_float64: list[tuple[str, torch.Size]] = []
+
+        def check(tensor: Any, op_name: str) -> None:
+            if (
+                isinstance(tensor, torch.Tensor)
+                and tensor.dtype == torch.float64
+                and tensor.ndim >= 2
+                and tensor.shape[-2:] == (dim, dim)
+            ):
+                dense_float64.append((op_name, tensor.shape))
+
+        orig_diag_embed = torch.diag_embed
+
+        def spy_diag_embed(input: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+            res = orig_diag_embed(input, *args, **kwargs)
+            check(res, "diag_embed")
+            return res
+
+        orig_to = torch.Tensor.to
+
+        def spy_to(self_tensor: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+            check(self_tensor, "Tensor.to(input)")
+            res = orig_to(self_tensor, *args, **kwargs)
+            check(res, "Tensor.to(output)")
+            return res
+
+        orig_zeros = torch.zeros
+
+        def spy_zeros(*args: Any, **kwargs: Any) -> torch.Tensor:
+            res = orig_zeros(*args, **kwargs)
+            check(res, "zeros")
+            return res
+
+        orig_empty = torch.empty
+
+        def spy_empty(*args: Any, **kwargs: Any) -> torch.Tensor:
+            res = orig_empty(*args, **kwargs)
+            check(res, "empty")
+            return res
+
+        monkeypatch.setattr(torch, "diag_embed", spy_diag_embed)
+        monkeypatch.setattr(torch.Tensor, "to", spy_to)
+        monkeypatch.setattr(torch, "zeros", spy_zeros)
+        monkeypatch.setattr(torch, "empty", spy_empty)
+
+        h = rydberg_hamiltonian(register, omega, delta, c6=DEFAULT_C6)
+
+        assert h.dtype == C128
+        assert not dense_float64, f"Found intermediate float64 dense Hamiltonian: {dense_float64}"
 
 
 class TestValidation:
