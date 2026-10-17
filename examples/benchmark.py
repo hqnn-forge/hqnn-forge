@@ -113,7 +113,15 @@ def main() -> None:
         print(
             f"{r['dataset']}: Wilcoxon p = {r['wilcoxon_p']:.4f} (smallest possible with "
             f"{r['n_folds']} folds: {r['wilcoxon_min_p']:.4f}), rank-biserial r = "
-            f"{r['rank_biserial']:+.2f}"
+            f"{r['rank_biserial']:+.2f}; Holm-adjusted p = {r['wilcoxon_p_holm']:.4f}"
+        )
+    if result.cross_dataset is not None:
+        comparison = result.cross_dataset
+        print(
+            f"Across {comparison['n_datasets']} datasets: Wilcoxon p = "
+            f"{comparison['wilcoxon_p']:.4f} (smallest possible with "
+            f"{comparison['n_pairs']} non-zero pairs: {comparison['wilcoxon_min_p']:.4f}), "
+            f"rank-biserial r = {comparison['rank_biserial']:+.2f}"
         )
     for row in result.noise:
         print(

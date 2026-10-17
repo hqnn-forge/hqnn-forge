@@ -164,6 +164,7 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "datasets": result.datasets,
             "folds": folds,
             "metrics": result.records,
+            "cross_dataset": result.cross_dataset,
             "noise": result.noise,
             "noise_summary": result.noise_summary,
         }

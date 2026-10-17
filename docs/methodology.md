@@ -107,6 +107,7 @@ sharpened it. That is one small dataset, not a general result about focal loss.
 | Question | Test | Where |
 |---|---|---|
 | Does the hybrid differ from its control on one dataset? | Paired Wilcoxon signed-rank test over folds (Wilcoxon 1945), with the rank-biserial correlation as effect size (Kerby 2014) | `wilcoxon_signed_rank`, `rank_biserial_correlation`; reported by `run_benchmark` |
+| Does the hybrid differ from its control across datasets? | Paired Wilcoxon over per-dataset mean MCCs, rank-biserial effect and attainable p-value floor (Demšar 2006) | `run_benchmark(...).cross_dataset` |
 | Do several models differ across several datasets? | Friedman test with the Iman–Davenport correction, then Nemenyi or Holm-corrected comparisons against a control (Demšar 2006) | `friedman_test`, `nemenyi_critical_difference`, `compare_to_control`, `holm_correction` (#273) |
 | How uncertain is one fold's score? | Class-stratified bootstrap interval, BCa or percentile (Efron 1987), and the paired interval of the difference between two models | `bootstrap_ci`, `paired_bootstrap_ci` (#274) |
 | How much does a score depend on initialisation? | Repetition over seeds | `run_benchmark(n_seeds=...)` |
@@ -121,7 +122,21 @@ Rules that follow from the tests:
   construction, and more folds are the remedy, not a looser threshold. Folds where both
   models score the same drop out.
 - **Two models across datasets:** with exactly two models, the Wilcoxon test over per-dataset
-  scores is the appropriate test (Demšar 2006); Friedman applies from three models on.
+  mean MCCs is the appropriate test (Demšar 2006), reported in `cross_dataset` when more than
+  one dataset is run, including in the saved experiment record. Each dataset contributes
+  one pair, with equal weight regardless of sample count, folds or seeds. Means are over
+  seeds within folds, then over folds. Positive rank-biserial effect favours the hybrid.
+  `n_datasets` counts all datasets and `n_pairs` counts non-zero mean differences; zeros
+  drop out, so five non-zero datasets cannot reach 0.05. With all means tied, the test is
+  undefined (NaN) and the effect is 0; with one dataset the comparison is `None`.
+  The runner currently compares exactly two models. For three or more, use
+  `friedman_test` with Iman–Davenport, then `nemenyi_critical_difference` for all pairs or
+  `compare_to_control` with Holm adjustment against one control.
+- **Per-dataset family.** `wilcoxon_p_holm` adjusts the raw fold-test p-values with
+  `holm_correction`, one hypothesis per dataset, repeated on both model rows. Undefined
+  tests remain NaN; they occupy an unrejectable p=1 slot during adjustment, so the family
+  size remains the number of datasets. These tests ask dataset-specific questions, separate
+  from the single cross-dataset hypothesis.
 - **Seeds.** With `n_seeds > 1`, each fold is trained once per seed and its score is the mean
   over seeds, so the paired test still pairs folds. `mcc_seed_std` reports the across-seed
   spread: a model whose score depends strongly on its initialisation shows it.
