@@ -17,7 +17,7 @@ import inspect
 import logging
 import os
 import warnings
-from typing import Literal, assert_never, get_args
+from typing import Literal, NoReturn, assert_never, get_args
 
 import pennylane as qml
 import torch
@@ -41,6 +41,11 @@ KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "d
 #: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
 #: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
+#: Devices :func:`resolve_device` passes an explicit ``seed=None`` when
+#: unseeded.  Omitting ``seed`` leaves PennyLane's ``"global"`` default, which
+#: draws a seed from ``np.random`` even for analytic circuits (#417); these
+#: devices accept ``None`` and create a private, entropy-seeded generator.
+_SEED_NONE_DEVICES: frozenset[str] = frozenset({*KNOWN_DEVICES, "default.mixed"})
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
 Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient"]
@@ -414,23 +419,64 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
         )
 
 
+def _raise_device_samples(device_name: str, *, finite_shots: int | None = None) -> NoReturn:
+    reason = (
+        f"has finite shots ({finite_shots})"
+        if finite_shots is not None
+        else "does not support analytic execution"
+    )
+    raise ValueError(
+        f"Device {device_name!r} {reason}, but "
+        "shots=None was requested. This device samples, so pass shots= and "
+        "diff_method='parameter-shift'."
+    )
+
+
 def validate_device_shots(device: qml.devices.Device, shots: int | None) -> None:
     """
-    Raise ``ValueError`` if *device* has finite shots but *shots* is ``None``.
+    Raise ``ValueError`` if *device* only samples or has finite shots but *shots* is ``None``.
 
-    A real sampling device (hardware, ``"qiskit.remote"``, ...) fails at the
-    first forward pass when given ``shots=None``, whichever exact method it
-    runs under.  Raising at construction with an informative
-    message guides users to pass explicit ``shots`` and ``parameter-shift``.
+    A real sampling device (hardware, ``"qiskit.remote"``, sampling plugins, ...)
+    cannot return exact expectation values and fails at the first forward pass when
+    given ``shots=None``, whichever exact method it runs under.  Raising at
+    construction with an informative message guides users to pass explicit
+    ``shots`` and ``diff_method='parameter-shift'``.
+
+    The device's own preprocessing decides: a small ``expval(Z)`` tape on its
+    first wire is compiled once with ``shots=None`` and once with finite shots.
+    If only the analytic compile fails, the device is sampling-only, whatever
+    the exception type.  If both fail, or the pipeline cannot be built, the
+    probe has nothing to say about shots and the layer is built as before.
     """
+    if shots is not None:
+        return
+
+    # Device-level shots, while PennyLane still supports them
     dev_shots = getattr(device, "shots", None)
     total_shots = getattr(dev_shots, "total_shots", dev_shots)
-    if total_shots is not None and shots is None:
-        raise ValueError(
-            f"Device {device.name!r} has finite shots ({total_shots}), but "
-            "shots=None was requested. This device samples, so pass shots= and "
-            "diff_method='parameter-shift'."
-        )
+    if total_shots is not None:
+        _raise_device_samples(device.name, finite_shots=total_shots)
+
+    try:
+        pipeline, _ = device.preprocess()
+    except Exception:  # noqa: BLE001 - unexpected device errors must not block layer construction
+        return
+
+    def compiles(probe_shots: int | None) -> bool:
+        wire = device.wires[0] if device.wires else 0
+        tape = qml.tape.QuantumScript([], [qml.expval(qml.Z(wire))], shots=probe_shots)
+        try:
+            pipeline([tape])
+        except Exception:  # noqa: BLE001 - comparing the two probes tells why one failed
+            return False
+        return True
+
+    if compiles(None) or not compiles(100):
+        # Analytic execution works, or the device rejects the probe for another reason
+        return
+
+    # The same tape compiles with shots but not without: the device is sampling-only
+    _raise_device_samples(device.name)
 
 
 def shots_repr(shots: int | None, seed: int | None = None) -> str:
@@ -501,11 +547,13 @@ def resolve_device(
         Number of qubits to allocate.
     seed:
         Seed of the device's own random generator, which draws the shot
-        samples.  ``None`` leaves PennyLane's default, which seeds from the
-        global NumPy generator: ``torch.manual_seed`` does not reach it, so
-        shot-based results then differ from run to run.  ``default.qubit``,
-        ``default.mixed`` and the lightning devices honour it; a plugin device
-        is passed it as given.  See ``validate_seed``.
+        samples.  ``None`` creates an unseeded private generator, without
+        drawing from NumPy's global RNG.  Neither ``torch.manual_seed`` nor
+        ``numpy.random.seed`` controls it: pass ``seed`` for repeatable
+        shot-based results.  ``default.qubit``,
+        ``default.mixed`` and the lightning devices honour it.  Other plugins
+        receive an explicit seed as given, while ``None`` leaves their default
+        unchanged (they need not accept a ``seed`` keyword).  See ``validate_seed``.
 
     Returns
     -------
@@ -532,7 +580,10 @@ def resolve_device(
         itself is broken.
     """
     seed = validate_seed(seed)
-    kwargs: dict[str, object] = {} if seed is None else {"seed": seed}
+    kwargs: dict[str, object] = {"seed": seed}
+    if seed is None and device_name not in _SEED_NONE_DEVICES:
+        # A plugin need not accept a seed keyword: leave its default alone.
+        kwargs = {}
     if device_name not in KNOWN_DEVICES:
         dev = qml.device(device_name, wires=n_qubits, **kwargs)
         logger.debug("Quantum device initialised: %s (%d qubits)", device_name, n_qubits)

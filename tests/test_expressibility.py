@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib
 import math
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any
 
 import pennylane as qml
@@ -561,3 +563,12 @@ class TestSettings:
     def test_entangling_capability_needs_two_samples(self) -> None:
         with pytest.raises(ValueError, match="n_samples must be ≥ 2"):
             entangling_capability(QuantumEncodingLayer(n_qubits=3, n_layers=1, **CPU), 1)
+
+
+def test_a_seeded_estimate_leaves_the_global_numpy_rng_alone(
+    numpy_rng_untouched: Callable[[], AbstractContextManager[None]],
+) -> None:
+    # #417: the sampling device must not draw its seed from np.random.
+    layer = QuantumEncodingLayer(n_qubits=3, n_layers=1, **CPU)
+    with numpy_rng_untouched():
+        expressibility(layer, n_pairs=20, n_bins=10, generator=torch.Generator().manual_seed(0))

@@ -76,6 +76,10 @@ RECORDED_PACKAGES: tuple[str, ...] = (
     "scipy",
 )
 
+#: The entries of :func:`environment` besides ``packages`` that
+#: :func:`compare_environment` compares; the ``platform`` string is not one.
+COMPARED_VERSIONS: tuple[str, ...] = ("python", "implementation", "hqnn_forge")
+
 
 def environment() -> dict[str, Any]:
     """Python, platform, ``hqnn_forge`` and :data:`RECORDED_PACKAGES` versions."""
@@ -201,7 +205,7 @@ def compare_environment(recorded: Mapping[str, Any]) -> dict[str, tuple[Any, Any
     """
     current = environment()
     differences: dict[str, tuple[Any, Any]] = {}
-    for key in ("python", "implementation", "hqnn_forge"):
+    for key in COMPARED_VERSIONS:
         if recorded.get(key) != current[key]:
             differences[key] = (recorded.get(key), current[key])
     recorded_packages = recorded.get("packages", {})
