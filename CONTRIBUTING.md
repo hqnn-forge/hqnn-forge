@@ -274,6 +274,9 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     add a `date-released`.
 *   **When uv moves to a new minor release, raise the `uv_build` cap in `[build-system]` in
     `pyproject.toml`.** Dependabot opens that PR itself (#551); merge it once CI is green.
+*   **Before a release, check the tool pins in `.github/workflows/release.yml`**: the uv
+    `version:` on both setup-uv steps and the `twine==` in the metadata check. Dependabot does
+    not update them. Keep uv within the `uv_build` range, and raise both in their own PR.
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 
