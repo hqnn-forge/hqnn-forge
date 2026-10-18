@@ -1076,10 +1076,10 @@ class TestInputs:
         ``5e-17``, not 0, and a variance (``2.6e-33``) below the rounding bound
         of :func:`standardise_features` (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
         The other three columns, standardised, span a plane plus a direction
-        of variance ``2.4e-5``, so with three components the third is that
-        small direction.  The rounding noise,
-        scaled to unit variance by the ``σ == 0`` rule, would take that slot
-        instead: an independent column of variance 1 against ``2.4e-5``.
+        of variance ``2.9e-5``, so with three components the third is that
+        small direction.  The rounding noise, scaled to unit variance by the
+        ``σ == 0`` rule, would take that slot instead: an independent column
+        of variance 1 against ``2.9e-5``.
 
         Expected value by hand: the columns scaled by scikit-learn's
         ``StandardScaler`` (which centres the rounding column only), then the
@@ -1107,7 +1107,7 @@ class TestInputs:
         assert np.abs(leading[3]).max() < 1e-12  # the column loads on no component
         projected = (scaled - scaled[rows].mean(0)) @ leading
         # ``PCANormalizer`` adds 1e-8 to each component's σ; on the third,
-        # σ ≈ 4.9e-3, that is a relative 2e-6, above the float32 tolerance.
+        # σ ≈ 5.4e-3, that is a relative 2e-6, above the float32 tolerance.
         by_hand = math.pi * np.tanh(projected / (projected[rows].std(0, ddof=1) + 1e-8))
 
         inputs = bench.preprocess(X, rows, 3)

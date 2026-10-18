@@ -73,10 +73,10 @@ For a dataset ``(X, y)`` and one outer fold of :func:`stratified_kfold`
    column constant there up to rounding is only centred), and a
    :class:`PCANormalizer` fitted on the training part reduces the result to
    ``N`` components, each squashed to ``(−π, π)`` (``π · tanh`` of the
-   standardised component).  Test rows
-   enter neither fit.  **Component ``i`` is input ``i``, and input ``i``
-   sets the detuning of atom ``i``**, the atom at position ``(i · a, 0)`` of
-   the chain: neighbouring components sit on neighbouring atoms.
+   standardised component).  Test rows enter neither fit.  **Component
+   ``i`` is input ``i``, and input ``i`` sets the detuning of atom ``i``**,
+   the atom at position ``(i · a, 0)`` of the chain: neighbouring
+   components sit on neighbouring atoms.
 3. **Oversampling.**  :func:`smote` on the training rows' inputs.  The
    synthetic rows are made once, in input space, so every arm trains on the
    same samples; validation and test rows are real rows only.
@@ -1432,7 +1432,8 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
     Step 4 of the module docstring: :func:`run_dataset` passes each
     split's real training rows (:attr:`Split.real_train`) unless
     ``Settings.standardise`` is off.  Step 2 as well: :func:`preprocess`
-    standardises the raw columns with it, on the fold's training part.
+    standardises the raw columns with it, on the rows its PCA is fitted on
+    (an outer fold's training part, a tuning fold's fitting rows).
 
     Definition
     ----------
@@ -1445,13 +1446,13 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
         σ_j² = (1/n) Σ_{r ∈ R} (F[r, j] − μ_j)²
         Z[r, j] = (F[r, j] − μ_j) / σ_j          for every row r
 
-    with the population variance (``1/n``, not ``1/(n − 1)``).
-    :func:`preprocess` scales the raw columns with it too (step 2).  A column that is constant
-    on the fitting rows is only centred (``σ_j`` is replaced by 1; see
-    "Constant columns" below).  ``Z`` is dimensionless whatever the unit of
-    ``F``; on the fitting rows each column of ``Z`` has mean 0 and, unless
-    it is constant there, variance 1.  Rows outside ``R`` enter neither
-    ``μ`` nor ``σ``: changing one changes that row of ``Z`` and no other.
+    with the population variance (``1/n``, not ``1/(n − 1)``).  A column
+    that is constant on the fitting rows is only centred (``σ_j`` is
+    replaced by 1; see "Constant columns" below).  ``Z`` is dimensionless
+    whatever the unit of ``F``; on the fitting rows each column of ``Z`` has
+    mean 0 and, unless it is constant there, variance 1.  Rows outside ``R``
+    enter neither ``μ`` nor ``σ``: changing one changes that row of ``Z``
+    and no other.
 
     What it removes
     ---------------
