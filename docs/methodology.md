@@ -177,6 +177,29 @@ What this models, and what it does not:
 - **Mixed-state simulation** (`default.mixed`), which costs `4^n` memory per sample and limits
   the sweep to small circuits.
 
+## Optional robustness protocol
+
+`pca_components` selects inner-training-only standardisation and unwhitened
+SVD, with denominator `std+1e-12`; `None` keeps the ordinary preprocessing above.
+PCA with nested tuning is rejected. Channel-aware sweeps can retain both the
+clean threshold and a threshold selected solely on noisy validation rows.
+Legacy `noise_mcc`/noise summaries always keep their fixed-threshold meaning;
+`noise_results` records the additional retuned scores and confusion counts.
+
+`ValidationExtension`, off by default, permits a single validation-triggered
+restart with original weights/seeds, fresh Adam and no patience; checkpoint
+selection remains clean validation MCC. Each attempt and its budget is
+recorded before test scoring. `fold_indices` selects shards after the complete
+seed tree; aggregates describe only completed folds. The observer callback
+runs after scoring with isolated Torch, NumPy and Python randomness.
+
+The [frozen #348 study](results/noise-aware-robustness-study.md) declares its
+separate twelve-hypothesis noise-trained versus noiseless-hybrid comparison,
+with seeds averaged inside ten folds, study-local zero tolerance and Holm
+slots retained for undefined tests. The ordinary benchmark's hybrid/control
+and cross-dataset tests answer different questions. No measured robustness
+recommendation follows from these tooling additions.
+
 ## Reproducibility
 
 `run_benchmark(record_path=...)` writes an **experiment record** (`hqnn_forge.experiment`,

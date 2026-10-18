@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Prospective noise-aware robustness protocol and sanitized feasibility metadata; the
-  scientific protocol and actual robustness measurements remain pending (#593)
+- Optional inner-training PCA, channel-aware fixed/retuned noise scoring, validation-only
+  training extension and replayable fold shards; frozen resumable robustness study runner,
+  with scientific measurements and conclusions still pending (#593)
 - Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the

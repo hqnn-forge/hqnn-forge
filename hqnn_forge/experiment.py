@@ -125,6 +125,23 @@ def _plain(value: Any) -> Any:
     )
 
 
+def _finite_diagnostics(value: Any) -> Any:
+    """Strict-JSON attempt diagnostics; invalid numeric measurements become null.
+
+    Scoped to additive diagnostic fields. The legacy plain-data/configuration
+    serializer keeps its existing infinity rejection through strict JSON.
+    """
+    if isinstance(value, float | np.floating) and not math.isfinite(value):
+        return None
+    if isinstance(value, Mapping):
+        return {str(key): _finite_diagnostics(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_finite_diagnostics(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _finite_diagnostics(value.tolist())
+    return _plain(value)
+
+
 def to_record(result: BenchmarkResult) -> dict[str, Any]:
     """The JSON-ready experiment record of ``result`` in the current environment."""
     folds = [
@@ -145,6 +162,8 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "device": f.device,
             "hyperparameters": f.hyperparameters,
             "noise_mcc": {repr(level): mcc for level, mcc in f.noise_mcc.items()},
+            "noise_results": f.noise_results,
+            "diagnostics": _finite_diagnostics(f.diagnostics),
             "threshold": f.threshold,
             "mcc": f.mcc,
             "brier": f.brier,
@@ -298,7 +317,7 @@ def rerun_benchmark(
         one, or if the rebuilt models' configs differ from the recorded ones.
     """
     from hqnn_forge import models as model_module
-    from hqnn_forge.benchmark import Tuning, fingerprint, run_benchmark
+    from hqnn_forge.benchmark import Tuning, ValidationExtension, fingerprint, run_benchmark
 
     recorded_data = record["datasets"]
     if list(datasets) != list(recorded_data):
@@ -345,6 +364,16 @@ def rerun_benchmark(
         noise_levels=settings.get("noise_levels"),
         noise_position=settings.get("noise_position", "all"),
         alpha=settings.get("alpha", 0.05),
+        pca_components=settings.get("pca_components"),
+        noise_channel=settings.get("noise_channel", "depolarizing"),
+        retune_noise_threshold=settings.get("retune_noise_threshold", False),
+        noise_batch_size=settings.get("noise_batch_size"),
+        fold_indices=settings.get("fold_indices"),
+        validation_extension=(
+            None
+            if settings.get("validation_extension") is None
+            else ValidationExtension(**settings["validation_extension"])
+        ),
     )
     rebuilt = _plain(result.models)
     if rebuilt != recorded_models:

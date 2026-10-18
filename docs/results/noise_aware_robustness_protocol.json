@@ -1,0 +1,164 @@
+{
+  "issue": 348,
+  "decision": "https://github.com/hqnn-forge/hqnn-forge/pull/593#issuecomment-6245122029",
+  "version": 1,
+  "status": "frozen_before_robustness_measurements",
+  "datasets": [
+    "credit_card",
+    "taiwan",
+    "churn",
+    "cervical"
+  ],
+  "strict_sources": true,
+  "duplicate_policy": "first_source_order_feature_vector_independent_of_label",
+  "credit_card": {
+    "drop_time": true,
+    "sample_seed": 348,
+    "draw_order": [
+      "negative",
+      "positive"
+    ],
+    "negative_rows": 116359,
+    "positive_rows": 200,
+    "retain_source_order": true,
+    "test_recall_resolution": 0.05
+  },
+  "cervical": {
+    "missing": "drop",
+    "exclude_leakage_columns": true
+  },
+  "pca": {
+    "components": 4,
+    "fit_rows": "inner_training_only",
+    "standardisation": "(X-mean)/(std+1e-12)",
+    "svd": "full_matrices=False",
+    "whiten": false,
+    "rescale": false
+  },
+  "model": {
+    "class": "HybridBinaryClassifier",
+    "n_input_features": 4,
+    "n_qubits": 4,
+    "n_layers": 2,
+    "encoding_type": "angle",
+    "rotation": "RX",
+    "entangler": "ring",
+    "readout": "all_Z",
+    "encoder": "tanh",
+    "init_strategy": "restricted",
+    "init_seed": null,
+    "dropout_p": 0.0,
+    "device_name": "default.qubit",
+    "diff_method": "backprop",
+    "shots": null
+  },
+  "training": {
+    "root_seed": 348,
+    "n_splits": 10,
+    "validation_folds": 5,
+    "n_seeds": 2,
+    "oversample": false,
+    "loss": {
+      "class": "FocalLoss",
+      "alpha": 0.25,
+      "gamma": 2.0,
+      "reduction": "mean"
+    },
+    "optimizer": {
+      "class": "Adam",
+      "lr": 0.05,
+      "other_options": "locked torch defaults"
+    },
+    "batch_size": 32,
+    "input_dtype": "float32",
+    "device": "cpu",
+    "max_epochs": 30,
+    "patience": 10,
+    "monitor": "clean_validation_mcc",
+    "restore_best": true,
+    "extension": {
+      "max_epochs": 60,
+      "patience": null,
+      "min_mcc": 0.1,
+      "min_pr_auc_ratio": 2.0,
+      "max_restarts": 1,
+      "fresh_optimizer": true,
+      "restart_original_weights_and_seeds": true,
+      "select_second_even_if_worse": true,
+      "validation_noise": "own_training_channel_and_strength"
+    }
+  },
+  "channels": [
+    "depolarizing",
+    "amplitude_damping",
+    "phase_damping"
+  ],
+  "training_strengths": [
+    0.0,
+    0.2
+  ],
+  "evaluation_strengths": [
+    0.0,
+    0.01,
+    0.05,
+    0.1,
+    0.2
+  ],
+  "placement": "all",
+  "density_only": true,
+  "prediction_chunk_size": 256,
+  "thresholds": {
+    "primary": "evaluation_noise_validation_retuned",
+    "secondary": "fixed_clean_validation",
+    "test_tuning": false
+  },
+  "interpretation_guard": {
+    "baseline": "noiseless_hybrid_clean_validation",
+    "seed_summary": "median",
+    "min_mcc": 0.1,
+    "min_pr_auc_prevalence_ratio": 2.0,
+    "minimum_passing_folds": 8,
+    "weak_clean_test": "learning_limited_inconclusive",
+    "no_deletion_or_reweighting": true
+  },
+  "inference": {
+    "family_size": 12,
+    "primary_training_strength": 0.2,
+    "primary_evaluation_strength": 0.2,
+    "comparator": "noiseless_hybrid",
+    "unit": "ten_folds_after_mean_of_two_paired_seed_differences",
+    "test": "two_sided_exact_wilcoxon",
+    "local_mean_zero_atol": 1e-12,
+    "correction": "Holm",
+    "alpha": 0.05,
+    "undefined_slot": 1.0,
+    "undefined_report": null,
+    "secondary": "descriptive_only",
+    "non_rejection": "inconclusive_about_equality"
+  },
+  "execution": {
+    "block": [
+      "protocol_hash",
+      "data_fingerprint",
+      "channel",
+      "training_strength",
+      "fold"
+    ],
+    "immutable_completed_blocks": true,
+    "incomplete_block": "restart_same_recipe",
+    "torch_threads": 4,
+    "torch_interop_threads": 1,
+    "maximum_processes": 4
+  },
+  "scope_limits": [
+    "no upward mismatch",
+    "no milder-noise training",
+    "no cross-channel mismatch",
+    "no hardware claim",
+    "credit-card subsample only",
+    "unique-feature-vector population",
+    "cervical complete-case selection and sparse positives",
+    "overlapping training folds and limited power",
+    "end placement analytic control only"
+  ]
+}
