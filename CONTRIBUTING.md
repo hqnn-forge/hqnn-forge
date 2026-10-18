@@ -276,7 +276,11 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     `CITATION.cff` to the new version (`tests/test_citation.py` fails until it does) and can
     add a `date-released`.
 *   **When uv moves to a new minor release, raise the `uv_build` cap in `[build-system]` in
-    `pyproject.toml`.** Dependabot opens that PR itself (#551); merge it once CI is green.
+    `pyproject.toml`.** Dependabot opens that PR itself (#551). The `package` CI job in
+    `.github/workflows/tests.yml` builds the sdist and wheel with both the newest allowed
+    `uv_build` backend and the declared floor (`uv build --force-pep517`), runs strict twine
+    checks on both sets of artifacts, and verifies that both builds contain the same files
+    and the same metadata. Merge it once CI is green.
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 

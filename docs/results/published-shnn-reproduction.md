@@ -52,9 +52,16 @@ Measured on 2026-10-16 (UTC). Both unchanged opt-in assertions passed (exit 0):
 - **The models barely trained.** Every fold's best validation MCC came at epoch 1 or 2, and
   early stopping ended each fold at epoch 21 or 22. These scores therefore reflect one or two
   epochs of training, not the 100-epoch budget. Every restored threshold also sits at 0.94,
-  the top of the benchmark's grid. Whether that cap is what keeps validation MCC from improving
-  is not established, because the run did not keep the per-epoch validation MCC; #587 records
-  it and #588 investigates the cause.
+  the top of the benchmark's grid. The retained stdout logs contain all 106 per-epoch
+  observations, including validation MCC and training loss rounded to four decimal places.
+  These logs are retained but are not published with this page. The published result JSON
+  omits this history, and full-precision trajectories, per-epoch thresholds, and
+  uncapped-threshold diagnostics were not captured. The rounded logs cannot always explain
+  why a particular epoch was restored, because early stopping selects the best epoch using
+  full-precision validation MCC, and different epochs can have the same value when rounded
+  to four decimal places. Whether the grid cap contributed to early stopping is not
+  established; #587 requests the full-precision per-epoch history for future runs, and #588
+  investigates the cause.
 - **The bands are loose.** A pass means the mean lies within one published fold standard
   deviation of the published mean. It does not establish exact numerical replication or
   statistical equivalence.
