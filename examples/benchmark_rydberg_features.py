@@ -243,6 +243,10 @@ Data
     shown an effect.  That holds for the ``linear`` head.  An ``mlp`` head
     can form products of its inputs itself, on arm B's features as on the
     inputs, so its ``A − B`` on this task is no check of the pipeline.
+    It has ``2^N − 1`` raw columns, so ``N`` is at most
+    :data:`POSITIVE_CONTROL_MAX_ATOMS` (12) on it with any arms: each PCA
+    fit of a fold takes their covariance, about 0.7 GiB at 12 atoms and
+    2.6 GiB at 13.
 ``iranian-churn``, ``taiwanese-bankruptcy``, ``cervical-cancer-risk``
     The UCI loaders of :mod:`hqnn_forge.data`, read from ``--data-path``
     (``--download`` fetches a missing file).
@@ -412,7 +416,10 @@ class Settings:
         ``2^N`` ``complex128`` amplitudes, so ``1024 · 16 · 2^N`` bytes per
         copy of the batch: 64 MiB at 12 qubits, doubling with each further
         one (1 GiB at 16); ``D-hybrid`` trains through backprop, measured at
-        more than 1 GB for a batch of 64 at 14 qubits.
+        more than 1 GB for a batch of 64 at 14 qubits.  The positive control
+        has a bound of its own, :data:`POSITIVE_CONTROL_MAX_ATOMS` (12) with
+        every arm, checked by :func:`positive_control` when it is loaded:
+        each PCA fit takes the covariance of its ``2^N − 1`` columns.
     omega:
         Rabi frequency Ω in rad/µs.  Default: the reference ``4π``.
     omega_t:
@@ -599,6 +606,22 @@ QUICK = Settings(
 # Data
 # ---------------------------------------------------------------------------
 
+#: Largest ``n_atoms`` of :func:`positive_control`, whatever the arms (#540).  The control
+#: has ``2^N − 1`` raw columns, and every :func:`preprocess` fits a :class:`PCANormalizer`
+#: on them: an ``np.cov`` of ``8 · (2^N − 1)²`` bytes (128 MiB at ``N = 12``, 512 MiB at
+#: 13), then its ``eigh`` and a sorted copy of the eigenvectors, the same size again each,
+#: plus LAPACK's workspace, whatever the number of samples.  Measured per fit (peak resident
+#: memory above the import, wall time; the training rows of one default fold of 600
+#: samples, and of ``--quick``'s 160): 0.05 to 0.07 GiB and under 0.4 s at ``N = 10``, 0.7
+#: GiB and 10 to 13 s at 12, 2.6 to 2.7 GiB and about 75 s at 13; a run fits ``n_splits · (1 + inner_folds)``
+#: times with tuning (40 at the defaults).  12 is therefore the largest ``N`` whose fit stays
+#: under 1 GiB, the scale at which :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS`
+#: switches away from backprop to bound memory, and it is arm D's own limit, so arms C and
+#: D run on the control at their largest register.  The raw matrix,
+#: ``8 · n_samples · (2^N − 1)`` bytes, is the smaller term (38 MiB at ``N = 12`` and 600
+#: samples); ``--samples`` scales it and the rank check's SVD, not the covariance.
+POSITIVE_CONTROL_MAX_ATOMS: Final = 12
+
 
 class PositiveControl(NamedTuple):
     """
@@ -703,7 +726,8 @@ def positive_control(
     Parameters
     ----------
     n_atoms:
-        ``N >= 2``.
+        ``2 <= N <=`` :data:`POSITIVE_CONTROL_MAX_ATOMS` (12), whatever the
+        arms: the covariance of the ``2^N − 1`` columns is the bound.
     n_samples:
         Number of samples.
     seed:
@@ -717,6 +741,11 @@ def positive_control(
     """
     if n_atoms < 2:
         raise ValueError(f"n_atoms must be >= 2 for a chain with a bond; got {n_atoms}.")
+    if n_atoms > POSITIVE_CONTROL_MAX_ATOMS:
+        raise ValueError(
+            f"n_atoms must be <= {POSITIVE_CONTROL_MAX_ATOMS} with the positive control "
+            f"(2^N - 1 raw columns); got {n_atoms}."
+        )
     if noise <= 0:
         raise ValueError(f"noise must be > 0; got {noise}.")
     rng = np.random.default_rng(seed)
@@ -2221,7 +2250,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "atoms N: PCA components, inputs, and arm-D qubits; "
             "also shapes the positive-control dataset; "
-            f"at most {MAX_ATOMS} with arm A or B and {AUTO_BACKPROP_MAX_QUBITS} with arm D"
+            f"at most {MAX_ATOMS} with arm A or B, {AUTO_BACKPROP_MAX_QUBITS} with arm D "
+            f"and {POSITIVE_CONTROL_MAX_ATOMS} on positive-control"
         ),
     )
     parser.add_argument(

@@ -796,6 +796,23 @@ class TestPositiveControl:
         with pytest.raises(ValueError, match="unknown dataset"):
             bench.load_dataset("mnist", settings)
 
+    @pytest.mark.parametrize("arms", [("C",), ("C", "D")])
+    def test_n_atoms_above_its_bound_is_refused_with_any_arms(self, arms: tuple[str, ...]) -> None:
+        """#540: ``2^N − 1`` columns, 2.6 GiB per PCA fit at 13; 12 is the bound."""
+        assert bench.POSITIVE_CONTROL_MAX_ATOMS == 12
+        message = "n_atoms must be <= 12 with the positive control (2^N - 1 raw columns); got 13."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.positive_control(13, 3, seed=0)
+        # Settings leaves it to the dataset: with arm C alone nothing else bounds n_atoms.
+        settings = bench.Settings(n_atoms=13, arms=("C",), n_samples=3)
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.load_dataset("positive-control", settings)
+        # 12 is built, with every arm that can run at 12
+        settings = bench.Settings(n_atoms=12, arms=arms, n_samples=3)
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        assert X.shape == (3, 2**12 - 1)
+        assert y.shape == (3,)
+
 
 CHURN_HEADER = [
     "Call  Failure",
@@ -910,6 +927,8 @@ class TestCommandLine:
             (["--batch-size", "0"], "batch_size"),
             (["--lr", "0"], "lr must be > 0"),
             (["--n-atoms", "13", "--arms", "C", "D"], "n_atoms"),
+            # refused by the positive control when it is loaded (2^N - 1 columns)
+            (["--n-atoms", "13", "--arms", "C"], "n_atoms must be <= 12 with the positive"),
             # refused by the splits, with the data in hand: no record, so no new file
             (["--folds", "100"], "n_splits"),
             (["--inner-folds", "100"], "n_splits"),
@@ -1031,6 +1050,28 @@ class TestCommandLine:
         with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             bench.main(["--arms", "C", "D", "--n-atoms", "13", "--out", str(out), "--no-cache"])
         assert loaded == []
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_the_positive_control_above_its_bound_is_refused_before_anything_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#540: with arm C alone no arm bounds ``n_atoms``; the control's 2^N − 1 columns do."""
+        started: list[str] = []
+
+        def run_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            started.append(name)
+            yield from ()
+
+        monkeypatch.setattr(bench, "run_dataset", run_dataset)
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        message = "n_atoms must be <= 12 with the positive control (2^N - 1 raw columns); got 13."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.main(
+                ["--arms", "C", "--n-atoms", "13", "--samples", "40", "--out", str(out)]
+                + ["--no-cache"]
+            )
+        assert started == []
         assert out.read_text(encoding="utf-8") == "an earlier run\n"
 
     @pytest.mark.parametrize(("flag", "patience"), [("0", None), ("-2", None), ("1", 1), ("7", 7)])
