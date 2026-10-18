@@ -12,8 +12,8 @@ a ``with`` block, always as an exact density matrix on ``default.mixed`` whateve
 the layer's ``noise_method``, swapping only the QNode and restoring it when the
 block exits. Gradients still flow, so optimizer steps inside the block can update
 model weights. :func:`apply_readout_error` applies readout error, and
-:func:`noise_sweep` repeats either over a range of strengths with
-``channel="readout"``. :func:`apply_shots` and :func:`shot_sweep` evaluate with
+:func:`noise_sweep` repeats either over a range of strengths (``channel="readout"``
+for readout error). :func:`apply_shots` and :func:`shot_sweep` evaluate with
 finite shots (see *Shot noise*).
 
 Channel
