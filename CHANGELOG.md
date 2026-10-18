@@ -376,6 +376,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   p-values in the records and CSV; experiment records retain the comparison (#586)
 
 ### Changed
+- `rydberg_hamiltonian` allocates the dense Hamiltonian directly as `complex128`, reducing peak
+  memory usage during construction by avoiding an intermediate `float64` matrix (#591)
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
   its probabilities and score across `n_repeats` without changing finite-shot sampling (#532)
 - `numpy.random.seed` no longer makes the shot samples of an unseeded device repeat: the
