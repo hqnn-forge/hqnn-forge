@@ -1092,16 +1092,18 @@ class TestCommandLine:
     def test_without_early_stopping_every_epoch_runs_and_patience_is_recorded_as_null(
         self, tmp_path: Path
     ) -> None:
+        # More epochs than the default patience (10), which stops these heads after 11.
+        assert bench.Settings().patience == 10
         out = tmp_path / "results.jsonl"
         arguments = ["--patience", "0", "--arms", "C", "--trials", "0", "--folds", "2"]
-        arguments += ["--max-folds", "1", "--epochs", "5", "--samples", "80"]
+        arguments += ["--max-folds", "1", "--epochs", "15", "--samples", "80"]
         records = bench.main([*arguments, "--out", str(out), "--no-cache"])
         assert [(r["arm"], r["head"]) for r in records] == [("C", "linear"), ("C", "mlp")]
         lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
         for line in lines:
             assert line["settings"]["patience"] is None
             assert line["hyperparameters"]["patience"] is None
-            assert line["epochs"] == 5  # train_model stops early only with a patience
+            assert line["epochs"] == 15  # train_model stops early only with a patience
         assert '"patience": null' in out.read_text(encoding="utf-8")
 
     def test_main_hides_no_warning_of_the_run(
