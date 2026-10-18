@@ -358,7 +358,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stratified subsampling, exported as `stratified_subsample_indices` from
   `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
   `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
-  dephasing rate and fold (#519, #520)
+  dephasing rate and fold. The limit is on by default at 2000 rows: a training or test part
+  above 2000 rows records its `separation` from a subsample, a smaller part is measured in
+  full (#519, #520)
 - `examples/benchmark_rydberg_features.py` standardises each head's features per fold, with the
   mean and standard deviation of the fold's real training rows (never synthetic, validation or
   test rows), for arms A, B, C and D alike (not `D-hybrid`), so that a score under strong
@@ -532,6 +534,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/does_the_quantum_layer_help.py` now reuses the rounding-aware
   feature standardisation so near-constant columns are centred rather than
   incorrectly scaled to unit variance (#604)
+- `examples/benchmark_rydberg_features.py`: the summary's `feat s` and `fit s` columns average
+  only the lines that were computed, so a row of reused arm B lines shows `-` instead of
+  `0.00`; `--max-separation-rows` 1, 2 or a negative value ends in a command-line error
+  instead of a traceback or no limit, and `0` is the one spelling of no limit; the docstring
+  states that a reused line's `feature_cache_hit` is that of its source line (#541, #PR)
+- `separation_measures` and `stratified_subsample_indices` refuse a `max_rows` that is a
+  float, a bool or a string with a `ValueError` naming it, where they failed late or took
+  `True` for one row, and so does `max_separation_rows` of the Rydberg benchmark's
+  `Settings`; with fewer rows than classes, ties between equally large classes go to the
+  lower label on every NumPy; both docstrings state that a small class can be left with one
+  row and what that does to the measures. `stratified_subset` of `examples/benchmark.py`
+  uses `stratified_subsample_indices`, so it keeps exactly `--max-rows` rows and every class
+  (the rows of the credit-card data at the default are unchanged) (#541, #PR)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
