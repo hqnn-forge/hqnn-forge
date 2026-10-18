@@ -1067,6 +1067,53 @@ class TestInputs:
         by_hand = math.pi * np.tanh(projected / projected[rows].std(0, ddof=1))
         np.testing.assert_allclose(bench.preprocess(X, rows, 4), by_hand, rtol=0, atol=2e-6)
 
+    def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
+        """
+        A raw column constant on the fitting rows up to rounding enters no component (#580).
+
+        Column 3 is a sum of tenths that is 1.5 in exact arithmetic, computed
+        in an order that leaves ``1.5`` and ``1.5 ± 2⁻⁵²``: a σ of about
+        ``5e-17``, not 0, and a variance (``2.6e-33``) below the rounding bound
+        of :func:`standardise_features` (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
+        The other three columns, standardised, span a plane plus a direction
+        of variance ``2.4e-5``, so with three components the third is that
+        small direction.  The rounding noise,
+        scaled to unit variance by the ``σ == 0`` rule, would take that slot
+        instead: an independent column of variance 1 against ``2.4e-5``.
+
+        Expected value by hand: the columns scaled by scikit-learn's
+        ``StandardScaler`` (which centres the rounding column only), then the
+        principal components with ``numpy.linalg.eigh``.  It must also equal
+        :func:`preprocess` on the three other columns alone.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        tenths = rng.integers(0, 6, size=(200, 3)) * 0.1
+        rounding = (tenths[:, 0] + tenths[:, 1]) + (tenths[:, 2] + (1.5 - tenths.sum(axis=1)))
+        X = np.column_stack([a, b, a + b + 0.01 * rng.standard_normal(200), rounding])
+        rows = np.arange(150)
+        # The premise: σ is not 0 (so ``σ == 0`` scales it), but the column is
+        # constant to scikit-learn as well.
+        assert 0 < X[rows, 3].std() < 1e-15
+        assert StandardScaler().fit(X[rows]).scale_[3] == 1.0
+
+        scaled = StandardScaler().fit(X[rows]).transform(X)
+        centred = scaled[rows] - scaled[rows].mean(0)
+        values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
+        leading = vectors[:, np.argsort(values)[::-1][:3]]
+        leading = leading * np.sign(leading[np.abs(leading).argmax(0), np.arange(3)])
+        assert np.abs(leading[3]).max() < 1e-12  # the column loads on no component
+        projected = (scaled - scaled[rows].mean(0)) @ leading
+        # ``PCANormalizer`` adds 1e-8 to each component's σ; on the third,
+        # σ ≈ 4.9e-3, that is a relative 2e-6, above the float32 tolerance.
+        by_hand = math.pi * np.tanh(projected / (projected[rows].std(0, ddof=1) + 1e-8))
+
+        inputs = bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(inputs, by_hand, rtol=0, atol=2e-6)
+        np.testing.assert_allclose(inputs, bench.preprocess(X[:, :3], rows, 3), rtol=0, atol=2e-6)
+
     def test_split_blocks_and_synthetic_rows(self) -> None:
         X, y = self._data()
         train, val, test = np.arange(0, 70), np.arange(70, 90), np.arange(90, 120)
@@ -1909,13 +1956,16 @@ class TestStandardisationInARun:
         Each call fits on the first rows of its split's training block, as
         many as the split has real training rows (counted here from the
         folds rebuilt by hand): no synthetic, validation or test row.  Arm C
-        is standardised too; ``D-hybrid`` never is.
+        is standardised too; ``D-hybrid`` never is.  Only the calls of
+        :func:`head_features` count: :func:`preprocess` standardises the raw
+        columns with the same function (step 2, #580).
         """
         calls: list[tuple[int, np.ndarray]] = []
         original = bench.standardise_features
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
-            calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
+            if sys._getframe(1).f_code.co_name == "head_features":
+                calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
             return original(features, fit_rows)
 
         monkeypatch.setattr(bench, "standardise_features", spy)

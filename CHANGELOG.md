@@ -591,6 +591,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory are no longer read); each entry stores the environment it was computed in, and
   the lines record it as `feature_environment`, and their `tuning` per tuning fold as
   `feature_environments` and `feature_cache_hits` (#522, #543)
+- `examples/benchmark_rydberg_features.py`: `preprocess` standardises the raw columns with
+  `standardise_features`, so a column constant on the fitting rows up to rounding (σ of a few
+  ulp, not exactly 0) is only centred instead of scaled to unit variance, where its rounding
+  noise could take a principal component. Inputs, and so every arm's scores, change only on
+  datasets with such a column (#580)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

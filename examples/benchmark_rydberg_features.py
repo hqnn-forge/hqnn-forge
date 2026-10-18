@@ -69,9 +69,11 @@ For a dataset ``(X, y)`` and one outer fold of :func:`stratified_kfold`
    one ``validation_folds``-th is held out for early stopping and the
    threshold.
 2. **Inputs.**  Every raw column is standardised with the mean and standard
-   deviation of the training part, and a :class:`PCANormalizer` fitted on
-   the training part reduces the result to ``N`` components, each squashed
-   to ``(−π, π)`` (``π · tanh`` of the standardised component).  Test rows
+   deviation of the training part (:func:`standardise_features`, so a
+   column constant there up to rounding is only centred), and a
+   :class:`PCANormalizer` fitted on the training part reduces the result to
+   ``N`` components, each squashed to ``(−π, π)`` (``π · tanh`` of the
+   standardised component).  Test rows
    enter neither fit.  **Component ``i`` is input ``i``, and input ``i``
    sets the detuning of atom ``i``**, the atom at position ``(i · a, 0)`` of
    the chain: neighbouring components sit on neighbouring atoms.
@@ -768,9 +770,15 @@ def preprocess(X: FloatArray, fit_rows: RowArray, n_components: int) -> FloatArr
     """
     The bounded inputs of every row of ``X``, fitted on ``fit_rows`` only.
 
-    Each column is standardised with the mean and standard deviation of
-    ``X[fit_rows]`` (a constant column is only centred), and a
-    :class:`PCANormalizer` fitted on those rows projects onto their first
+    Each raw column is standardised by :func:`standardise_features` with
+    ``fit_rows``: centred and divided by its population standard deviation
+    on ``X[fit_rows]``.  A column constant on those rows, which by the rule
+    of :func:`standardise_features` ("Constant columns") includes a computed
+    variance at or below its rounding bound and not only ``σ = 0``, is only
+    centred, so its rounding noise stays at that size and takes no
+    principal component (#580).  Steps 2 and 4 of the module docstring
+    therefore share one constant rule.  A :class:`PCANormalizer` fitted on
+    the fitting rows of the result projects onto their first
     ``n_components`` principal components, standardises each and squashes it
     with ``π · tanh``.
 
@@ -780,11 +788,14 @@ def preprocess(X: FloatArray, fit_rows: RowArray, n_components: int) -> FloatArr
         Shape ``(n_samples, n_components)``, float64, in ``(−π, π)`` (at
         the float32 precision ``PCANormalizer`` returns).  Column ``i`` is
         component ``i``, in order of decreasing variance.
+
+    Raises
+    ------
+    ValueError
+        As :func:`standardise_features` (a value on ``fit_rows`` that is not
+        finite, say) and :meth:`PCANormalizer.fit`.
     """
-    mean = X[fit_rows].mean(axis=0)
-    std = X[fit_rows].std(axis=0)
-    std[std == 0] = 1.0
-    scaled = (X - mean) / std
+    scaled = standardise_features(X, fit_rows)
     normalizer = PCANormalizer(n_components=n_components, scale_to_pi=True)
     normalizer.fit(scaled[fit_rows])
     inputs: FloatArray = normalizer.transform(scaled).double().numpy()
@@ -1420,7 +1431,8 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
 
     Step 4 of the module docstring: :func:`run_dataset` passes each
     split's real training rows (:attr:`Split.real_train`) unless
-    ``Settings.standardise`` is off.
+    ``Settings.standardise`` is off.  Step 2 as well: :func:`preprocess`
+    standardises the raw columns with it, on the fold's training part.
 
     Definition
     ----------
@@ -1433,8 +1445,8 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
         σ_j² = (1/n) Σ_{r ∈ R} (F[r, j] − μ_j)²
         Z[r, j] = (F[r, j] − μ_j) / σ_j          for every row r
 
-    with the population variance (``1/n``, not ``1/(n − 1)``), as
-    :func:`preprocess` scales the raw columns.  A column that is constant
+    with the population variance (``1/n``, not ``1/(n − 1)``).
+    :func:`preprocess` scales the raw columns with it too (step 2).  A column that is constant
     on the fitting rows is only centred (``σ_j`` is replaced by 1; see
     "Constant columns" below).  ``Z`` is dimensionless whatever the unit of
     ``F``; on the fitting rows each column of ``Z`` has mean 0 and, unless
