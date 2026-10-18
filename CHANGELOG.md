@@ -595,7 +595,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `standardise_features`, so a column constant on the fitting rows up to rounding (σ of a few
   ulp, not exactly 0) is only centred instead of scaled to unit variance, where its rounding
   noise could take a principal component. Inputs, and so every arm's scores, change only on
-  datasets with such a column (#580)
+  datasets with such a column (#580, #600)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
