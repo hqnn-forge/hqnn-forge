@@ -49,6 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Must stay in sync with the reporting loop in the report job.
         source: [pre-release, nightly]
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -92,12 +93,10 @@ jobs:
           uv pip install --prerelease allow -r nightly-requirements.txt
         fi
     - name: Record the versions under test
-      id: versions
       run: |
         versions=$(uv run --no-sync python -c "from importlib.metadata import version as v; print(f\"pennylane {v('pennylane')}, pennylane-lightning {v('pennylane-lightning')}\")")
         echo "$versions"
         echo "$versions" > versions.txt
-        echo "versions=$versions" >> "$GITHUB_OUTPUT"
         # Unsatisfied requirements of the new builds are reported, not fatal:
         # the tests below show whether they matter.
         uv pip check || true
@@ -119,8 +118,12 @@ jobs:
       run: |
         mkdir -p upstream-data
         echo "${{ job.status }}" > upstream-data/status
-        [ -f versions.txt ] && cp versions.txt upstream-data/
-        [ -f pytest.log ] && cp pytest.log upstream-data/
+        if [ -f versions.txt ]; then
+          cp versions.txt upstream-data/
+        fi
+        if [ -f pytest.log ]; then
+          cp pytest.log upstream-data/
+        fi
     - name: Upload test results
       if: "!cancelled()"
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -128,6 +131,7 @@ jobs:
         name: upstream-${{ matrix.source }}
         path: upstream-data/
         retention-days: 1
+        overwrite: true
 
   report:
     needs: test
@@ -142,39 +146,74 @@ jobs:
         pattern: upstream-*
         path: artifacts
     - name: Open or update the tracking issue
+      shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
+        reporting_failed=0
+
+        # Must stay in sync with the test matrix.
         for source in pre-release nightly; do
           dir="artifacts/upstream-$source"
-          if [ ! -d "$dir" ]; then
-            continue
+
+          if [ -d "$dir" ]; then
+            status=$(tr -d '[:space:]' < "$dir/status" 2>/dev/null || echo "failure")
+            if [ "$status" != "failure" ]; then
+              continue
+            fi
           fi
-          status=$(tr -d '[:space:]' < "$dir/status" 2>/dev/null || echo "failure")
-          if [ "$status" != "failure" ]; then
-            continue
-          fi
-          title="ci: test suite fails against PennyLane $source builds"
-          versions=$(cat "$dir/versions.txt" 2>/dev/null || true)
-          versions="${versions:-unknown versions}"
-          {
-            echo "The scheduled upstream job failed against **$versions** ($source)."
-            echo
-            echo "Run: $RUN_URL"
-            echo
-            echo '<details><summary>Last 80 lines of pytest output</summary>'
-            echo
-            echo '```'
-            tail -n 80 "$dir/pytest.log" 2>/dev/null || echo "pytest did not run; see the run log."
-            echo '```'
-            echo '</details>'
-          } > body.md
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+
+          set +e
+          (
+            set -e -o pipefail
+
+            title="ci: test suite fails against PennyLane $source builds"
+            if [ ! -d "$dir" ]; then
+              {
+                echo "The scheduled upstream job failed, but no test results were uploaded for $source."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo "See the workflow run log for details."
+              } > body.md
+            else
+              versions=$(cat "$dir/versions.txt" 2>/dev/null || true)
+              versions="${versions:-unknown versions}"
+              {
+                echo "The scheduled upstream job failed against **$versions** ($source)."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo '<details><summary>Last 80 lines of pytest output</summary>'
+                echo
+                echo '```'
+                tail -n 80 "$dir/pytest.log" 2>/dev/null || echo "pytest did not run; see the run log."
+                echo '```'
+                echo '</details>'
+              } > body.md
+            fi
+
+            existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+              --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+            fi
+          )
+          subshell_status=$?
+          set -e
+
+          if [ "$subshell_status" -ne 0 ]; then
+            echo "::error::Failed to report results for $source (exit code $subshell_status)" >&2
+            reporting_failed=1
+          elif [ ! -d "$dir" ]; then
+            echo "::error::Missing artifact for $source; tracking issue updated" >&2
+            reporting_failed=1
           fi
         done
+
+        if [ "$reporting_failed" -ne 0 ]; then
+          exit 1
+        fi
