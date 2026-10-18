@@ -8,12 +8,15 @@ installs that one and the suite passes against it, so an unreachable floor in
 pyproject.toml would otherwise go unnoticed.
 """
 
+from __future__ import annotations
+
 import sys
 import tomllib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 # The optional extras the test-lowest job resolves lowest alongside the runtime deps
@@ -23,16 +26,32 @@ CHECKED_EXTRAS = ["lightning", "sklearn"]
 CHECKED_DEV = ["qutip"]
 
 
+def get_checked_dev_specs(project: dict) -> list[str]:
+    """Return the raw dependency specifications from the dev extra matching CHECKED_DEV."""
+    checked = {canonicalize_name(name) for name in CHECKED_DEV}
+    dev_deps = project.get("optional-dependencies", {}).get("dev", [])
+    return [
+        spec
+        for spec in dev_deps
+        if canonicalize_name(Requirement(spec).name) in checked
+    ]
+
+
 def main() -> int:
-    project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    if len(sys.argv) > 1:
+        if sys.argv[1:] == ["--print-dev-floors"]:
+            for spec in get_checked_dev_specs(project):
+                print(spec)
+            return 0
+        print(f"Unknown arguments: {' '.join(sys.argv[1:])}", file=sys.stderr)
+        return 2
+
     specs = list(project["dependencies"])
     for extra in CHECKED_EXTRAS:
         specs += project["optional-dependencies"][extra]
-    specs += [
-        spec
-        for spec in project["optional-dependencies"]["dev"]
-        if Requirement(spec).name in CHECKED_DEV
-    ]
+    specs += get_checked_dev_specs(project)
 
     failed = False
     for spec in specs:

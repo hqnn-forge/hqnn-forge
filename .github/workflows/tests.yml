@@ -236,8 +236,8 @@ jobs:
         uv pip install --resolution lowest-direct -e ".[lightning,sklearn]"
         PYTEST_SPEC=$(uv run --no-sync python -c 'import re, tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"pytest\s*[<>=!~]", d)))')
         uv pip install "$PYTEST_SPEC"
-        uv run --no-sync python -c 'import re, tomllib; print("\n".join(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"qutip\s*[<>=!~]", d)))' > qutip-floors.txt
-        uv pip install --resolution lowest-direct -r qutip-floors.txt
+        mapfile -t SPECS < <(uv run --no-sync python .github/scripts/check_floors.py --print-dev-floors)
+        uv pip install --resolution lowest-direct "${SPECS[@]}"
 
     # The resolver silently installs a newer version when another dependency
     # requires one, so an unreachable floor would otherwise still go green
