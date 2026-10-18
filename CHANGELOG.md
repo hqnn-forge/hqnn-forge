@@ -538,7 +538,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the lines that were computed, so a row of reused arm B lines shows `-` instead of
   `0.00`; `--max-separation-rows` 1, 2 or a negative value ends in a command-line error
   instead of a traceback or no limit, and `0` is the one spelling of no limit; the docstring
-  states that a reused line's `feature_cache_hit` is that of its source line (#541, #PR)
+  states that a reused line's `feature_cache_hit` is that of its source line (#541, #607)
 - `separation_measures` and `stratified_subsample_indices` refuse a `max_rows` that is a
   float, a bool or a string with a `ValueError` naming it, where they failed late or took
   `True` for one row, and so does `max_separation_rows` of the Rydberg benchmark's
@@ -546,7 +546,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lower label on every NumPy; both docstrings state that a small class can be left with one
   row and what that does to the measures. `stratified_subset` of `examples/benchmark.py`
   uses `stratified_subsample_indices`, so it keeps exactly `--max-rows` rows and every class
-  (the rows of the credit-card data at the default are unchanged) (#541, #PR)
+  (the rows of the credit-card data at the default are unchanged) (#541, #607)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
