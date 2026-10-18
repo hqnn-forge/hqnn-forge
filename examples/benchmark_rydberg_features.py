@@ -612,14 +612,15 @@ QUICK = Settings(
 #: 13), then its ``eigh`` and a sorted copy of the eigenvectors, the same size again each,
 #: plus LAPACK's workspace, whatever the number of samples.  Measured per fit (peak resident
 #: memory above the import, wall time; the training rows of one default fold of 600
-#: samples, and of ``--quick``'s 160): 0.05 to 0.07 GiB and under 0.4 s at ``N = 10``, 0.7
-#: GiB and 10 to 13 s at 12, 2.6 to 2.7 GiB and about 75 s at 13; a run fits ``n_splits · (1 + inner_folds)``
-#: times with tuning (40 at the defaults).  12 is therefore the largest ``N`` whose fit stays
-#: under 1 GiB, the scale at which :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS`
-#: switches away from backprop to bound memory, and it is arm D's own limit, so arms C and
-#: D run on the control at their largest register.  The raw matrix,
-#: ``8 · n_samples · (2^N − 1)`` bytes, is the smaller term (38 MiB at ``N = 12`` and 600
-#: samples); ``--samples`` scales it and the rank check's SVD, not the covariance.
+#: samples, and of ``--quick``'s 160): 0.05 to 0.07 GiB and at most 0.4 s at ``N = 10``,
+#: 0.7 GiB and 10 to 13 s at 12, 2.6 to 2.7 GiB and about 75 s at 13; a run fits
+#: ``n_splits · (1 + inner_folds)`` times with tuning (40 at the defaults).  12 is therefore
+#: the largest ``N`` whose fit stays under 1 GiB at these sample counts, the scale at which
+#: :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS` switches away from backprop to
+#: bound memory, and it is arm D's own limit, so arms C and D run on the control at their
+#: largest register.  The raw matrix, ``8 · n_samples · (2^N − 1)`` bytes, is the smaller
+#: term (19 MiB at ``N = 12`` and 600 samples); ``--samples`` scales it and the rank check's
+#: SVD, not the covariance.
 POSITIVE_CONTROL_MAX_ATOMS: Final = 12
 
 
