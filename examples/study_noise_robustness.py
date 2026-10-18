@@ -100,7 +100,8 @@ def _unique_data(
     _, first, inverse, counts = np.unique(
         X, axis=0, return_index=True, return_inverse=True, return_counts=True
     )
-    positive_counts = np.bincount(inverse, weights=y, minlength=len(first))
+    # NumPy 2.0 retains a singleton axis in inverse indices for axis=0.
+    positive_counts = np.bincount(inverse.reshape(-1), weights=y, minlength=len(first))
     conflicting = (positive_counts > 0) & (positive_counts < counts)
     keep = np.sort(first)
     unique_X, unique_y = X[keep], y[keep]

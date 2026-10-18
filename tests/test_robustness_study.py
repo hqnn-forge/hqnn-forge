@@ -53,7 +53,18 @@ def test_nonfinite_and_missing_pairs_never_shrink_family() -> None:
         study._adjust_family([stats] * 11)
 
 
-def test_unique_features_representative_is_source_first_not_label() -> None:
+@pytest.mark.parametrize("inverse_shape", ["flat", "column"])
+def test_unique_features_representative_is_source_first_not_label(
+    monkeypatch: pytest.MonkeyPatch, inverse_shape: str
+) -> None:
+    unique = np.unique
+
+    def shaped_unique(*args: Any, **kwargs: Any) -> Any:
+        values, first, inverse, counts = unique(*args, **kwargs)
+        inverse = inverse.reshape(-1) if inverse_shape == "flat" else inverse.reshape(-1, 1)
+        return values, first, inverse, counts
+
+    monkeypatch.setattr(study.np, "unique", shaped_unique)
     data = BinaryDataset(
         np.array([[1.0, 2.0], [2.0, 3.0], [1.0, 2.0], [4.0, 5.0], [2.0, 3.0]]),
         np.array([0, 0, 1, 1, 0]),
