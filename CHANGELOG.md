@@ -591,6 +591,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory are no longer read); each entry stores the environment it was computed in, and
   the lines record it as `feature_environment`, and their `tuning` per tuning fold as
   `feature_environments` and `feature_cache_hits` (#522, #543)
+- `examples/benchmark_rydberg_features.py` refuses before any dataset is loaded what it used to
+  fail on late or not at all: an `--out` that cannot be written (it raised only after the first
+  arm was trained), `n_atoms` above 12 with arm D, whose circuits run on `default.qubit` with
+  backprop (`AUTO_BACKPROP_MAX_QUBITS`), `lr <= 0` and `batch_size < 1`, also as values of the
+  search space (with tuning on, `--batch-size 0` and `--lr 0` ran to completion). `--patience 0`
+  or less now means no early stopping, recorded as `null`, and a dataset name outside `DATASETS`
+  raises a `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
+  (#540, #606)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
