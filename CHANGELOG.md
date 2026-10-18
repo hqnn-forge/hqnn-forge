@@ -593,7 +593,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `feature_environments` and `feature_cache_hits` (#522, #543)
 - The `evolve` docstring said that two runs with `n` and `2n` steps differ by about 3/4 of
   the coarser run's error without saying when: at coarse steps they can agree while both are
-  wrong (one atom at `ΩT = 16π` gives `⟨n⟩ = 0` at 1 to 16 steps, where the answer is 0.358).
+  wrong (one atom at `ΩT = 16π`, `γ = 0.1 Ω` gives `⟨n⟩ = 0` at 1, 2, 4, 8 and 16 steps,
+  where the answer is 0.358).
   It now states the condition under which the estimate held, `dt · (W + Nγ/2) <= 1/2` with
   `W` the spread of the energies, and that `n_steps` keeps no default or rule (#507, #599)
 

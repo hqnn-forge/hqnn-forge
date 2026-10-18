@@ -89,8 +89,8 @@ Both factors are exact, so the only error is that of the splitting.
 * **Its size.**  The ``dt³`` term is built from the double commutators
   ``[𝓛_D, [𝓛_D, 𝓛_H]]`` and ``[𝓛_H, [𝓛_H, 𝓛_D]]``, of order ``γ² ‖H‖`` and
   ``γ ‖H‖²``.  ``dt`` therefore has to resolve both ``1/γ`` and the spread
-  ``E_max − E_min`` of the energies of ``H``, which in the blockade is set by ``V``,
-  not Ω.  It vanishes when ``H`` is diagonal (no drive): ``𝓛_H`` then also
+  ``E_max − E_min`` of the energies of ``H``, which in the blockade is set
+  by ``V``, not Ω.  It vanishes when ``H`` is diagonal (no drive): ``𝓛_H`` then also
   acts elementwise, the two parts commute and one step is exact.
 * **Every step is a physical map** at any ``dt``.  ``U ρ U†`` is unitary
   conjugation.  The damping factor ``exp(−γ τ d_H(a, b)/2)`` is the matrix of
