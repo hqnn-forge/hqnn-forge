@@ -33,6 +33,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -377,9 +378,53 @@ class TestGrid:
         with pytest.raises(ValueError, match=match):
             bench.Settings(**changes)
 
+    @pytest.mark.parametrize(
+        ("changes", "message"),
+        [
+            # arm D runs default.qubit with backprop, bounded at AUTO_BACKPROP_MAX_QUBITS (12)
+            (
+                dict(n_atoms=13, arms=("D",)),
+                "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 13.",
+            ),
+            (
+                dict(n_atoms=13, arms=("C", "D")),
+                "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 13.",
+            ),
+            (
+                dict(n_atoms=11, arms=("A", "D")),
+                "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 11.",
+            ),
+            (dict(batch_size=0), "batch_size must be >= 1; got 0."),
+            (dict(batch_size=-4, n_trials=0), "batch_size must be >= 1; got -4."),
+            (dict(lr=0.0), "lr must be > 0; got 0.0."),
+            (dict(lr=-0.01, n_trials=0), "lr must be > 0; got -0.01."),
+            (dict(lr=math.nan), "lr must be > 0; got nan."),
+            (
+                dict(search_space={"batch_size": (32, 0)}),
+                "search_space['batch_size'] must hold values >= 1; got [32, 0].",
+            ),
+            (
+                dict(search_space={"lr": (0.01, 0.0), "batch_size": (32,)}),
+                "search_space['lr'] must hold values > 0; got [0.01, 0.0].",
+            ),
+            (
+                dict(search_space={"lr": (-0.1,)}),
+                "search_space['lr'] must hold values > 0; got [-0.1].",
+            ),
+        ],
+    )
+    def test_refused_settings_name_the_setting_and_the_value(
+        self, changes: dict[str, Any], message: str
+    ) -> None:
+        """#540: values ``train_model`` or Adam would take late, or not at all, are refused here."""
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.Settings(**changes)
+
     def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
         """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
         assert bench.Settings(n_atoms=11, arms=("C", "D")).n_atoms == 11
+        assert bench.Settings(n_atoms=12, arms=("C", "D")).n_atoms == 12
+        assert bench.Settings(n_atoms=13, arms=("C",)).n_atoms == 13
         assert bench.Settings(n_atoms=10).n_atoms == 10
         assert bench.Settings(circuit_layers=0, arms=("A", "C")).circuit_layers == 0
         assert bench.Settings(shots=1, patience=None, max_epochs=1).shots == 1
@@ -813,6 +858,28 @@ class TestUciData:
             ).to_dict()
             assert record["separation"]["test"] == pytest.approx(by_hand, rel=1e-9)
 
+    def test_a_dataset_name_outside_datasets_is_refused_with_the_names_allowed(self) -> None:
+        """#540: it used to raise ``tuple.index(x): x not in tuple`` from the seeds."""
+        message = (
+            "unknown dataset 'mnist'; choose from "
+            "['positive-control', 'iranian-churn', 'taiwanese-bankruptcy', "
+            "'cervical-cancer-risk']."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.fold_seeds(0, "mnist", 3)
+        X = np.random.default_rng(0).normal(size=(40, 5))
+        y = np.array([0, 1] * 20)
+        records = bench.run_dataset(
+            "mnist", X, y, bench.Settings(arms=("C",)), bench.FeatureCache(None)
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            next(records)
+        # The names in DATASETS keep the seeds their position gives them.
+        root = np.random.SeedSequence([0, bench.DATASETS.index("iranian-churn")])
+        assert bench.fold_seeds(0, "iranian-churn", 3)[0] == int(
+            root.spawn(4)[0].generate_state(1)[0]
+        )
+
     def test_too_few_columns_for_the_atoms(self) -> None:
         X = np.random.default_rng(0).normal(size=(40, 3))
         y = np.array([0, 1] * 20)
@@ -839,7 +906,10 @@ class TestCommandLine:
             (["--circuit-layers", "0"], "circuit_layers"),
             (["--n-atoms", "11"], "n_atoms"),
             (["--epochs", "0"], "max_epochs"),
-            (["--patience", "0"], "patience"),
+            # with tuning on, the search space used to override both and the run completed
+            (["--batch-size", "0"], "batch_size"),
+            (["--lr", "0"], "lr must be > 0"),
+            (["--n-atoms", "13", "--arms", "C", "D"], "n_atoms"),
             # refused by the splits, with the data in hand: no record, so no new file
             (["--folds", "100"], "n_splits"),
             (["--inner-folds", "100"], "n_splits"),
@@ -870,6 +940,128 @@ class TestCommandLine:
             bench.run({"a": (np.zeros((2, 2)), np.zeros(2), None)}, QUICK, out)
         lines = out.read_text(encoding="utf-8").splitlines()
         assert [json.loads(line) for line in lines] == [{"dataset": "a", "mcc": 0.5}]
+
+    @staticmethod
+    def _spy_on_loading(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        loaded: list[str] = []
+        load = bench.load_dataset
+
+        def load_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            loaded.append(name)
+            return load(name, *args, **kwargs)
+
+        monkeypatch.setattr(bench, "load_dataset", load_dataset)
+        return loaded
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "missing directory",
+            "a directory",
+            # skips where the user is root, who may write to it anyway
+            pytest.param("read-only file", marks=pytest.mark.may_skip),
+        ],
+    )
+    def test_an_unwritable_out_is_refused_before_any_dataset_is_loaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """#540: ``--quick --out missing/x.jsonl`` used to train the first arm, then raise."""
+        if case == "missing directory":
+            out, reason = tmp_path / "missing" / "x.jsonl", "No such file or directory"
+        elif case == "a directory":
+            out, reason = tmp_path / "results", "Is a directory"
+            out.mkdir()
+            (out / "earlier.jsonl").write_text("an earlier run\n", encoding="utf-8")
+        else:
+            if os.name != "posix" or os.geteuid() == 0:
+                pytest.skip("root writes to a read-only file")
+            out, reason = tmp_path / "results.jsonl", "Permission denied"
+            out.write_text("an earlier run\n", encoding="utf-8")
+            out.chmod(0o444)
+        before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+        loaded = self._spy_on_loading(monkeypatch)
+        message = f"out {str(out)!r} cannot be written: {reason}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.main(["--quick", "--out", str(out), "--no-cache"])
+        assert loaded == []
+        # Nothing was created, removed or changed: no stray probe file, the earlier file intact.
+        assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+        if case == "a directory":
+            assert (out / "earlier.jsonl").read_text(encoding="utf-8") == "an earlier run\n"
+        if case == "read-only file":
+            assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_run_refuses_an_unwritable_out_before_the_first_dataset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started: list[str] = []
+
+        def run_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            started.append(name)
+            yield {"dataset": name}
+
+        monkeypatch.setattr(bench, "run_dataset", run_dataset)
+        out = tmp_path / "missing" / "x.jsonl"
+        message = f"out {str(out)!r} cannot be written: No such file or directory."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.run({"a": (np.zeros((2, 2)), np.zeros(2), None)}, QUICK, out)
+        assert started == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_checking_a_writable_out_changes_nothing(self, tmp_path: Path) -> None:
+        """The probe neither creates ``out`` nor leaves a file beside it, nor touches an earlier one."""
+        new = tmp_path / "new.jsonl"
+        bench.check_writable(new)
+        assert list(tmp_path.iterdir()) == []
+        earlier = tmp_path / "earlier.jsonl"
+        earlier.write_bytes(b"an earlier run\n")
+        stat = earlier.stat()
+        bench.check_writable(earlier)
+        assert earlier.read_bytes() == b"an earlier run\n"
+        assert earlier.stat().st_mtime_ns == stat.st_mtime_ns
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["earlier.jsonl"]
+
+    def test_arm_d_above_its_bound_is_refused_before_any_dataset_is_loaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loaded = self._spy_on_loading(monkeypatch)
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        message = "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 13."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.main(["--arms", "C", "D", "--n-atoms", "13", "--out", str(out), "--no-cache"])
+        assert loaded == []
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    @pytest.mark.parametrize(("flag", "patience"), [("0", None), ("-2", None), ("1", 1), ("7", 7)])
+    def test_a_patience_of_0_or_less_is_no_early_stopping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, patience: int | None
+    ) -> None:
+        """As ``--max-separation-rows``: ``<= 0`` is "no limit", ``None`` in the settings."""
+        captured: dict[str, Any] = {}
+
+        def run(datasets: Any, settings: Any, out: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            captured["settings"] = settings
+            return []
+
+        monkeypatch.setattr(bench, "run", run)
+        bench.main(["--patience", flag, "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
+        assert captured["settings"].patience == patience
+
+    def test_without_early_stopping_every_epoch_runs_and_patience_is_recorded_as_null(
+        self, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "results.jsonl"
+        arguments = ["--patience", "0", "--arms", "C", "--trials", "0", "--folds", "2"]
+        arguments += ["--max-folds", "1", "--epochs", "5", "--samples", "80"]
+        records = bench.main([*arguments, "--out", str(out), "--no-cache"])
+        assert [(r["arm"], r["head"]) for r in records] == [("C", "linear"), ("C", "mlp")]
+        lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        for line in lines:
+            assert line["settings"]["patience"] is None
+            assert line["hyperparameters"]["patience"] is None
+            assert line["epochs"] == 5  # train_model stops early only with a patience
+        assert '"patience": null' in out.read_text(encoding="utf-8")
 
     def test_main_hides_no_warning_of_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

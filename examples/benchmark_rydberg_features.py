@@ -327,6 +327,7 @@ import itertools
 import json
 import math
 import os
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -346,7 +347,7 @@ from hqnn_forge.data import (
     load_taiwanese_bankruptcy,
 )
 from hqnn_forge.diagnostics import separation_measures
-from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding import AUTO_BACKPROP_MAX_QUBITS, QuantumEncodingLayer
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
 from hqnn_forge.experiment import COMPARED_VERSIONS, _plain, environment
 from hqnn_forge.models import (
@@ -402,7 +403,16 @@ class Settings:
     ----------
     n_atoms:
         Atoms ``N`` of the chain: the number of PCA components, of inputs
-        and of qubits of arm D.
+        and of qubits of arm D.  At most :data:`~hqnn_forge.rydberg.MAX_ATOMS`
+        (10) with arm A or B, the Rydberg maps' limit, and at most
+        :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS` (12) with arm
+        D: both of its circuits run on ``default.qubit`` with backprop, and
+        12 qubits is where the library stops choosing that pair for memory.
+        The frozen circuit evaluates ``1024`` rows at a time, each a state of
+        ``2^N`` ``complex128`` amplitudes, so ``1024 · 16 · 2^N`` bytes per
+        copy of the batch: 64 MiB at 12 qubits, doubling with each further
+        one (1 GiB at 16); ``D-hybrid`` trains through backprop, measured at
+        more than 1 GB for a batch of 64 at 14 qubits.
     omega:
         Rabi frequency Ω in rad/µs.  Default: the reference ``4π``.
     omega_t:
@@ -432,9 +442,13 @@ class Settings:
     loss:
         A key of :data:`LOSSES`.
     lr, max_epochs, batch_size, patience:
-        Adam learning rate and the ``train_model`` settings, unless tuned.
+        Adam learning rate (``> 0``) and the ``train_model`` settings
+        (``batch_size >= 1``), unless tuned.  ``patience=None`` is no early
+        stopping: every model trains for ``max_epochs`` epochs
+        (``--patience 0``, recorded as ``null``).
     n_trials, inner_folds, search_space:
-        The tuning budget (0 trials: no tuning) and its search space.
+        The tuning budget (0 trials: no tuning) and its search space; its
+        ``lr`` and ``batch_size`` values are held to the bounds above.
     n_samples:
         Samples of the positive control.
     random_state:
@@ -478,11 +492,15 @@ class Settings:
     separation_seed: int = 0
 
     def __post_init__(self) -> None:
-        # The limit of the Rydberg maps and arm D's depth bind only where those arms run.
-        most = MAX_ATOMS if {"A", "B"} & set(self.arms) else None
-        if self.n_atoms < 1 or (most is not None and self.n_atoms > most):
+        # The limit of the Rydberg maps, arm D's register and arm D's depth bind only where
+        # those arms run.
+        bounds = [MAX_ATOMS] if {"A", "B"} & set(self.arms) else []
+        if "D" in self.arms:
+            bounds.append(AUTO_BACKPROP_MAX_QUBITS)
+        if self.n_atoms < 1 or (bounds and self.n_atoms > min(bounds)):
             raise ValueError(
-                f"n_atoms must be >= 1, and <= {MAX_ATOMS} with arm A or B; got {self.n_atoms}."
+                f"n_atoms must be >= 1, <= {MAX_ATOMS} with arm A or B and "
+                f"<= {AUTO_BACKPROP_MAX_QUBITS} with arm D; got {self.n_atoms}."
             )
         if self.shots is not None and self.shots < 1:
             raise ValueError(f"shots must be None or >= 1; got {self.shots}.")
@@ -494,6 +512,11 @@ class Settings:
             raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
         if self.patience is not None and self.patience < 1:
             raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
+        # Also where tuning overrides them: a refused default should not depend on --trials.
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1; got {self.batch_size}.")
+        if not self.lr > 0:  # NaN too
+            raise ValueError(f"lr must be > 0; got {self.lr}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -517,6 +540,14 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
+        batch_sizes = self.search_space.get("batch_size", ())
+        if any(value < 1 for value in batch_sizes):
+            raise ValueError(
+                f"search_space['batch_size'] must hold values >= 1; got {list(batch_sizes)}."
+            )
+        rates = self.search_space.get("lr", ())
+        if any(not value > 0 for value in rates):
+            raise ValueError(f"search_space['lr'] must hold values > 0; got {list(rates)}.")
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
@@ -750,8 +781,10 @@ def fold_seeds(random_state: int, dataset: str, n_splits: int) -> tuple[int, lis
     seed and the dataset's position in :data:`DATASETS`; its first child
     seeds the outer split, and each further child one fold's validation
     split (``inner_seed``), SMOTE draw, initialisation, batch order and
-    tuning.
+    tuning.  A name outside :data:`DATASETS` has no position and is refused.
     """
+    if dataset not in DATASETS:
+        raise ValueError(f"unknown dataset {dataset!r}; choose from {list(DATASETS)}.")
     root = np.random.SeedSequence([random_state, DATASETS.index(dataset)])
     split_root, *fold_roots = root.spawn(n_splits + 1)
     names = ("inner_seed", "smote_seed", "init_seed", "batch_seed", "tune_seed")
@@ -1837,7 +1870,8 @@ def run_dataset(
     Parameters
     ----------
     name:
-        A name in :data:`DATASETS`; it selects the dataset's seeds.
+        A name in :data:`DATASETS`; it selects the dataset's seeds.  Another
+        name raises ``ValueError`` (:func:`fold_seeds`).
     X, y:
         Raw features ``(n_samples, n_features)`` and binary labels.
     settings, cache:
@@ -2063,6 +2097,36 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def check_writable(out: str | os.PathLike[str]) -> None:
+    """
+    Refuse an ``out`` that cannot be written, and change nothing.
+
+    An existing file is opened for appending and closed without a write, so
+    its content stays as it is; for a new one a temporary file is created in
+    its directory and removed.  Either raises what writing ``out`` would,
+    here, as a ``ValueError`` naming ``out``: a missing directory, a
+    directory in its place, no write permission.
+
+    Checked up front rather than by writing to a temporary file renamed over
+    ``out`` at the end: :func:`run` writes each record as it comes, so that
+    a run which fails late keeps the records written until then in ``out``,
+    and a rename would move them elsewhere.  The check holds for the moment
+    it is made; a directory removed during the run still fails at the first
+    record.
+    """
+    path = Path(out)
+    try:
+        if path.exists():
+            with open(path, "a", encoding="utf-8"):
+                pass
+        else:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}."):
+                pass
+    except OSError as error:
+        reason = error.strerror or str(error)
+        raise ValueError(f"out {str(path)!r} cannot be written: {reason}.") from error
+
+
 def run(
     datasets: Mapping[str, tuple[FloatArray, IntArray, int | None]],
     settings: Settings,
@@ -2080,10 +2144,11 @@ def run(
     settings:
         The run's settings.
     out:
-        The JSON-lines file; overwritten.  It is opened with the first
-        record, so a run that fails before one (a setting or a dataset that
-        a map, the splits or the training refuse) leaves an earlier file as
-        it is.
+        The JSON-lines file; overwritten.  It is checked before the first
+        dataset (:func:`check_writable`) and opened with the first record,
+        so a run that fails before one (an ``out`` that cannot be written,
+        a setting or a dataset that a map, the splits or the training
+        refuse) leaves an earlier file as it is.
     cache_dir:
         Directory of the feature cache; ``None`` computes without storing.
 
@@ -2092,6 +2157,7 @@ def run(
     list of dict
         The records as written, before the JSON mapping.
     """
+    check_writable(out)
     cache = FeatureCache(cache_dir)
     records: list[dict[str, Any]] = []
     with contextlib.ExitStack() as stack:
@@ -2117,7 +2183,10 @@ def _parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=Path("rydberg_features_benchmark.jsonl"),
-        help="JSON-lines output file; replaced once the first record is written",
+        help=(
+            "JSON-lines output file; refused before any data is loaded if it cannot be "
+            "written, replaced once the first record is written"
+        ),
     )
     parser.add_argument(
         "--quick",
@@ -2151,7 +2220,8 @@ def _parser() -> argparse.ArgumentParser:
         default=default.n_atoms,
         help=(
             "atoms N: PCA components, inputs, and arm-D qubits; "
-            "also shapes the positive-control dataset"
+            "also shapes the positive-control dataset; "
+            f"at most {MAX_ATOMS} with arm A or B and {AUTO_BACKPROP_MAX_QUBITS} with arm D"
         ),
     )
     parser.add_argument(
@@ -2261,7 +2331,7 @@ def _parser() -> argparse.ArgumentParser:
         "--patience",
         type=int,
         default=default.patience,
-        help="early-stopping patience in epochs",
+        help="early-stopping patience in epochs; <= 0 for no early stopping (recorded as null)",
     )
     parser.add_argument(
         "--samples",
@@ -2337,7 +2407,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             lr=args.lr,
             max_epochs=args.epochs,
             batch_size=args.batch_size,
-            patience=args.patience,
+            patience=None if args.patience <= 0 else args.patience,
             n_trials=args.trials,
             inner_folds=args.inner_folds,
             n_samples=args.samples,
@@ -2346,6 +2416,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             separation_seed=args.separation_seed,
         )
         names = list(dict.fromkeys(args.dataset))
+    check_writable(args.out)
     datasets = {
         name: load_dataset(name, settings, path=args.data_path, download=args.download)
         for name in names
