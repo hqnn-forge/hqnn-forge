@@ -88,8 +88,8 @@ Both factors are exact, so the only error is that of the splitting.
   divides it by 4.
 * **Its size.**  The ``dt³`` term is built from the double commutators
   ``[𝓛_D, [𝓛_D, 𝓛_H]]`` and ``[𝓛_H, [𝓛_H, 𝓛_D]]``, of order ``γ² ‖H‖`` and
-  ``γ ‖H‖²``.  ``dt`` therefore has to resolve both ``1/γ`` and the largest
-  level spacing of ``H``, which in the blockade is the interaction ``V``,
+  ``γ ‖H‖²``.  ``dt`` therefore has to resolve both ``1/γ`` and the spread
+  ``E_max − E_min`` of the energies of ``H``, which in the blockade is set by ``V``,
   not Ω.  It vanishes when ``H`` is diagonal (no drive): ``𝓛_H`` then also
   acts elementwise, the two parts commute and one step is exact.
 * **Every step is a physical map** at any ``dt``.  ``U ρ U†`` is unitary
@@ -264,10 +264,27 @@ def evolve(
       may be at most ``1e-12`` of the sample's largest ``|H|`` entry, or 100
       machine epsilons of the input's dtype where that is more (``1.2e-5``
       for single precision, and no more than that below it).
-    * **Choosing ``n_steps``.**  Halving ``dt`` divides the error by 4, so
-      two runs with ``n_steps`` and ``2 · n_steps`` differ by about 3/4 of
-      the coarser run's error.  ``dt`` must be small against ``1/γ`` and
-      against the inverse of the largest level spacing of ``H``.
+    * **Choosing ``n_steps``.**  No count is assumed here, and none suits
+      every input (#507).  Once ``dt`` is small, halving it divides the error
+      by 4, so two runs with ``n`` and ``2n`` steps differ by about 3/4 of
+      the coarser run's error, and **the finer run is off by about a third
+      of their difference**.  ``dt`` is small when it resolves the fastest
+      rate of the generator: the rates of ``𝓛_H`` are the differences
+      ``E_a − E_b`` of the energies of ``H`` (``𝓛_H`` maps ``|a⟩⟨b|`` to
+      ``−i (E_a − E_b) |a⟩⟨b|`` in the eigenbasis), at most their spread
+      ``W = E_max − E_min``, and those of ``𝓛_D`` are ``(γ/2) d_H(a, b)``, at
+      most ``Nγ/2``.  With ``dt · (W + Nγ/2) <= 1/2`` for the coarser run,
+      the finer run's error in ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` was within 10 %
+      of a third of the difference in 200 cases: 1, 2 and 4 atoms,
+      ``V/Ω`` from 0 to 100, ``γ/Ω`` from 0.1 to 100, ``ΩT`` from π to 16π
+      (at ``dt · (W + Nγ/2) <= 1`` it was up to 1.37 times that).  That is a
+      condition for trusting the estimate, not the count the features
+      need, which can be far smaller.  **Before it holds, two runs can
+      agree while both are wrong**: ``U(dt)`` sees the energies only
+      modulo ``2π/dt``.  One resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω``
+      ends with ``⟨n⟩ = 0`` to rounding at 1, 2, 4, 8 and 16 steps (every
+      step a multiple of a π pulse, which leaves no coherence to dephase),
+      where the answer is 0.358.
     * **Cost.**  One eigendecomposition per sample, then two
       ``2^N × 2^N`` matrix products per step and sample.
     * **Gradients.**  Every operation is differentiable and none is in

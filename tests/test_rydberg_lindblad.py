@@ -710,6 +710,79 @@ class TestSecondOrder:
         )
 
 
+class TestChoosingTheStepCount:
+    """
+    The "Choosing ``n_steps``" note of ``evolve``: when two runs with ``n``
+    and ``2n`` steps tell how far off the finer one is, and when they do not.
+    """
+
+    OMEGA = 4.0 * math.pi  # the reference Ω of the model page
+
+    def test_coarse_runs_can_agree_while_both_are_wrong(self) -> None:
+        """
+        One resonant atom, ``ΩT = 16π``: with ``n <= 16`` steps ``Ω dt`` is a
+        multiple of π, so every step maps ``|g⟩`` and ``|r⟩`` onto each other
+        and the dephasing finds no coherence to act on.
+        """
+        gamma = 0.1 * self.OMEGA
+        t = 16 * math.pi / self.OMEGA
+        h = single_atom(self.OMEGA, 0.0)
+        exact = damped_rabi(self.OMEGA, gamma, t)
+        assert exact == pytest.approx(0.3578, abs=1e-4)
+        for n in (1, 2, 4, 8, 16):
+            assert readout(checked_evolve(h, t, gamma=gamma, n_steps=n)).item() < 1e-12
+        # the first count that resolves the drive is close
+        assert readout(checked_evolve(h, t, gamma=gamma, n_steps=32)).item() == pytest.approx(
+            exact, abs=1e-4
+        )
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "v_over_omega", "gamma_over_omega", "omega_t", "delta_over_omega"),
+        [
+            (1, 0.0, 10.0, 16 * math.pi, [0.0]),
+            (1, 0.0, 100.0, 10.0, [0.0]),
+            (2, 100.0, 1.0, math.pi, [0.0, math.sqrt(3)]),
+            (4, 10.0, 10.0, 4 * math.pi, [0.0, 0.6, math.sqrt(3), 1.1]),
+            (4, 1.0, 0.1, math.pi, [0.3, 1.5, 0.9, 0.0]),
+        ],
+    )
+    def test_once_dt_resolves_the_generator_a_third_of_the_difference_is_the_error(
+        self,
+        n_atoms: int,
+        v_over_omega: float,
+        gamma_over_omega: float,
+        omega_t: float,
+        delta_over_omega: list[float],
+    ) -> None:
+        """
+        ``n = ceil(2t · (W + Nγ/2))``, so ``dt · (W + Nγ/2) <= 1/2``, ``W`` the
+        spread of the energies of ``H``: the error of the ``2n``-step
+        features against the exponential of the full generator is a third of
+        ``|F_n − F_2n|`` within 10 %.
+        """
+        omega = self.OMEGA
+        gamma = gamma_over_omega * omega
+        t = omega_t / omega
+        # V = c6 / 1^6 between neighbours at unit spacing
+        h = rydberg_hamiltonian(
+            AtomRegister.chain(n_atoms, 1.0),
+            omega,
+            [d * omega for d in delta_over_omega],
+            c6=v_over_omega * omega,
+        )
+        energies = torch.linalg.eigvalsh(h)
+        spread = (energies.max() - energies.min()).item()
+        n = math.ceil(2 * t * (spread + n_atoms * gamma / 2))
+        pairs = n_atoms > 1
+        exact = readout(liouvillian_reference(h, t, gamma), pairs=pairs)
+        coarse = readout(checked_evolve(h, t, gamma=gamma, n_steps=n), pairs=pairs)
+        fine = readout(checked_evolve(h, t, gamma=gamma, n_steps=2 * n), pairs=pairs)
+        error = (fine - exact).abs().max().item()
+        estimate = (coarse - fine).abs().max().item() / 3
+        assert error > 1e-8  # far above the rounding of either run: the ratio is not noise
+        assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+
 class TestBatch:
     N = 3
     BATCH = 4
