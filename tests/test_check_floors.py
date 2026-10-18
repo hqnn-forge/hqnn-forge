@@ -60,7 +60,7 @@ def test_checked_dev_missing_raises_error() -> None:
 
 
 def test_missing_dev_extra_raises_key_error() -> None:
-    project = {"optional-dependencies": {}}
+    project: dict[str, object] = {"optional-dependencies": {}}
     with pytest.raises(KeyError):
         checker.get_checked_dev_specs(project)
 
