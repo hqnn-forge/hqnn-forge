@@ -373,7 +373,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#184, #583)
 - `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
   rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
-  p-values in the records and CSV; experiment records retain the comparison (#586)
+  p-values in the records and CSV; experiment records retain the comparison (#597)
 
 ### Changed
 - `rydberg_hamiltonian` allocates the dense Hamiltonian directly as `complex128`, reducing peak
