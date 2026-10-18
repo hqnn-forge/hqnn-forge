@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--prune-cache` on `examples/benchmark_rydberg_features.py` and `FeatureCache.prune`:
+  removes cache entries computed under another code digest or key environment and
+  reports the removed files and bytes, leaving unreadable, legacy and partial files
+  untouched (#575)
 - Packaging (`pyproject.toml`, `uv_build`), a PEP 561 `py.typed` marker and the Apache-2.0
   `LICENSE` file (#2, #86, #87)
 - `PCANormalizer`: pure-NumPy PCA plus standardisation, with optional scaling of the

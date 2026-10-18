@@ -197,8 +197,12 @@ imports, though, so an edit saved while they run (the script is read before
 ``torch`` is imported, the package while PennyLane is) still files the old
 code's features under the new code's key (#574).  A package without source
 files, or with a module that is not source, cannot be fingerprinted and is
-refused; ``--no-cache`` runs there.  Entries of other versions stay in the
-directory under their own names and are not removed (#575).
+refused; ``--no-cache`` runs there.  Entries of other versions or code stay
+in the directory under their own names until pruned.  ``--prune-cache``
+(:meth:`FeatureCache.prune`) removes entries whose stored ``code_sha256`` or
+key environment differs from the running process and reports the files and
+bytes removed; files it cannot read as an entry (such as ``*.part`` files or
+entries from before #543) are listed and left untouched (#575).
 
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
@@ -328,6 +332,7 @@ import json
 import math
 import os
 import time
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1289,6 +1294,27 @@ class CachedFeatures(NamedTuple):
     environment: dict[str, Any] | None = None
 
 
+class PruneReport(NamedTuple):
+    """
+    The outcome of pruning a :class:`FeatureCache`.
+
+    Parameters
+    ----------
+    files:
+        Number of stale cache entries removed.
+    bytes:
+        Total bytes of the removed entries.
+    unreadable:
+        Files in the cache directory that could not be read as a valid
+        entry (leftover ``*.part`` files, legacy entries from before #543,
+        or corrupt files), left untouched.
+    """
+
+    files: int
+    bytes: int
+    unreadable: tuple[Path, ...]
+
+
 class FeatureCache:
     """
     Features on disk, one ``.npz`` file per input matrix, feature-map
@@ -1401,6 +1427,83 @@ class FeatureCache:
                 )
             os.replace(partial, path)
         return CachedFeatures(features, seconds, False, self.environment)
+
+    def prune(self) -> PruneReport:
+        """
+        Remove entries of other code or versions from this cache directory.
+
+        Inspects every file in :attr:`directory`.  An entry is removed if its
+        stored ``code_sha256`` or :func:`key_environment` differs from this
+        cache.  Entries with matching code and key environment are kept.
+        Files that cannot be read as a valid entry (leftover ``*.part``
+        files, entries from before #543, or corrupt files) are not removed
+        and are listed in :attr:`PruneReport.unreadable`.
+
+        Returns
+        -------
+        PruneReport
+            Number of removed files, total bytes removed, and unreadable files.
+
+        Raises
+        ------
+        RuntimeError
+            If this cache has a directory but no code fingerprint
+            (:attr:`code_sha256` is ``None``): stale entries cannot be told
+            from current ones.
+        """
+        if self.directory is None or not self.directory.exists():
+            return PruneReport(files=0, bytes=0, unreadable=())
+        if self.code_sha256 is None:
+            raise RuntimeError(
+                "the feature cache has no code fingerprint, so it cannot tell which entries "
+                "belong to this code; cannot prune."
+            )
+        removed_files = 0
+        removed_bytes = 0
+        unreadable: list[Path] = []
+        current_key_env = key_environment(self.environment)
+
+        for path in sorted(self.directory.iterdir()):
+            if not path.is_file():
+                continue
+            if path.name.endswith(".part"):
+                unreadable.append(path)
+                continue
+            if path.suffix != ".npz":
+                unreadable.append(path)
+                continue
+
+            entry_code: str | None = None
+            entry_key_env: dict[str, Any] | None = None
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    if "code_sha256" not in stored or "environment" not in stored:
+                        unreadable.append(path)
+                        continue
+                    entry_code = str(stored["code_sha256"])
+                    raw_env = json.loads(str(stored["environment"]))
+                    if not isinstance(raw_env, dict):
+                        unreadable.append(path)
+                        continue
+                    entry_key_env = key_environment(raw_env)
+            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
+                unreadable.append(path)
+                continue
+
+            if entry_code != self.code_sha256 or entry_key_env != current_key_env:
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+                except OSError:
+                    unreadable.append(path)
+
+        return PruneReport(
+            files=removed_files,
+            bytes=removed_bytes,
+            unreadable=tuple(unreadable),
+        )
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
@@ -2146,6 +2249,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-cache", action="store_true", help="do not store features")
     parser.add_argument(
+        "--prune-cache",
+        action="store_true",
+        help="remove feature cache entries of other code or versions",
+    )
+    parser.add_argument(
         "--n-atoms",
         type=int,
         default=default.n_atoms,
@@ -2304,7 +2412,21 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.prune_cache:
+        if args.no_cache:
+            parser.error("--prune-cache cannot be used with --no-cache")
+        cache = FeatureCache(args.cache_dir)
+        report = cache.prune()
+        print(
+            f"pruned cache ({args.cache_dir}): removed {report.files} file"
+            f"{'' if report.files == 1 else 's'} ({report.bytes} bytes)"
+        )
+        if report.unreadable:
+            print(
+                f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
+            )
     max_sep = (
         None
         if args.max_separation_rows is not None and args.max_separation_rows <= 0
