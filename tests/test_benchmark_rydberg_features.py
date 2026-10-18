@@ -1100,7 +1100,14 @@ class TestCommandLine:
         value: str,
     ) -> None:
         """0 is the one spelling of "no early stopping": a negative value is a typo."""
-        loaded = self._spy_on_loading(monkeypatch)
+        loaded: list[str] = []
+
+        # Fails fast if the value gets through: without --quick a load would be the full benchmark.
+        def load_dataset(name: str, *args: Any, **kwargs: Any) -> Any:
+            loaded.append(name)
+            raise AssertionError(f"{name} was loaded")
+
+        monkeypatch.setattr(bench, "load_dataset", load_dataset)
         out = tmp_path / "results.jsonl"
         out.write_text("an earlier run\n", encoding="utf-8")
         with pytest.raises(SystemExit) as raised:
