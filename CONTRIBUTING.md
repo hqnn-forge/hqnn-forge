@@ -280,7 +280,9 @@ Releases follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`)
     `.github/workflows/tests.yml` builds the sdist and wheel with both the newest allowed
     `uv_build` backend and the declared floor (`uv build --force-pep517`), runs strict twine
     checks on both sets of artifacts, and verifies that both builds contain the same files
-    and the same metadata. Merge it once CI is green.
+    and the same metadata. In that PR, also update the release tool pins in
+    `.github/workflows/release.yml` (`UV_VERSION` in `env:` and `twine==` in the metadata check);
+    keep `UV_VERSION` within the `uv_build` range. Merge it once CI is green.
 *   **Tagging publishes.** After the release PR is merged, tag its merge commit and push the
     tag:
 
