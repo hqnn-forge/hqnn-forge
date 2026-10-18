@@ -21,7 +21,11 @@ not to reproduce a result.  A record written by :func:`save_record` (or by
   per fold the PennyLane device the circuit really ran on, since the device
   factory falls back silently apart from a warning;
 * **datasets** -- size, positives and a SHA-256 of the data, not the data;
-* **metrics** -- the per-dataset, per-model rows of the result.
+* **metrics** -- the per-dataset, per-model rows of the result, including the
+  Holm-adjusted ``wilcoxon_p_holm``;
+* **cross_dataset** -- the hybrid/control comparison over per-dataset mean
+  MCCs (:attr:`~hqnn_forge.benchmark.BenchmarkResult.cross_dataset`), ``null``
+  for a single dataset.
 
 :func:`load_record` reads one back and reports which recorded versions differ
 from the running environment.  :func:`rerun_benchmark` repeats the run from a
@@ -176,6 +180,7 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
             "datasets": result.datasets,
             "folds": folds,
             "metrics": result.records,
+            "cross_dataset": result.cross_dataset,
             "noise": result.noise,
             "noise_summary": result.noise_summary,
         }

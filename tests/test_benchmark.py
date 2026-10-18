@@ -302,6 +302,160 @@ class TestReportedStatistics:
         assert hybrid["wilcoxon_p"] == hybrid["wilcoxon_min_p"] == 0.0625
 
 
+class TestAcrossDatasets:
+    @staticmethod
+    def scored(
+        monkeypatch: pytest.MonkeyPatch,
+        pairs: list[tuple[float, float]],
+        *,
+        n_seeds: int = 1,
+    ) -> BenchmarkResult:
+        # Six folds per dataset, every fold with these mean MCCs; .125, -.25,
+        # .5 are binary-exact differences, avoiding round-off ties. With two
+        # seeds the models get opposite offsets, so any single seed's
+        # differences (-.0625, -.4375, .3125 or .3125, -.0625, .6875) rank
+        # differently from the seed-averaged ones.
+        offsets = {"hybrid": (-0.0625, 0.0625), "control": (0.125, -0.125)}
+        scores = iter(
+            score
+            for means in pairs
+            for _fold in range(6)
+            for model, mean in zip(("hybrid", "control"), means, strict=True)
+            for score in ([mean] if n_seeds == 1 else [mean + o for o in offsets[model]])
+        )
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(next(scores), 0.5, 0.01, 1, 0.2, 0.1),
+        )
+        return _run(
+            {f"d{i}": _data(i, n=160 + 40 * i) for i in range(len(pairs))},
+            n_splits=6,
+            n_seeds=n_seeds,
+            oversample=False,
+        )
+
+    def test_five_datasets_cannot_reach_five_percent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self.scored(monkeypatch, [(0.5, 0.25)] * 5)
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["wilcoxon_p"] == comparison["wilcoxon_min_p"] == 0.0625
+        assert comparison["n_pairs"] == 5
+        assert comparison["rank_biserial"] == 1.0
+
+    @pytest.mark.parametrize("n_seeds", [1, 2])
+    def test_hand_worked_dataset_means_and_holm_family(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, n_seeds: int
+    ) -> None:
+        result = self.scored(
+            monkeypatch, [(0.375, 0.25), (0.0, 0.25), (0.75, 0.25)], n_seeds=n_seeds
+        )
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["datasets"] == ("d0", "d1", "d2")
+        assert comparison["models"] == ("hybrid", "control")
+        assert comparison["n_datasets"] == comparison["n_pairs"] == 3
+        assert [row["mcc_mean"] for row in result.records] == [0.375, 0.25, 0.0, 0.25, 0.75, 0.25]
+        # Differences .125, -.25, .5 have signed ranks +1, -2, +3.
+        # W+ = 4; six of the eight sign assignments are at least as extreme.
+        assert comparison["wilcoxon_statistic"] == 4.0
+        assert comparison["wilcoxon_p"] == 0.75
+        assert comparison["wilcoxon_min_p"] == 0.25
+        assert comparison["rank_biserial"] == pytest.approx((4 - 2) / 6)
+        # Each separate six-fold test has p = 2/64. Holm's three-test
+        # family gives max(3, 2, 1) * 2/64 = 3/32 on BOTH model rows.
+        for row in result.records:
+            assert row["wilcoxon_p"] == 1 / 32
+            assert row["wilcoxon_p_holm"] == 3 / 32
+        path = tmp_path / "metrics.csv"
+        write_csv(result.records, path)
+        with path.open() as fh:
+            rows = list(csv.DictReader(fh))
+        assert [float(row["wilcoxon_p_holm"]) for row in rows] == [3 / 32] * 6
+        from hqnn_forge.experiment import load_record, save_record
+
+        record_path = tmp_path / "run.json"
+        save_record(result, record_path)
+        record, _ = load_record(record_path)
+        assert record["cross_dataset"]["wilcoxon_p"] == 0.75
+        assert record["cross_dataset"]["rank_biserial"] == pytest.approx(1 / 3)
+
+    def test_tied_datasets_drop_from_cross_test_but_keep_holm_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self.scored(monkeypatch, [(0.5, 0.25), (0.25, 0.25), (0.75, 0.25)])
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["n_datasets"] == 3 and comparison["n_pairs"] == 2
+        assert comparison["wilcoxon_p"] == comparison["wilcoxon_min_p"] == 0.5
+        assert comparison["rank_biserial"] == 1.0
+        for row in result.records:
+            if row["dataset"] == "d1":
+                assert math.isnan(row["wilcoxon_p_holm"])
+            else:
+                # The undefined test occupies the third (unrejectable) slot.
+                assert row["wilcoxon_p_holm"] == 3 / 32
+
+    def test_round_off_between_means_is_a_tie(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Dataset d0 has the same three fold MCCs in reverse order, so its
+        # mean MCCs differ only by round-off; d1 and d2 favour the hybrid.
+        folds = {"d0": [(0.1, 0.3), (0.2, 0.2), (0.3, 0.1)], "d1": [(0.5, 0.25)] * 3}
+        folds["d2"] = folds["d1"]
+        scores = iter(score for name in folds for fold in folds[name] for score in fold)
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(next(scores), 0.5, 0.01, 1, 0.2, 0.1),
+        )
+        result = _run(
+            {name: _data(i) for i, name in enumerate(folds)}, n_splits=3, oversample=False
+        )
+        hybrid, control = result.records[:2]
+        assert hybrid["mcc_mean"] != control["mcc_mean"]  # the round-off is there
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["n_pairs"] == 2
+        assert comparison["wilcoxon_statistic"] == 3.0
+        assert comparison["wilcoxon_p"] == comparison["wilcoxon_min_p"] == 0.5
+        assert comparison["rank_biserial"] == 1.0
+
+    def test_all_dataset_means_tied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self.scored(monkeypatch, [(0.25, 0.25), (0.5, 0.5)])
+        comparison = result.cross_dataset
+        assert comparison is not None
+        assert comparison["n_pairs"] == 0
+        for key in ("wilcoxon_statistic", "wilcoxon_p", "wilcoxon_min_p"):
+            assert math.isnan(comparison[key])
+        assert comparison["rank_biserial"] == 0.0
+        assert all(math.isnan(row["wilcoxon_p_holm"]) for row in result.records)
+
+    def test_fold_differences_cancel_before_cross_dataset_test(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every dataset has six non-zero fold differences but mean MCC .25
+        # for BOTH models. Pooling folds would manufacture twelve pairs.
+        scores = iter([0.5, 0.25, 0.0, 0.25] * 6)
+        monkeypatch.setattr(
+            benchmark,
+            "_fit_and_score",
+            lambda *a, **k: benchmark.FitScore(next(scores), 0.5, 0.01, 1, 0.2, 0.1),
+        )
+        result = _run({"first": _data(), "second": _data(1)}, n_splits=6, oversample=False)
+        assert result.cross_dataset is not None
+        assert result.cross_dataset["n_pairs"] == 0
+        assert math.isnan(result.cross_dataset["wilcoxon_p"])
+        assert result.cross_dataset["rank_biserial"] == 0.0
+        assert all(row["wilcoxon_p_holm"] == 1.0 for row in result.records)
+
+    def test_one_dataset_has_no_cross_dataset_test(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self.scored(monkeypatch, [(0.5, 0.25)])
+        assert result.cross_dataset is None
+        for row in result.records:
+            assert row["wilcoxon_p_holm"] == row["wilcoxon_p"] == 1 / 32
+
+
 class TestRepeatability:
     def test_same_seed_same_result(self) -> None:
         a, b = _run({"a": _data()}), _run({"a": _data()})

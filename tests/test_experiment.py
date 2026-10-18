@@ -88,6 +88,7 @@ class TestContents:
             "datasets",
             "folds",
             "metrics",
+            "cross_dataset",
             "noise",
             "noise_summary",
         }

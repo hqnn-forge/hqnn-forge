@@ -51,6 +51,30 @@ columns are the same on both rows of a dataset.
 this many folds: with 5 folds, two-sided, it is 0.0625, so no outcome reaches
 0.05.  A difference then needs more folds (``n_splits``) to be declared, not
 a lower threshold.
+
+``wilcoxon_p_holm`` adjusts the per-dataset p-values as one family (one
+hypothesis per dataset, despite the duplicate model rows). Undefined tests
+remain NaN and keep an unrejectable slot in the family.
+
+Across datasets
+---------------
+With more than one dataset, :attr:`BenchmarkResult.cross_dataset` reports a
+two-sided Wilcoxon test over the per-dataset mean MCCs, rank-biserial effect
+(positive favours the hybrid), and smallest attainable p-value. Each dataset
+contributes one pair, regardless of its size or the number of folds/seeds.
+Five non-zero pairs cannot reach 0.05, even when every dataset favours the
+same model. The comparison is included in saved experiment records.
+
+The runner compares exactly two models. For three or more models, use
+:func:`~hqnn_forge.evaluation.friedman_test` (including Iman--Davenport),
+followed by :func:`~hqnn_forge.evaluation.nemenyi_critical_difference` for
+all pairs or :func:`~hqnn_forge.evaluation.compare_to_control` with
+Holm-adjusted p-values against one control (Demšar 2006).
+
+References
+----------
+- Demšar (2006), "Statistical Comparisons of Classifiers over Multiple Data
+  Sets", Journal of Machine Learning Research 7, 1--30.
 """
 
 from __future__ import annotations
@@ -73,6 +97,7 @@ import torch.nn as nn
 from hqnn_forge.evaluation import (
     brier_score,
     expected_calibration_error,
+    holm_correction,
     matthews_corrcoef,
     parameter_efficiency,
     rank_biserial_correlation,
@@ -126,6 +151,7 @@ COLUMNS: tuple[str, ...] = (
     "fold_mcc",
     "train_seconds",
     "wilcoxon_p",
+    "wilcoxon_p_holm",
     "wilcoxon_min_p",
     "rank_biserial",
 )
@@ -221,6 +247,88 @@ class BenchmarkResult:
     which it no longer is (``lost_at``; ``None`` if it never was, or never
     stopped being within the sweep).
     """
+
+    cross_dataset: dict[str, Any] | None = None
+    """
+    With more than one dataset: two-sided Wilcoxon comparison of hybrid and
+    control's per-dataset ``mcc_mean``, each dataset weighted equally.
+    ``datasets`` gives their order, ``models`` the subtraction order
+    (hybrid minus control), ``n_datasets`` the total, and ``n_pairs`` the
+    count of non-zero differences (a difference of at most 1e-12 is a
+    round-off tie). ``wilcoxon_statistic`` is W+; ``wilcoxon_p``,
+    ``wilcoxon_min_p`` and ``rank_biserial`` describe this cross-dataset
+    test, separate from the within-dataset record columns.
+    All mean MCCs tied: statistic and p-values are NaN, effect is 0.
+    One dataset: ``None``.
+    """
+
+
+_MEAN_TIE_ATOL = 1e-12
+"""Mean-MCC differences at most this large are ties, not round-off wins.
+
+Equal fold MCCs averaged in another order can differ by a few ulp (mean of
+[.1, .2, .3] minus mean of [.3, .2, .1] is 5.6e-17); MCC differences that
+test sets can actually produce are many orders of magnitude larger.
+"""
+
+
+def _holm_adjust(records: list[dict[str, Any]]) -> None:
+    """Fill in ``wilcoxon_p_holm`` on every row of ``records``, in place.
+
+    Each dataset contributes one two-sided fold-test p-value to Holm's
+    family (the duplicate control row does not add a hypothesis). Sort the
+    N p-values as p_(i), with i = 1,...,N; the adjusted value at position i
+    is min(1, max_{j<=i} ((N-j+1) p_(j))). Undefined fold tests occupy an
+    unrejectable p=1 slot internally, preserving the planned N-test family,
+    but their reported raw and adjusted values remain NaN.
+    """
+    hybrids = [row for row in records if row["model"] == "hybrid"]
+    controls = [row for row in records if row["model"] == "control"]
+    adjusted = holm_correction(
+        [row["wilcoxon_p"] if math.isfinite(row["wilcoxon_p"]) else 1.0 for row in hybrids]
+    )
+    for hybrid, control, p in zip(hybrids, controls, adjusted, strict=True):
+        value = float(p) if math.isfinite(hybrid["wilcoxon_p"]) else math.nan
+        hybrid["wilcoxon_p_holm"] = control["wilcoxon_p_holm"] = value
+
+
+def _cross_dataset(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Compare the two models across datasets; ``None`` for one dataset.
+
+    Row d contributes dimensionless MCC mean M[d,m] =
+    sum_f sum_s MCC[d,f,m,s] / (n_folds * n_seeds), already in mcc_mean.
+    Larger datasets get no extra weight. For differences M[d,hybrid] -
+    M[d,control], discard zeros (|difference| <= ``_MEAN_TIE_ATOL``) and
+    rank absolute values, ties averaged. W+ and W- sum the positive and
+    negative ranks; the two-sided Wilcoxon test gives the p-value and its
+    attainable floor for these ranks, and r = (W+ - W-) / (W+ + W-) is
+    positive in favour of the hybrid. With n non-zero pairs in the exact
+    regime, the floor is 2 / 2**n. No non-zero pairs means an undefined
+    test (NaN) and effect 0, as for fold tests.
+    """
+    hybrids = [row for row in records if row["model"] == "hybrid"]
+    controls = [row for row in records if row["model"] == "control"]
+    if len(hybrids) < 2:
+        return None
+    a = np.array([row["mcc_mean"] for row in hybrids])
+    b = np.array([row["mcc_mean"] for row in controls])
+    diffs = np.where(np.abs(a - b) <= _MEAN_TIE_ATOL, 0.0, a - b)
+    zeros = np.zeros_like(diffs)
+    n_pairs = int(np.count_nonzero(diffs))
+    statistic = p_value = min_p = math.nan
+    if n_pairs:
+        test = wilcoxon_signed_rank(diffs, zeros)
+        statistic, p_value, min_p = test.statistic, test.p_value, test.min_p_value
+    return {
+        "datasets": tuple(row["dataset"] for row in hybrids),
+        "models": MODELS,
+        "n_datasets": len(hybrids),
+        "n_pairs": n_pairs,
+        "wilcoxon_statistic": statistic,
+        "wilcoxon_p": p_value,
+        "wilcoxon_min_p": min_p,
+        "rank_biserial": rank_biserial_correlation(diffs, zeros),
+    }
 
 
 def fingerprint(X: npt.NDArray[np.float64], y: npt.NDArray[np.int64]) -> str:
@@ -661,6 +769,8 @@ def run_benchmark(
     Returns
     -------
     BenchmarkResult
+        Per-dataset records (including Holm-adjusted fold-test p-values)
+        and, for multiple datasets, ``cross_dataset`` statistics over mean MCCs.
     """
     if n_splits < 2:
         raise ValueError(f"n_splits must be >= 2; got {n_splits}.")
@@ -916,12 +1026,21 @@ def run_benchmark(
                     "fold_mcc": tuple(float(s) for s in fold_scores),
                     "train_seconds": seconds[model_name],
                     "wilcoxon_p": p,
+                    "wilcoxon_p_holm": math.nan,
                     "wilcoxon_min_p": min_p,
                     "rank_biserial": effect,
                 }
             )
+    _holm_adjust(records)
     result = BenchmarkResult(
-        records, folds, settings, models, data_info, noise_rows, noise_summary
+        records,
+        folds,
+        settings,
+        models,
+        data_info,
+        noise_rows,
+        noise_summary,
+        cross_dataset=_cross_dataset(records),
     )
     if record_path is not None:
         from hqnn_forge.experiment import save_record  # imports this module

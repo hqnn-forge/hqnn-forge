@@ -373,8 +373,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCC/kParam 4.444, inside both unchanged published bands, though every fold peaked at epoch 1
   or 2. Recorded with all five folds and its provenance on a results page in the docs
   (#184, #583)
+- `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
+  rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
+  p-values in the records and CSV; experiment records retain the comparison (#597)
 
 ### Changed
+- `rydberg_hamiltonian` allocates the dense Hamiltonian directly as `complex128`, reducing peak
+  memory usage during construction by avoiding an intermediate `float64` matrix (#591)
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
   its probabilities and score across `n_repeats` without changing finite-shot sampling (#532)
 - `numpy.random.seed` no longer makes the shot samples of an unseeded device repeat: the

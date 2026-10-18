@@ -67,9 +67,16 @@ flowchart TD
 `rank_biserial`); the outcomes at the bottom are how to read those columns at the α you choose.
 Its own `alpha` argument only sets the significance level of the noise sweep's summary. Folds
 where both models score the same MCC drop out of the test, so they do not count towards reaching
-α. Two further steps are separate calls, not part of `run_benchmark`: ablation of a trained
-model's quantum layer (`disable_quantum_layer`, `permute_quantum_layer`), and the comparison
-across datasets.
+α. When reading the per-dataset tests as a family, use `wilcoxon_p_holm`, which adjusts one
+p-value per dataset (the same on both model rows).
+
+With several datasets, `result.cross_dataset` compares the two models over their per-dataset
+mean MCCs using a two-sided Wilcoxon test. It reports `wilcoxon_p`, `wilcoxon_min_p` and
+`rank_biserial` (positive favours the hybrid); each dataset contributes one pair, independent
+of its sample count or number of folds/seeds. Five non-zero pairs cannot reach 0.05. The saved
+experiment record includes this comparison. With one dataset, `cross_dataset` is `None`.
+Ablation of a trained model's quantum layer remains a separate call
+(`disable_quantum_layer`, `permute_quantum_layer`).
 
 ---
 
