@@ -1,14 +1,23 @@
 """
 hqnn_forge.noise
 ================
-Post-hoc depolarizing noise for evaluating a trained model's NISQ robustness.
+Noise channels and finite-shot evaluation for HQNN-Forge quantum layers.
 
-A model trained on a noiseless simulator will run on hardware whose gates
-depolarize.  :func:`apply_depolarizing_noise` re-executes the model's quantum
-layer on ``default.mixed`` with a ``DepolarizingChannel`` of probability ``p``
-inserted into the circuit, for the duration of a ``with`` block and without
-touching the weights; :func:`noise_sweep` repeats that over a range of ``p``
-and collects predictions (and a score, if asked).
+The encoding layers and hybrid classifiers support depolarizing, amplitude
+damping, phase damping, bit-flip and phase-flip channels during training.
+Training-time noise is active in train mode and uses either exact density-matrix
+simulation (``noise_method="density"``) or sampled trajectories
+(``noise_method="trajectories"``); evaluation mode disables training-time noise.
+For post-hoc noise evaluation, :func:`apply_depolarizing_noise` temporarily
+runs the quantum layer with any of the five channels, without changing model
+weights, and :func:`noise_sweep` collects predictions (and optional scores)
+across channel strengths.
+
+Finite-shot evaluation temporarily samples circuit measurements without
+retraining or changing model weights.  :func:`apply_shots` applies a shot count
+inside a context block, and :func:`shot_sweep` repeats predictions across shot
+counts to show shot-noise variability; ``shots=None`` provides the exact
+reference.
 
 Channel
 -------
