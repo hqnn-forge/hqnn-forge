@@ -1,23 +1,20 @@
 """
 hqnn_forge.noise
 ================
-Noise channels and finite-shot evaluation for HQNN-Forge quantum layers.
+Noise channels, readout error and finite-shot evaluation for HQNN-Forge quantum layers.
 
-The encoding layers and hybrid classifiers support depolarizing, amplitude
-damping, phase damping, bit-flip and phase-flip channels during training.
-Training-time noise is active in train mode and uses either exact density-matrix
-simulation (``noise_method="density"``) or sampled trajectories
-(``noise_method="trajectories"``); evaluation mode disables training-time noise.
-For post-hoc noise evaluation, :func:`apply_depolarizing_noise` temporarily
-runs the quantum layer with any of the five channels, without changing model
-weights, and :func:`noise_sweep` collects predictions (and optional scores)
-across channel strengths.
-
-Finite-shot evaluation temporarily samples circuit measurements without
-retraining or changing model weights.  :func:`apply_shots` applies a shot count
-inside a context block, and :func:`shot_sweep` repeats predictions across shot
-counts to show shot-noise variability; ``shots=None`` provides the exact
-reference.
+The layers and hybrid classifiers can train under depolarizing, amplitude-damping,
+phase-damping, bit-flip or phase-flip noise, and with
+``readout_error=(p01, p10)`` (see
+*Training-time noise*). Post hoc, :func:`apply_depolarizing_noise` re-runs a
+trained model's quantum layer with any of the five channels for the duration of
+a ``with`` block, always as an exact density matrix on ``default.mixed`` whatever
+the layer's ``noise_method``, swapping only the QNode and restoring it when the
+block exits. Gradients still flow, so optimizer steps inside the block can update
+model weights. :func:`apply_readout_error` applies readout error, and
+:func:`noise_sweep` repeats either over a range of strengths with
+``channel="readout"``. :func:`apply_shots` and :func:`shot_sweep` evaluate with
+finite shots (see *Shot noise*).
 
 Channel
 -------
