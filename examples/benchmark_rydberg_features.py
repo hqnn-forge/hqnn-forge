@@ -452,7 +452,8 @@ class Settings:
         Adam learning rate (``> 0``) and the ``train_model`` settings
         (``batch_size >= 1``), unless tuned.  ``patience=None`` is no early
         stopping: every model trains for ``max_epochs`` epochs
-        (``--patience 0``, recorded as ``null``).
+        (``--patience 0``, recorded as ``null``; a negative ``--patience`` is a
+        command-line error).
     n_trials, inner_folds, search_space:
         The tuning budget (0 trials: no tuning) and its search space; its
         ``lr`` and ``batch_size`` values are held to the bounds above.
@@ -2362,7 +2363,10 @@ def _parser() -> argparse.ArgumentParser:
         "--patience",
         type=int,
         default=default.patience,
-        help="early-stopping patience in epochs; <= 0 for no early stopping (recorded as null)",
+        help=(
+            "early-stopping patience in epochs: an integer >= 1, or 0 for no early stopping "
+            "(recorded as null)"
+        ),
     )
     parser.add_argument(
         "--samples",
@@ -2405,7 +2409,14 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
+    if args.patience < 0:
+        parser.error(
+            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
+            f"got {args.patience}"
+        )
     max_sep = (
         None
         if args.max_separation_rows is not None and args.max_separation_rows <= 0
@@ -2438,7 +2449,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             lr=args.lr,
             max_epochs=args.epochs,
             batch_size=args.batch_size,
-            patience=None if args.patience <= 0 else args.patience,
+            patience=args.patience or None,
             n_trials=args.trials,
             inner_folds=args.inner_folds,
             n_samples=args.samples,

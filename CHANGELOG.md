@@ -599,7 +599,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns, 2.6 GiB at 13 atoms; refused when the dataset is loaded, before any simulation),
   `lr <= 0` and `batch_size < 1`, also as values of the
   search space (`--lr 0` ran to completion, and `--batch-size 0` too with tuning on). `--patience 0`
-  or less now means no early stopping, recorded as `null`, and a dataset name outside `DATASETS`
+  now means no early stopping, recorded as `null` (a negative `--patience` ends in a command-line
+  error), and a dataset name outside `DATASETS`
   raises a `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
   (#540, #606)
 

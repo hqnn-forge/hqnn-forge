@@ -1074,11 +1074,11 @@ class TestCommandLine:
         assert started == []
         assert out.read_text(encoding="utf-8") == "an earlier run\n"
 
-    @pytest.mark.parametrize(("flag", "patience"), [("0", None), ("-2", None), ("1", 1), ("7", 7)])
-    def test_a_patience_of_0_or_less_is_no_early_stopping(
+    @pytest.mark.parametrize(("flag", "patience"), [("0", None), ("1", 1), ("7", 7)])
+    def test_a_patience_of_0_is_no_early_stopping(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, patience: int | None
     ) -> None:
-        """As ``--max-separation-rows``: ``<= 0`` is "no limit", ``None`` in the settings."""
+        """As ``--trials`` and ``--max-separation-rows``: ``0`` is "none", ``None`` here."""
         captured: dict[str, Any] = {}
 
         def run(datasets: Any, settings: Any, out: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -1088,6 +1088,31 @@ class TestCommandLine:
         monkeypatch.setattr(bench, "run", run)
         bench.main(["--patience", flag, "--out", str(tmp_path / "out.jsonl"), "--no-cache"])
         assert captured["settings"].patience == patience
+
+    @pytest.mark.parametrize("quick", [[], ["--quick"]])
+    @pytest.mark.parametrize("value", ["-1", "-10"])
+    def test_a_negative_patience_is_refused_before_any_dataset_is_loaded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        quick: list[str],
+        value: str,
+    ) -> None:
+        """0 is the one spelling of "no early stopping": a negative value is a typo."""
+        loaded = self._spy_on_loading(monkeypatch)
+        out = tmp_path / "results.jsonl"
+        out.write_text("an earlier run\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as raised:
+            bench.main([*quick, "--patience", value, "--out", str(out), "--no-cache"])
+        assert raised.value.code == 2
+        error = capsys.readouterr().err.splitlines()[-1]
+        assert error.endswith(
+            f"error: argument --patience: must be 0 (no early stopping) or an integer >= 1; "
+            f"got {value}"
+        )
+        assert loaded == []
+        assert out.read_text(encoding="utf-8") == "an earlier run\n"
 
     def test_without_early_stopping_every_epoch_runs_and_patience_is_recorded_as_null(
         self, tmp_path: Path
