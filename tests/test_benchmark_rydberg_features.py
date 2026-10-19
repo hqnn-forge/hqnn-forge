@@ -1756,6 +1756,10 @@ class TestCache:
         corrupt_path = tmp_path / "corrupt.npz"
         corrupt_path.write_bytes(b"not a valid zip file")
 
+        # Zero-byte npz file
+        empty_npz_path = tmp_path / "empty.npz"
+        empty_npz_path.touch()
+
         # Non-npz file
         txt_path = tmp_path / "notes.txt"
         txt_path.write_bytes(b"some notes")
@@ -1763,48 +1767,84 @@ class TestCache:
         report = cache.prune()
         assert report.files == 0
         assert report.bytes == 0
-        assert set(report.unreadable) == {legacy_path, part_path, corrupt_path, txt_path}
+        assert set(report.unreadable) == {
+            legacy_path,
+            part_path,
+            corrupt_path,
+            empty_npz_path,
+            txt_path,
+        }
 
         # All files still exist
         assert legacy_path.exists()
         assert part_path.exists()
         assert corrupt_path.exists()
+        assert empty_npz_path.exists()
         assert txt_path.exists()
         assert cache.fetch(self.inputs, self.labels, config, compute).hit is True
 
     def test_prune_empty_or_nonexistent_or_disabled_directory(self, tmp_path: Path) -> None:
         """prune() handles None, nonexistent, or empty directories cleanly (#575)."""
         assert bench.FeatureCache(None).prune() == bench.PruneReport(0, 0, ())
-        assert bench.FeatureCache(tmp_path / "missing").prune() == bench.PruneReport(0, 0, ())
         assert bench.FeatureCache(tmp_path / "empty").prune() == bench.PruneReport(0, 0, ())
+        cache_missing = bench.FeatureCache(tmp_path / "missing")
+        (tmp_path / "missing").rmdir()
+        assert cache_missing.prune() == bench.PruneReport(0, 0, ())
 
-    def test_prune_raises_if_code_fingerprint_is_unavailable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_prune_removes_stale_entry_with_obsolete_environment_schema(
+        self, tmp_path: Path
     ) -> None:
-        """prune() refuses to prune when the process has no code digest (#575)."""
+        """Entries under another code digest are pruned even with an obsolete environment (#575)."""
         cache = bench.FeatureCache(tmp_path)
-        monkeypatch.setattr(cache, "code_sha256", None)
-        with pytest.raises(RuntimeError, match="cannot prune"):
-            cache.prune()
+        stale_path = tmp_path / "stale_obsolete.npz"
+        np.savez(
+            stale_path,
+            features=np.full((12, 4), 1.0),
+            seconds=np.float64(0.5),
+            code_sha256=np.array("0" * 64),
+            environment=np.array(json.dumps({"obsolete_schema": True})),
+        )
+        report = cache.prune()
+        assert report.files == 1
+        assert not stale_path.exists()
+        assert report.unreadable == ()
 
     def test_prune_cli_option(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """--prune-cache removes stale entries and reports removal via CLI (#575)."""
+        """--prune-cache removes stale entries and exits without running the benchmark (#575)."""
         compute, _ = self._counting()
-        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        config_stale = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        config_current = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
         cache_dir = tmp_path / "cache"
 
-        # Write a stale entry under another code digest
+        # Stale entry under another code digest
         cache_other = bench.FeatureCache(cache_dir, code_sha256="1" * 64)
-        cache_other.fetch(self.inputs, self.labels, config, compute)
-        assert len(list(cache_dir.glob("*.npz"))) == 1
+        cache_other.fetch(self.inputs, self.labels, config_stale, compute)
+        path_stale = cache_other.path(self.inputs, self.labels, config_stale)
+        assert path_stale is not None and path_stale.exists()
+        stale_size = path_stale.stat().st_size
+
+        # Current valid entry
+        cache_current = bench.FeatureCache(cache_dir)
+        cache_current.fetch(self.inputs, self.labels, config_current, compute)
+        path_current = cache_current.path(self.inputs, self.labels, config_current)
+        assert path_current is not None and path_current.exists()
+
+        assert len(list(cache_dir.glob("*.npz"))) == 2
 
         out_file = tmp_path / "out.jsonl"
         records = bench.main(
             ["--quick", "--prune-cache", "--cache-dir", str(cache_dir), "--out", str(out_file)]
         )
-        assert len(records) > 0
+
+        assert records == []
+        assert not out_file.exists()
+        assert not path_stale.exists()
+        assert path_current.exists()
+        assert cache_current.fetch(self.inputs, self.labels, config_current, compute).hit is True
+
         captured = capsys.readouterr().out
-        assert f"pruned cache ({cache_dir}): removed 1 file" in captured
+        assert f"pruned cache ({cache_dir}): removed 1 file ({stale_size} bytes)" in captured
+        assert "wrote" not in captured
 
     def test_prune_cli_conflicts_with_no_cache(self, tmp_path: Path) -> None:
         """--prune-cache cannot be combined with --no-cache (#575)."""

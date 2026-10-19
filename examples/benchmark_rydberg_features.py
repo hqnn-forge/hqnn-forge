@@ -199,10 +199,11 @@ code's features under the new code's key (#574).  A package without source
 files, or with a module that is not source, cannot be fingerprinted and is
 refused; ``--no-cache`` runs there.  Entries of other versions or code stay
 in the directory under their own names until pruned.  ``--prune-cache``
-(:meth:`FeatureCache.prune`) removes entries whose stored ``code_sha256`` or
-key environment differs from the running process and reports the files and
-bytes removed; files it cannot read as an entry (such as ``*.part`` files or
-entries from before #543) are listed and left untouched (#575).
+(:meth:`FeatureCache.prune`) removes stale entries whose stored ``code_sha256``
+or key environment differs from the running process, reports the files and
+bytes removed, and exits without running the benchmark; files it cannot read as
+an entry (such as ``*.part`` files or entries from before #543) are listed and
+left untouched (#575).
 
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
@@ -1327,7 +1328,8 @@ class FeatureCache:
     they were computed in (JSON) and the code digest; it is written to a
     temporary name and renamed, so an interrupted run leaves no partial
     entry.  With ``directory=None`` nothing is stored and every request
-    computes.
+    computes.  With ``--prune-cache``, stale entries are removed, the outcome
+    is reported, and the process exits without running the benchmark.
 
     Parameters
     ----------
@@ -1443,21 +1445,10 @@ class FeatureCache:
         -------
         PruneReport
             Number of removed files, total bytes removed, and unreadable files.
-
-        Raises
-        ------
-        RuntimeError
-            If this cache has a directory but no code fingerprint
-            (:attr:`code_sha256` is ``None``): stale entries cannot be told
-            from current ones.
         """
         if self.directory is None or not self.directory.exists():
             return PruneReport(files=0, bytes=0, unreadable=())
-        if self.code_sha256 is None:
-            raise RuntimeError(
-                "the feature cache has no code fingerprint, so it cannot tell which entries "
-                "belong to this code; cannot prune."
-            )
+        assert self.code_sha256 is not None, "cache directory exists but code_sha256 is None"
         removed_files = 0
         removed_bytes = 0
         unreadable: list[Path] = []
@@ -1466,31 +1457,34 @@ class FeatureCache:
         for path in sorted(self.directory.iterdir()):
             if not path.is_file():
                 continue
-            if path.name.endswith(".part"):
-                unreadable.append(path)
-                continue
             if path.suffix != ".npz":
                 unreadable.append(path)
                 continue
 
-            entry_code: str | None = None
-            entry_key_env: dict[str, Any] | None = None
+            is_stale = False
             try:
                 with np.load(path, allow_pickle=False) as stored:
-                    if "code_sha256" not in stored or "environment" not in stored:
+                    if "code_sha256" not in stored:
                         unreadable.append(path)
                         continue
                     entry_code = str(stored["code_sha256"])
-                    raw_env = json.loads(str(stored["environment"]))
-                    if not isinstance(raw_env, dict):
-                        unreadable.append(path)
-                        continue
-                    entry_key_env = key_environment(raw_env)
-            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
+                    if entry_code != self.code_sha256:
+                        is_stale = True
+                    else:
+                        if "environment" not in stored:
+                            unreadable.append(path)
+                            continue
+                        raw_env = json.loads(str(stored["environment"]))
+                        if not isinstance(raw_env, dict):
+                            unreadable.append(path)
+                            continue
+                        entry_key_env = key_environment(raw_env)
+                        is_stale = entry_key_env != current_key_env
+            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, EOFError):
                 unreadable.append(path)
                 continue
 
-            if entry_code != self.code_sha256 or entry_key_env != current_key_env:
+            if is_stale:
                 try:
                     size = path.stat().st_size
                     path.unlink()
@@ -2251,7 +2245,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prune-cache",
         action="store_true",
-        help="remove feature cache entries of other code or versions",
+        help=(
+            "remove stale feature cache entries, report the outcome, and exit "
+            "without running the benchmark"
+        ),
     )
     parser.add_argument(
         "--n-atoms",
@@ -2427,6 +2424,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             print(
                 f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
             )
+        return []
     max_sep = (
         None
         if args.max_separation_rows is not None and args.max_separation_rows <= 0
