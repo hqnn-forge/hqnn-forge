@@ -376,6 +376,44 @@ def evolve(
     return rho
 
 
+def _populations_to_features(
+    populations: torch.Tensor,
+    *,
+    pairs: bool = False,
+) -> torch.Tensor:
+    """
+    Features (atoms and optionally pairs) from computational-basis populations.
+
+    The caller is expected to have validated the inputs: a real floating or
+    integer tensor of shape ``(2^N,)`` or ``(batch, 2^N)`` for 1 to
+    ``MAX_ATOMS`` atoms.
+
+    Parameters
+    ----------
+    populations:
+        Tensor of shape ``(2^N,)`` or ``(batch, 2^N)``, with basis states ordered
+        by atom 0 as the most significant bit.
+    pairs:
+        Whether to append the ``N(N-1)/2`` pair correlations.
+
+    Returns
+    -------
+    torch.Tensor
+        Features tensor of shape ``(N,)``, ``(batch, N)``, ``(N + N(N-1)/2,)``,
+        or ``(batch, N + N(N-1)/2)`` with the same dtype and on the same device
+        as ``populations``.
+    """
+    n = populations.shape[-1].bit_length() - 1
+    bits = _bits(n, populations.device).to(populations.dtype)
+    singles = populations @ bits
+    if not pairs:
+        return singles
+    # Row-major upper triangle: (0,1), (0,2), …, (0,N−1), (1,2), …, (N−2,N−1).
+    first, second = torch.triu_indices(n, n, offset=1, device=populations.device)
+    both = bits[:, first] * bits[:, second]
+    return torch.cat([singles, populations @ both], dim=-1)
+
+
 def readout(rho: torch.Tensor, *, pairs: bool = False) -> torch.Tensor:
     """
     Excitation probabilities ``⟨n_i⟩`` of every atom, and optionally ``⟨n_i n_j⟩``.
@@ -429,14 +467,7 @@ def readout(rho: torch.Tensor, *, pairs: bool = False) -> torch.Tensor:
     >>> readout(rho, pairs=True).tolist()
     [0.75, 0.625, 0.5]
     """
-    n = _atom_count(rho, "rho")
+    _atom_count(rho, "rho")
     diagonal = rho.diagonal(dim1=-2, dim2=-1)
     populations = (diagonal.real if diagonal.is_complex() else diagonal).to(torch.float64)
-    bits = _bits(n, rho.device)
-    singles = populations @ bits  # Σ_k ρ_kk b_i(k)
-    if not pairs:
-        return singles
-    # Row-major upper triangle: (0,1), (0,2), …, (0,N−1), (1,2), …, (N−2,N−1).
-    first, second = torch.triu_indices(n, n, offset=1, device=rho.device)
-    both = bits[:, first] * bits[:, second]  # b_i(k) b_j(k), shape (2^N, N(N−1)/2)
-    return torch.cat([singles, populations @ both], dim=-1)
+    return _populations_to_features(populations, pairs=pairs)

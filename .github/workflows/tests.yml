@@ -128,9 +128,10 @@ jobs:
         
     # Every extra the suite can import, which is the same set the locked job
     # installs with --all-extras below. An extra left out here does not fail the
-    # job: tests/test_evaluation_plots.py and tests/test_sklearn_estimator.py
-    # skip their whole module when matplotlib or scikit-learn is missing, so the
-    # tests would just stop running. Keep the two jobs' sets identical.
+    # job: tests/test_evaluation_plots.py, tests/test_sklearn_estimator.py and
+    # tests/test_does_the_quantum_layer_help.py skip their whole module when
+    # matplotlib or scikit-learn is missing, so the tests would just stop
+    # running. Keep the two jobs' sets identical.
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -236,8 +237,10 @@ jobs:
         uv pip install --resolution lowest-direct -e ".[lightning,sklearn]"
         PYTEST_SPEC=$(uv run --no-sync python -c 'import re, tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"pytest\s*[<>=!~]", d)))')
         uv pip install "$PYTEST_SPEC"
-        uv run --no-sync python -c 'import re, tomllib; print("\n".join(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"qutip\s*[<>=!~]", d)))' > qutip-floors.txt
-        uv pip install --resolution lowest-direct -r qutip-floors.txt
+        specs=$(uv run --no-sync python .github/scripts/check_floors.py --print-dev-floors)
+        [ -n "$specs" ] || { echo "::error::check_floors.py --print-dev-floors printed no specs"; exit 1; }
+        mapfile -t SPECS <<< "$specs"
+        uv pip install --resolution lowest-direct "${SPECS[@]}"
 
     # The resolver silently installs a newer version when another dependency
     # requires one, so an unreachable floor would otherwise still go green
@@ -255,3 +258,64 @@ jobs:
 
     - name: Run doctests
       run: uv run --no-sync pytest --doctest-modules hqnn_forge -v
+
+  # Builds the sdist and wheel with both the newest allowed uv_build backend
+  # (--force-pep517) and the declared floor (--build-constraint), verifying
+  # metadata via twine check --strict, confirming no Mermaid fence remains,
+  # testing wheel install and import, and ensuring file manifests and metadata
+  # match between backends (#554).
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.3.0
+      with:
+        python-version: "3.11"
+        enable-cache: true
+        cache-suffix: package
+
+    - name: Rewrite README.md for PyPI
+      run: python .github/scripts/pypi_readme.py --in-place
+
+    - name: Build distributions with newest allowed uv_build
+      run: uv build --force-pep517 --out-dir dist/newest
+
+    - name: Extract uv_build floor and build distributions with lowest allowed uv_build
+      run: |
+        CONSTRAINT_FILE="${RUNNER_TEMP:-.}/build-constraint.txt"
+        uv run --no-project --with packaging python .github/scripts/check_dist_contents.py --print-uv-build-constraint pyproject.toml > "$CONSTRAINT_FILE"
+        cat "$CONSTRAINT_FILE"
+        uv build --force-pep517 --build-constraint "$CONSTRAINT_FILE" --out-dir dist/floor
+        rm -f "$CONSTRAINT_FILE"
+
+    - name: Restore README.md
+      if: always()
+      run: git checkout -- README.md
+
+    - name: Check distributions metadata
+      run: uvx twine check --strict dist/newest/* dist/floor/*
+
+    - name: Check the wheels contain no Mermaid fence
+      run: |
+        for dir in dist/newest dist/floor; do
+          if unzip -p "$dir"/*.whl '*.dist-info/METADATA' | grep -Eq '(`{3,}|~{3,})[[:space:]]*mermaid\b'; then
+            echo "::error::$dir wheel's METADATA contains a mermaid fence."
+            exit 1
+          fi
+        done
+
+    - name: Check the wheel installs, imports and reports project.version
+      run: |
+        expected=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+        for dir in dist/newest dist/floor; do
+          venv="/tmp/wheel-check-$(basename "$dir")"
+          uv venv "$venv"
+          uv pip install --python "$venv" "$dir"/*.whl
+          (cd /tmp && "$venv/bin/python" -c "import hqnn_forge, hqnn_forge.models, hqnn_forge.encoding; v = hqnn_forge.__version__; assert v == '$expected', (v, '$expected'); print(f'$dir: {v}')")
+        done
+
+    - name: Compare distribution contents and metadata
+      run: uv run --no-project --with packaging python .github/scripts/check_dist_contents.py dist/newest dist/floor
