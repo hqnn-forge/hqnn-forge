@@ -449,7 +449,7 @@ class Settings:
     loss:
         A key of :data:`LOSSES`.
     lr, max_epochs, batch_size, patience:
-        Adam learning rate (``> 0``) and the ``train_model`` settings
+        Adam learning rate (finite and ``> 0``) and the ``train_model`` settings
         (``batch_size >= 1``), unless tuned.  ``patience=None`` is no early
         stopping: every model trains for ``max_epochs`` epochs
         (``--patience 0``, recorded as ``null``; a negative ``--patience`` is a
@@ -523,8 +523,8 @@ class Settings:
         # Also where tuning overrides them: a refused default should not depend on --trials.
         if self.batch_size < 1:
             raise ValueError(f"batch_size must be >= 1; got {self.batch_size}.")
-        if not self.lr > 0:  # NaN too
-            raise ValueError(f"lr must be > 0; got {self.lr}.")
+        if not 0 < self.lr < math.inf:  # NaN too
+            raise ValueError(f"lr must be finite and > 0; got {self.lr}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -554,8 +554,8 @@ class Settings:
                 f"search_space['batch_size'] must hold values >= 1; got {list(batch_sizes)}."
             )
         rates = self.search_space.get("lr", ())
-        if any(not value > 0 for value in rates):
-            raise ValueError(f"search_space['lr'] must hold values > 0; got {list(rates)}.")
+        if any(not 0 < value < math.inf for value in rates):
+            raise ValueError(f"search_space['lr'] must hold finite values > 0; got {list(rates)}.")
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
@@ -741,13 +741,7 @@ def positive_control(
     -------
     PositiveControl
     """
-    if n_atoms < 2:
-        raise ValueError(f"n_atoms must be >= 2 for a chain with a bond; got {n_atoms}.")
-    if n_atoms > POSITIVE_CONTROL_MAX_ATOMS:
-        raise ValueError(
-            f"n_atoms must be <= {POSITIVE_CONTROL_MAX_ATOMS} with the positive control "
-            f"(2^N - 1 raw columns); got {n_atoms}."
-        )
+    check_positive_control_atoms(n_atoms)
     if noise <= 0:
         raise ValueError(f"noise must be > 0; got {noise}.")
     rng = np.random.default_rng(seed)
@@ -756,6 +750,23 @@ def positive_control(
     owner = np.repeat(np.arange(n_atoms), copies)
     X = latent[:, owner] + noise * rng.standard_normal((n_samples, owner.size))
     return PositiveControl(np.ascontiguousarray(X), product_labels(latent), latent)
+
+
+def check_positive_control_atoms(n_atoms: int) -> None:
+    """
+    Refuse an ``n_atoms`` :func:`positive_control` cannot be drawn with.
+
+    Called by :func:`positive_control`, and by :func:`main` before any
+    dataset is loaded, so that a UCI dataset listed before the control is
+    not read, or downloaded, for a run that is refused anyway.
+    """
+    if n_atoms < 2:
+        raise ValueError(f"n_atoms must be >= 2 for a chain with a bond; got {n_atoms}.")
+    if n_atoms > POSITIVE_CONTROL_MAX_ATOMS:
+        raise ValueError(
+            f"n_atoms must be <= {POSITIVE_CONTROL_MAX_ATOMS} with the positive control "
+            f"(2^N - 1 raw columns); got {n_atoms}."
+        )
 
 
 def load_dataset(
@@ -2147,7 +2158,8 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     """
     path = Path(out)
     try:
-        if path.exists():
+        # A broken symlink counts as existing: opening it fails here, not at the first record.
+        if path.exists() or path.is_symlink():
             with open(path, "a", encoding="utf-8"):
                 pass
         else:
@@ -2345,7 +2357,7 @@ def _parser() -> argparse.ArgumentParser:
         "--lr",
         type=float,
         default=default.lr,
-        help="Adam learning rate (overridden by tuning when --trials > 0)",
+        help="Adam learning rate, finite and > 0 (overridden by tuning when --trials > 0)",
     )
     parser.add_argument(
         "--epochs",
@@ -2357,7 +2369,7 @@ def _parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=default.batch_size,
-        help="mini-batch size (overridden by tuning when --trials > 0)",
+        help="mini-batch size, an integer >= 1 (overridden by tuning when --trials > 0)",
     )
     parser.add_argument(
         "--patience",
@@ -2458,6 +2470,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             separation_seed=args.separation_seed,
         )
         names = list(dict.fromkeys(args.dataset))
+    if "positive-control" in names:
+        check_positive_control_atoms(settings.n_atoms)
     check_writable(args.out)
     datasets = {
         name: load_dataset(name, settings, path=args.data_path, download=args.download)

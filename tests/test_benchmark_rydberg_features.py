@@ -396,20 +396,25 @@ class TestGrid:
             ),
             (dict(batch_size=0), "batch_size must be >= 1; got 0."),
             (dict(batch_size=-4, n_trials=0), "batch_size must be >= 1; got -4."),
-            (dict(lr=0.0), "lr must be > 0; got 0.0."),
-            (dict(lr=-0.01, n_trials=0), "lr must be > 0; got -0.01."),
-            (dict(lr=math.nan), "lr must be > 0; got nan."),
+            (dict(lr=0.0), "lr must be finite and > 0; got 0.0."),
+            (dict(lr=-0.01, n_trials=0), "lr must be finite and > 0; got -0.01."),
+            (dict(lr=math.nan), "lr must be finite and > 0; got nan."),
+            (dict(lr=math.inf), "lr must be finite and > 0; got inf."),
             (
                 dict(search_space={"batch_size": (32, 0)}),
                 "search_space['batch_size'] must hold values >= 1; got [32, 0].",
             ),
             (
                 dict(search_space={"lr": (0.01, 0.0), "batch_size": (32,)}),
-                "search_space['lr'] must hold values > 0; got [0.01, 0.0].",
+                "search_space['lr'] must hold finite values > 0; got [0.01, 0.0].",
             ),
             (
                 dict(search_space={"lr": (-0.1,)}),
-                "search_space['lr'] must hold values > 0; got [-0.1].",
+                "search_space['lr'] must hold finite values > 0; got [-0.1].",
+            ),
+            (
+                dict(search_space={"lr": (0.01, math.inf)}),
+                "search_space['lr'] must hold finite values > 0; got [0.01, inf].",
             ),
         ],
     )
@@ -925,9 +930,10 @@ class TestCommandLine:
             (["--epochs", "0"], "max_epochs"),
             # with tuning on, the search space used to override both and the run completed
             (["--batch-size", "0"], "batch_size"),
-            (["--lr", "0"], "lr must be > 0"),
+            (["--lr", "0"], "lr must be finite and > 0"),
+            (["--lr", "inf"], "lr must be finite and > 0"),
             (["--n-atoms", "13", "--arms", "C", "D"], "n_atoms"),
-            # refused by the positive control when it is loaded (2^N - 1 columns)
+            # refused for the positive control before any dataset is loaded (2^N - 1 columns)
             (["--n-atoms", "13", "--arms", "C"], "n_atoms must be <= 12 with the positive"),
             # refused by the splits, with the data in hand: no record, so no new file
             (["--folds", "100"], "n_splits"),
@@ -1040,6 +1046,14 @@ class TestCommandLine:
         assert earlier.stat().st_mtime_ns == stat.st_mtime_ns
         assert sorted(p.name for p in tmp_path.iterdir()) == ["earlier.jsonl"]
 
+    def test_a_broken_symlink_out_is_refused(self, tmp_path: Path) -> None:
+        """Its target's missing directory is checked, not the symlink's own one."""
+        out = tmp_path / "results.jsonl"
+        out.symlink_to(tmp_path / "gone" / "results.jsonl")
+        message = f"out {str(out)!r} cannot be written: No such file or directory."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.check_writable(out)
+
     def test_arm_d_above_its_bound_is_refused_before_any_dataset_is_loaded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1073,6 +1087,20 @@ class TestCommandLine:
             )
         assert started == []
         assert out.read_text(encoding="utf-8") == "an earlier run\n"
+
+    def test_the_positive_control_bound_is_checked_before_a_dataset_listed_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A UCI file listed before the control is not read, or downloaded, for a refused run."""
+        loaded = self._spy_on_loading(monkeypatch)
+        message = "n_atoms must be <= 12 with the positive control (2^N - 1 raw columns); got 13."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.main(
+                ["--arms", "C", "--n-atoms", "13", "--dataset", "iranian-churn"]
+                + ["positive-control", "--download", "--out", str(tmp_path / "r.jsonl")]
+                + ["--no-cache"]
+            )
+        assert loaded == []
 
     @pytest.mark.parametrize(("flag", "patience"), [("0", None), ("1", 1), ("7", 7)])
     def test_a_patience_of_0_is_no_early_stopping(
