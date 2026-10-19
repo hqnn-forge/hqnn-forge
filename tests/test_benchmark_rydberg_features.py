@@ -463,6 +463,41 @@ class TestGrid:
         for key, expected in space.items():
             assert settings.search_space[key] == expected
 
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("max_epochs", math.nan),
+            ("max_epochs", 2.5),
+            ("max_epochs", True),
+            ("batch_size", math.nan),
+            ("batch_size", 2.5),
+            ("batch_size", True),
+            ("patience", math.nan),
+            ("patience", 2.5),
+            ("patience", True),
+        ],
+    )
+    @pytest.mark.parametrize("as_search_space", [False, True])
+    def test_refused_non_integer_settings_name_key_and_value(
+        self, key: str, value: Any, as_search_space: bool
+    ) -> None:
+        with pytest.raises(ValueError, match=key) as exc_info:
+            if as_search_space:
+                bench.Settings(search_space={key: (value,)})
+            else:
+                bench.Settings(**{key: value})
+
+        assert repr(value) in str(exc_info.value)
+
+    def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
+        """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
+        assert bench.Settings(n_atoms=11, arms=("C", "D")).n_atoms == 11
+        assert bench.Settings(n_atoms=12, arms=("C", "D")).n_atoms == 12
+        assert bench.Settings(n_atoms=13, arms=("C",)).n_atoms == 13
+        assert bench.Settings(n_atoms=10).n_atoms == 10
+        assert bench.Settings(circuit_layers=0, arms=("A", "C")).circuit_layers == 0
+        assert bench.Settings(shots=1, patience=None, max_epochs=1).shots == 1
+
     def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
         """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
         assert bench.Settings(n_atoms=11, arms=("C", "D")).n_atoms == 11

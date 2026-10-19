@@ -390,6 +390,47 @@ DATASETS: tuple[str, ...] = (
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
 #: Training settings the shared search space may vary, as in ``hqnn_forge.benchmark``.
 TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
+
+TRAINING_SETTING_RULES = {
+    "lr": (
+        lambda value: (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value > 0
+        ),
+        "must be finite and > 0",
+        "must hold finite values > 0",
+    ),
+    "max_epochs": (
+        lambda value: (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 1
+        ),
+        "must be >= 1",
+        "must hold values >= 1",
+    ),
+    "batch_size": (
+        lambda value: (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 1
+        ),
+        "must be >= 1",
+        "must hold values >= 1",
+    ),
+    "patience": (
+        lambda value: value is None
+        or (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 1
+        ),
+        "must be >= 1 or None",
+        "must hold values >= 1 or None",
+    ),
+}
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
 #: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
@@ -517,15 +558,10 @@ class Settings:
             raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
         if "D" in self.arms and self.circuit_layers < 1:
             raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
-        if self.max_epochs < 1:
-            raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
-        if self.patience is not None and self.patience < 1:
-            raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
-        # Also where tuning overrides them: a refused default should not depend on --trials.
-        if self.batch_size < 1:
-            raise ValueError(f"batch_size must be >= 1; got {self.batch_size}.")
-        if not 0 < self.lr < math.inf:  # NaN too
-            raise ValueError(f"lr must be finite and > 0; got {self.lr}.")
+        for key, (predicate, description, _) in TRAINING_SETTING_RULES.items():
+            value = self.defaults[key]
+            if not predicate(value):
+                raise ValueError(f"{key} {description}; got {value!r}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -549,24 +585,12 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
-        batch_sizes = self.search_space.get("batch_size", ())
-        if any(value < 1 for value in batch_sizes):
-            raise ValueError(
-                f"search_space['batch_size'] must hold values >= 1; got {list(batch_sizes)}."
-            )
-        rates = self.search_space.get("lr", ())
-        if any(not 0 < value < math.inf for value in rates):
-            raise ValueError(f"search_space['lr'] must hold finite values > 0; got {list(rates)}.")
-        epochs = self.search_space.get("max_epochs", ())
-        if any(value is None or value < 1 for value in epochs):
-            raise ValueError(
-                f"search_space['max_epochs'] must hold values >= 1; got {list(epochs)}."
-            )
-        patiences = self.search_space.get("patience", ())
-        if any(value is not None and value < 1 for value in patiences):
-            raise ValueError(
-                f"search_space['patience'] must hold values >= 1 or None; got {list(patiences)}."
-            )
+        for key, values in self.search_space.items():
+            predicate, _, description = TRAINING_SETTING_RULES[key]
+            if not all(predicate(value) for value in values):
+                raise ValueError(
+                    f"search_space['{key}'] {description}; got {list(values)!r}."
+                )
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
