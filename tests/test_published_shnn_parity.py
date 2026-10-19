@@ -42,7 +42,7 @@ import torch
 from torch import nn
 
 from hqnn_forge.diagnostics import LOGICAL_GATE_SET, CircuitSummary, circuit_summary
-from hqnn_forge.diagnostics.circuit import _tape_resources
+from hqnn_forge.diagnostics.circuit import _decompose, _tape_resources
 from hqnn_forge.models import HybridBinaryClassifier
 
 pytestmark = pytest.mark.reproducibility
@@ -81,7 +81,7 @@ def _published_shnn() -> tuple[nn.ModuleDict, qml.QNode]:
 def _logical_tape(circuit: qml.QNode, **weights: torch.Tensor) -> qml.tape.QuantumScript:
     """The tape ``circuit`` runs for one sample, decomposed to ``LOGICAL_GATE_SET``."""
     tape = qml.workflow.construct_tape(circuit, level="top")(torch.zeros(N_QUBITS), **weights)
-    (decomposed,), _ = qml.transforms.decompose(tape, gate_set=LOGICAL_GATE_SET)
+    (decomposed,), _ = _decompose(tape, gate_set=LOGICAL_GATE_SET)
     return decomposed
 
 

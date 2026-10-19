@@ -16,6 +16,11 @@ name: Upstream PennyLane
 # tracking issue per source, or comments on the open one; the run on a PR that
 # edits this file only proves the workflow itself works, so there a test
 # failure is logged but leaves the check green.
+#
+# To keep the write token away from the unreleased builds (#571), the test job
+# holds read-only permissions and uploads pytest.log and the recorded versions
+# as an artifact; the reporting job holds issues: write, checks out no code,
+# and opens or updates the tracking issues.
 
 on:
   schedule:
@@ -33,17 +38,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  upstream:
+  # Every action here is pinned to a commit, with its release in the comment:
+  # checkout, setup-uv, and upload-artifact in the test job, and
+  # download-artifact in the report job. Dependabot updates the pins and their
+  # comments.
+  test:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
     strategy:
       fail-fast: false
       matrix:
+        # The source list, artifact names (upstream-<source>), and source marker
+        # file (upstream-data/source) must remain consistent with the test matrix
+        # and reporting loop.
         source: [pre-release, nightly]
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
     - name: Install uv
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       with:
@@ -82,11 +95,10 @@ jobs:
           uv pip install --prerelease allow -r nightly-requirements.txt
         fi
     - name: Record the versions under test
-      id: versions
       run: |
         versions=$(uv run --no-sync python -c "from importlib.metadata import version as v; print(f\"pennylane {v('pennylane')}, pennylane-lightning {v('pennylane-lightning')}\")")
         echo "$versions"
-        echo "versions=$versions" >> "$GITHUB_OUTPUT"
+        echo "$versions" > versions.txt
         # Unsatisfied requirements of the new builds are reported, not fatal:
         # the tests below show whether they matter.
         uv pip check || true
@@ -103,30 +115,194 @@ jobs:
       run: |
         set -o pipefail
         uv run --no-sync pytest tests/ -q -p no:cacheprovider 2>&1 | tee pytest.log
+    - name: Record test outcome
+      if: "!cancelled()"
+      run: |
+        mkdir -p upstream-data
+        echo "${{ matrix.source }}" > upstream-data/source
+        echo "${{ job.status }}" > upstream-data/status
+        if [ -f versions.txt ]; then
+          cp versions.txt upstream-data/
+        fi
+        if [ -f pytest.log ]; then
+          cp pytest.log upstream-data/
+        fi
+    - name: Upload test results
+      if: "!cancelled()"
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: upstream-${{ matrix.source }}
+        path: upstream-data/
+        retention-days: 1
+        overwrite: true
+
+  report:
+    needs: test
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+    - name: Download test results
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+      with:
+        pattern: upstream-*
+        path: artifacts
     - name: Open or update the tracking issue
-      if: failure() && github.event_name != 'pull_request'
+      shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        VERSIONS: ${{ steps.versions.outputs.versions }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
-        title="ci: test suite fails against PennyLane ${{ matrix.source }} builds"
-        {
-          echo "The scheduled upstream job failed against **${VERSIONS:-unknown versions}** (${{ matrix.source }})."
-          echo
-          echo "Run: $RUN_URL"
-          echo
-          echo '<details><summary>Last 80 lines of pytest output</summary>'
-          echo
-          echo '```'
-          tail -n 80 pytest.log 2>/dev/null || echo "pytest did not run; see the run log."
-          echo '```'
-          echo '</details>'
-        } > body.md
-        existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-          --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
-        if [ -n "$existing" ]; then
-          gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
-        else
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+        reporting_failed=0
+        norm_failed_source=""
+        norm_invalid_marker=0
+
+        # If actions/download-artifact matched only one artifact, it extracts directly
+        # into artifacts/ instead of artifacts/upstream-<source>/. Normalize directory structure.
+        if [ -f artifacts/source ] || [ -f artifacts/status ]; then
+          src=""
+          if [ -r artifacts/source ]; then
+            src=$(tr -d '[:space:]' < artifacts/source 2>/dev/null || true)
+          fi
+          set +e
+          (
+            set -e -o pipefail
+            if [ ! -f artifacts/source ]; then
+              echo "::error::Missing source marker in single-artifact download" >&2
+              exit 1
+            fi
+            if [ ! -r artifacts/source ]; then
+              echo "::error::Unreadable source marker in artifacts/source" >&2
+              exit 1
+            fi
+            case "$src" in
+              pre-release|nightly) ;;
+              *) echo "::error::Unexpected source '$src' in artifact" >&2; exit 1 ;;
+            esac
+            if [ ! -f artifacts/status ]; then
+              echo "::error::Missing required status file in single-artifact download for $src" >&2
+              exit 1
+            fi
+
+            target_dir="artifacts/upstream-$src"
+            if [ -d "$target_dir" ]; then
+              echo "::error::Target directory $target_dir already exists before normalization" >&2
+              exit 1
+            fi
+
+            staging_dir=$(mktemp -d artifacts/.staging_XXXXXX)
+            trap 'rm -rf "$staging_dir"' EXIT
+
+            mv artifacts/source "$staging_dir/"
+            mv artifacts/status "$staging_dir/"
+            if [ -f artifacts/versions.txt ]; then
+              mv artifacts/versions.txt "$staging_dir/"
+            fi
+            if [ -f artifacts/pytest.log ]; then
+              mv artifacts/pytest.log "$staging_dir/"
+            fi
+
+            mv "$staging_dir" "$target_dir"
+            trap - EXIT
+          )
+          norm_status=$?
+          set -e
+          if [ "$norm_status" -ne 0 ]; then
+            echo "::error::Artifact normalization failed (exit code $norm_status)" >&2
+            reporting_failed=1
+            case "$src" in
+              pre-release|nightly) norm_failed_source="$src" ;;
+              *) norm_invalid_marker=1 ;;
+            esac
+          fi
+        fi
+
+        # The source list, artifact names (upstream-<source>), and source marker
+        # file (artifacts/source) must remain consistent with the test matrix
+        # and reporting loop.
+        for source in pre-release nightly; do
+          dir="artifacts/upstream-$source"
+
+          if [ -d "$dir" ]; then
+            status=$(tr -d '[:space:]' < "$dir/status" 2>/dev/null || echo "failure")
+            if [ "$status" != "failure" ]; then
+              continue
+            fi
+          fi
+
+          set +e
+          (
+            set -e -o pipefail
+
+            title="ci: test suite fails against PennyLane $source builds"
+            if [ "$source" = "$norm_failed_source" ]; then
+              {
+                echo "The scheduled upstream job failed, and test results were uploaded for $source, but could not be processed on the runner."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo "See the workflow run log for details."
+              } > body.md
+            elif [ "$norm_invalid_marker" -eq 1 ] && [ ! -d "$dir" ]; then
+              {
+                echo "The scheduled upstream job failed, and test results were uploaded, but could not be processed on the runner due to an invalid or unreadable source marker."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo "See the workflow run log for details."
+              } > body.md
+            elif [ ! -d "$dir" ]; then
+              {
+                echo "The scheduled upstream job failed, but no test results were uploaded for $source."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo "See the workflow run log for details."
+              } > body.md
+            else
+              versions=$(cat "$dir/versions.txt" 2>/dev/null || true)
+              versions="${versions:-unknown versions}"
+              {
+                echo "The scheduled upstream job failed against **$versions** ($source)."
+                echo
+                echo "Run: $RUN_URL"
+                echo
+                echo '<details><summary>Last 80 lines of pytest output</summary>'
+                echo
+                echo '```'
+                tail -n 80 "$dir/pytest.log" 2>/dev/null || echo "pytest did not run; see the run log."
+                echo '```'
+                echo '</details>'
+              } > body.md
+            fi
+
+            existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+              --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+            fi
+          )
+          subshell_status=$?
+          set -e
+
+          if [ "$subshell_status" -ne 0 ]; then
+            echo "::error::Failed to report results for $source (exit code $subshell_status)" >&2
+            reporting_failed=1
+          elif [ "$source" = "$norm_failed_source" ]; then
+            echo "::error::Artifact normalization failed for $source; tracking issue updated" >&2
+            reporting_failed=1
+          elif [ "$norm_invalid_marker" -eq 1 ] && [ ! -d "$dir" ]; then
+            echo "::error::Artifact normalization failed due to invalid source marker; tracking issue updated for $source" >&2
+            reporting_failed=1
+          elif [ ! -d "$dir" ]; then
+            echo "::error::Missing artifact for $source; tracking issue updated" >&2
+            reporting_failed=1
+          fi
+        done
+
+        if [ "$reporting_failed" -ne 0 ]; then
+          exit 1
         fi

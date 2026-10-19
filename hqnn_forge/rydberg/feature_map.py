@@ -117,7 +117,13 @@ from typing import Any
 import torch
 
 from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _finite_tensor, rydberg_hamiltonian
-from hqnn_forge.rydberg.lindblad import _non_negative_number, _step_count, evolve, readout
+from hqnn_forge.rydberg.lindblad import (
+    _non_negative_number,
+    _populations_to_features,
+    _step_count,
+    evolve,
+    readout,
+)
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 
 __all__ = ["PulseEncoding", "RydbergFeatureMap"]
@@ -536,22 +542,24 @@ class RydbergFeatureMap:
         The features of one chunk estimated from ``shots`` bitstrings per sample.
 
         The outcome probabilities are the diagonal of ρ.  ``counts[k]`` is how
-        often basis state ``k`` was drawn, and the estimate of a feature is the
-        feature of the diagonal state with the frequencies ``counts / shots``:
-        ``Σ_k b_i(k) counts[k] / shots`` is the mean of ``b_i`` over the
-        bitstrings.  The samples are drawn one at a time, in order, so the
-        generator's stream does not depend on how they are chunked.
+        often basis state ``k`` was drawn.  The integer counts of each feature
+        are summed first, ``counts @ bits`` and the same for the pairs, converted
+        to ``float64``, and divided by ``shots`` once without building a dense
+        diagonal state: the estimates are the correctly rounded value of
+        ``count / S``, the same bit for bit in every chunk as long as the drawn
+        bitstrings are the same.  The samples are drawn one at a time, in order,
+        so the generator's stream does not depend on how they are chunked.
         """
         # A population can come out of the splitting as −1e-17; a probability cannot.
         populations = rho.diagonal(dim1=-2, dim2=-1).real.clamp(min=0.0).to(generator.device)
-        frequencies = torch.empty_like(populations)
+        counts = torch.empty(populations.shape, dtype=torch.int64, device=generator.device)
         for sample in range(populations.shape[0]):
             outcomes = torch.multinomial(
                 populations[sample], shots, replacement=True, generator=generator
             )
-            counts = torch.bincount(outcomes, minlength=populations.shape[1])
-            frequencies[sample] = counts.to(torch.float64) / shots
-        estimates = readout(torch.diag_embed(frequencies), pairs=self._correlations)
+            counts[sample] = torch.bincount(outcomes, minlength=populations.shape[1])
+        features = _populations_to_features(counts.to(torch.float64), pairs=self._correlations)
+        estimates = features / shots
         return estimates.to(rho.device)
 
     @torch.no_grad()
@@ -628,9 +636,11 @@ class RydbergFeatureMap:
           2000 steps), the size of the rounding error either result has
           anyway, and orders of magnitude below the splitting error.  The
           same holds for :meth:`states`.  With ``shots`` the drawn bitstrings
-          were the same in every chunking tried, and the estimates differed
-          by a few ``1e-16``.  For bit-for-bit repeatable features, keep
-          ``chunk_size`` (and the machine) fixed.
+          were the same in every chunking tried, and the estimates are the
+          correctly rounded value of ``count / S``, the same bit for bit in
+          every chunking as long as the drawn bitstrings are the same.  For bit-for-bit
+          repeatable features without shots, keep ``chunk_size`` (and the
+          machine) fixed.
         * **Precision.**  ``X`` is converted to ``float64`` whatever its
           dtype.  With ``shots``, a population that rounding left slightly
           below 0 is taken as 0.
