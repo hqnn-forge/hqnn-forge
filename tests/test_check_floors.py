@@ -65,12 +65,17 @@ def test_missing_dev_extra_raises_key_error() -> None:
         checker.get_checked_dev_specs(project)
 
 
-def test_unknown_argument_returns_exit_code_2(capsys: pytest.CaptureFixture[str]) -> None:
-    assert checker.main(["check_floors.py", "--unknown"]) == 2
-    assert checker.main(["--unknown"]) == 2
+def test_unknown_argument_raises_system_exit(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        checker.main(["--unknown"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --unknown" in capsys.readouterr().err
 
 
-def test_print_dev_floors_cli(capsys: pytest.CaptureFixture[str]) -> None:
+def test_print_dev_floors_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(ROOT)
     assert checker.main(["--print-dev-floors"]) == 0
     captured = capsys.readouterr().out.splitlines()
     assert any("qutip>=5.1.1" in line for line in captured)

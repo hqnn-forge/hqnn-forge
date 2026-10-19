@@ -62,17 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the raw dependency specifications from the dev extra matching CHECKED_DEV.",
     )
 
-    if argv is None:
-        args_to_parse = sys.argv[1:]
-    elif argv and not argv[0].startswith("-"):
-        args_to_parse = argv[1:]
-    else:
-        args_to_parse = argv
-
-    try:
-        args = parser.parse_args(args_to_parse)
-    except SystemExit as exc:
-        return exc.code if isinstance(exc.code, int) else 2
+    args = parser.parse_args(argv)
 
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
 
