@@ -605,7 +605,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong (one atom at `ΩT = 16π`, `γ = 0.1 Ω` gives `⟨n⟩ = 0` at 1, 2, 4, 8 and 16 steps,
   where the answer is 0.358).
   It now states the condition under which the estimate held, `dt · (W + Nγ/2) <= 1/2` with
-  `W` the spread of the energies, and that `n_steps` keeps no default or rule (#507, #599)
+  `W` the spread of the energies, how close it came in a seeded sweep (#627), the error size
+  below which it fails, and that `n_steps` keeps no default or rule (#507, #599)
 - `examples/benchmark_rydberg_features.py` refuses before any dataset is loaded what it used to
   fail on late or not at all: an `--out` that cannot be written (it raised only after the first
   arm was trained), `n_atoms` above 12 with arm D, whose circuits run on `default.qubit` with

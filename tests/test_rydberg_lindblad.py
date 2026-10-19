@@ -765,8 +765,11 @@ class TestChoosingTheStepCount:
     def test_coarse_runs_can_agree_while_both_are_wrong(self) -> None:
         """
         One resonant atom, ``ΩT = 16π``: with ``n <= 16`` steps ``Ω dt`` is a
-        multiple of π, so every step maps ``|g⟩`` and ``|r⟩`` onto each other
-        and the dephasing finds no coherence to act on.
+        whole multiple of π.  At ``n = 1, 2, 4, 8`` it is an even multiple and
+        ``U(dt) = ±1`` leaves ``|g⟩`` in place; at ``n = 16`` it is π and
+        ``U(dt)`` swaps ``|g⟩`` and ``|r⟩``.  Either way the atom is in a
+        basis state between steps, and the dephasing finds no coherence to
+        act on.
         """
         gamma = 0.1 * self.OMEGA
         t = 16 * math.pi / self.OMEGA
@@ -800,9 +803,10 @@ class TestChoosingTheStepCount:
     ) -> None:
         """
         ``n = ceil(2t · (W + Nγ/2))``, so ``dt · (W + Nγ/2) <= 1/2``, ``W`` the
-        spread of the energies of ``H``: the error of the ``2n``-step
+        spread of the energies of ``H``: the largest error of the ``2n``-step
         features against the exponential of the full generator is a third of
-        ``|F_n − F_2n|`` within 10 %.
+        the largest ``|F_n − F_2n|`` within 10 % at these five points (0.91
+        to 1.17 over the sweep of #627).
         """
         omega = self.OMEGA
         gamma = gamma_over_omega * omega

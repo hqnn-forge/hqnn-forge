@@ -233,9 +233,10 @@ def evolve(
     n_steps:
         Number of splitting steps, an integer ``>= 1``.  Required when
         ``gamma > 0`` and without a default: the step that is accurate enough
-        depends on γ and on the level spacings of ``H`` (the interaction, in
-        the blockade), which this function does not guess.  Not used when
-        ``gamma = 0``, where the result is exact.
+        depends on γ and on the spread ``W = E_max − E_min`` of the energies
+        of ``H`` (set by the interaction, in the blockade), which this
+        function does not guess (see "Choosing ``n_steps``" below).  Not
+        used when ``gamma = 0``, where the result is exact.
 
     Returns
     -------
@@ -274,17 +275,21 @@ def evolve(
       ``−i (E_a − E_b) |a⟩⟨b|`` in the eigenbasis), at most their spread
       ``W = E_max − E_min``, and those of ``𝓛_D`` are ``(γ/2) d_H(a, b)``, at
       most ``Nγ/2``.  With ``dt · (W + Nγ/2) <= 1/2`` for the coarser run,
-      the finer run's error in ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` was within 10 %
-      of a third of the difference in 200 cases: 1, 2 and 4 atoms,
-      ``V/Ω`` from 0 to 100, ``γ/Ω`` from 0.1 to 100, ``ΩT`` from π to 16π
-      (at ``dt · (W + Nγ/2) <= 1`` it was up to 1.37 times that).  That is a
-      condition for trusting the estimate, not the count the features
-      need, which can be far smaller.  **Before it holds, two runs can
-      agree while both are wrong**: ``U(dt)`` sees the energies only
-      modulo ``2π/dt``.  One resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω``
-      ends with ``⟨n⟩ = 0`` to rounding at 1, 2, 4, 8 and 16 steps (every
-      step a multiple of a π pulse, which leaves no coherence to dephase),
-      where the answer is 0.358.
+      the finer run's largest error over the features ``⟨n_i⟩``,
+      ``⟨n_i n_j⟩`` was 0.91 to 1.17 times a third of their largest
+      difference in a seeded sweep of 300 cases (#627): 1, 2 and 4 atoms,
+      ``V/Ω`` from 0 to 100, ``γ/Ω`` from 0.1 to 100, ``ΩT`` from π to 16π,
+      detunings within ``±2 Ω``.  A single feature's error was 0.84 to 1.44
+      times a third of its own difference, and at ``dt · (W + Nγ/2) <= 1``
+      the largest error was up to 3.5 times the estimate.  Errors below about
+      ``1e-10`` stop falling by 4 per halving, as rounding takes over, and
+      there the estimate says nothing.  That is a condition for trusting the
+      estimate, not the count the features need, which can be far smaller.
+      **Before it holds, two runs can agree while both are wrong**: one
+      resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω`` ends with ``⟨n⟩ = 0`` to
+      rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
+      of those steps is a whole number of π pulses, so between steps the
+      atom is in ``|g⟩`` or ``|r⟩`` and leaves no coherence to dephase.
     * **Cost.**  One eigendecomposition per sample, then two
       ``2^N × 2^N`` matrix products per step and sample.
     * **Gradients.**  Every operation is differentiable and none is in
@@ -342,7 +347,7 @@ def evolve(
         raise ValueError(
             "n_steps is required when gamma > 0: the splitting has an error of order "
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
-            "the level spacings of the Hamiltonian."
+            "the spread E_max - E_min of the energies of the Hamiltonian."
         )
 
     # H = V E V†: energies[..., m] = E_m, vectors[..., k, m] = V_km.
