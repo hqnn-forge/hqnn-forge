@@ -307,20 +307,22 @@ def _tape_resources(tape: qml.tape.QuantumScript) -> _TapeResources:
     Depth and gate counts of a tape from _decompose_logical, computed from
     its operations.
 
-    Counted here rather than read from ``tape.specs["resources"]``, whose
-    layout PennyLane changes between releases: 0.46 drops ``num_gates``,
-    ``gate_types`` and ``gate_sizes`` (#344).  The depth is the usual one, the
-    number of layers when every gate starts as soon as all its wires are free.
+    Counted here rather than read from PennyLane's own resources (formerly
+    ``tape.specs["resources"]``, now ``qml.resource.resources_from_tape``),
+    whose layout changes between releases: 0.46 renames or drops ``num_gates``,
+    ``gate_types`` and ``gate_sizes`` (#344), and removes the ``specs`` property
+    (#568).  The depth is the usual one, the number of layers when every gate
+    starts as soon as all its wires are free.
     A gate on two or more wires counts once towards ``n_two_qubit_gates``:
     after _decompose_logical only a gate with no decomposition can still act
     on more than two, and it counts once rather than dropping out of the count.
 
-    On a tape from _decompose_logical these are the numbers ``specs`` reports
-    in both 0.45 and 0.46.  On other tapes they can differ: ``specs`` prefixes
-    a gate with several control wires with their number (``2C(RX)``, here
-    ``C(RX)``), expands a ``ResourcesOperation`` into its declared resources,
-    and gives an operation without wires (``Barrier()``, ``Snapshot``) or one
-    conditioned on a mid-circuit measurement a different layer.
+    On a tape from _decompose_logical these are the numbers ``resources_from_tape``
+    reports in both 0.45 and 0.46.  On other tapes they can differ:
+    ``resources_from_tape`` prefixes a gate with several control wires with their
+    number (``2C(RX)``, here ``C(RX)``), expands a ``ResourcesOperation`` into its
+    declared resources, and gives an operation without wires (``Barrier()``,
+    ``Snapshot``) or one conditioned on a mid-circuit measurement a different layer.
     """
     free_at: dict[object, int] = {}
     depth = 0

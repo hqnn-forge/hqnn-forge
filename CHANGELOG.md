@@ -376,6 +376,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   p-values in the records and CSV; experiment records retain the comparison (#597)
 
 ### Changed
+- `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
+  allocating a dense diagonal state tensor; shot estimates are the correctly rounded value of
+  `count / S`, guaranteeing bit-for-bit identical results across chunk sizes for the same drawn bitstrings (#617)
 - `rydberg_hamiltonian` allocates the dense Hamiltonian directly as `complex128`, reducing peak
   memory usage during construction by avoiding an intermediate `float64` matrix (#591)
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
@@ -516,6 +519,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- `examples/does_the_quantum_layer_help.py` now reuses the rounding-aware
+  feature standardisation so near-constant columns are centred rather than
+  incorrectly scaled to unit variance (#604)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
@@ -591,6 +597,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory are no longer read); each entry stores the environment it was computed in, and
   the lines record it as `feature_environment`, and their `tuning` per tuning fold as
   `feature_environments` and `feature_cache_hits` (#522, #543)
+- `examples/benchmark_rydberg_features.py` refuses before any dataset is loaded what it used to
+  fail on late or not at all: an `--out` that cannot be written (it raised only after the first
+  arm was trained), `n_atoms` above 12 with arm D, whose circuits run on `default.qubit` with
+  backprop (`AUTO_BACKPROP_MAX_QUBITS`), `n_atoms` above 12 on the positive control with any
+  arms (`POSITIVE_CONTROL_MAX_ATOMS`: each PCA fit takes the covariance of its `2^N − 1`
+  columns, 2.6 GiB at 13 atoms), an `lr` that is not finite and `> 0`, and `batch_size < 1`,
+  also as values of the search space (`--lr 0` ran to completion, and `--batch-size 0` too with
+  tuning on). `--patience 0` now means no early stopping, recorded as `null` (a negative
+  `--patience` ends in a command-line error), and a dataset name outside `DATASETS` raises a
+  `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
+  (#540, #606)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
