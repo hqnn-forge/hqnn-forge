@@ -249,8 +249,15 @@ class TestDefaultC6:
         assert pytest.approx(2 * math.pi * 862690, rel=1e-15) == DEFAULT_C6
         assert round(DEFAULT_C6) == 5_420_441
 
+    # PennyLane 0.46 removed ``qml.pulse``; the value itself stays pinned by
+    # test_value_stated_on_the_model_page, so only the cross-check goes (#569).
+    @pytest.mark.may_skip  # the upstream job runs the PennyLane nightly
+    @pytest.mark.skipif(
+        not hasattr(qml, "pulse"),
+        reason="qml.pulse is gone (PennyLane 0.46); nothing to cross-check DEFAULT_C6 against",
+    )
     def test_is_pennylanes_default_coefficient(self) -> None:
-        """PennyLane takes it in MHz µm⁶ and multiplies by 2π itself."""
+        """PennyLane (up to 0.45) takes it in MHz µm⁶ and multiplies by 2π itself."""
         signature = inspect.signature(qml.pulse.rydberg_interaction)
         in_mhz = signature.parameters["interaction_coeff"].default
         assert in_mhz == 862690

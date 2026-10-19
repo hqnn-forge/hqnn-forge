@@ -74,18 +74,19 @@ evolution starts with every atom in `|g⟩`.
   `|gg⟩, |gr⟩, |rg⟩, |rr⟩`, and `n_0 = diag(0, 0, 1, 1)`. This is the matrix
   `qml.matrix(op, wire_order=range(N))` returns.
 - **C6.** The default is `C6 = 2π × 862 690 MHz µm⁶ = 5 420 441 rad/µs · µm⁶`, positive
-  (repulsive), for two ⁸⁷Rb atoms in `70S₁/₂`. It is the default of PennyLane's
-  `qml.pulse.rydberg_interaction`, so a cross-check against PennyLane needs no coefficient
-  passed. The Aquila device description (Wurtz et al. 2023) states 5 420 503 for the same
+  (repulsive), for two ⁸⁷Rb atoms in `70S₁/₂`. Up to PennyLane 0.45 it is the default of
+  `qml.pulse.rydberg_interaction`, so a cross-check against those versions needs no
+  coefficient passed; PennyLane 0.46 removes `qml.pulse`. The Aquila device description (Wurtz et al. 2023) states 5 420 503 for the same
   state, 1.1 × 10⁻⁵ larger, which changes no number on this page. As an independent check,
   Bernien et al. (2017) measured `V = 2π × 24.4 MHz` between `70S` atoms about 5.7 µm apart;
   the default gives `2π × 24.1 MHz` at 5.74 µm. The interaction is taken as isotropic.
 - **The same model in other software.** With a drive phase φ the first term reads
   `Ω/2 · Σ_i (cos φ X_i − sin φ Y_i) = Ω/2 · Σ_i (e^{iφ} |g⟩⟨r|_i + h.c.)`, the form of the
-  trainable analog layer (#420), of `qml.pulse.rydberg_drive` and of Wurtz et al. (2023). This
-  page fixes `φ = 0` and constant Ω and Δ, the special case of one pulse segment; nothing here
-  conflicts with a time-dependent `Ω(t)`, `Δ_i(t)`, `φ(t)`. PennyLane takes its amplitudes in
-  MHz and multiplies by 2π internally; with that conversion its matrix equals this one.
+  trainable analog layer (#420), of `qml.pulse.rydberg_drive` (PennyLane up to 0.45) and of
+  Wurtz et al. (2023). This page fixes `φ = 0` and constant Ω and Δ, the special case of one
+  pulse segment; nothing here conflicts with a time-dependent `Ω(t)`, `Δ_i(t)`, `φ(t)`.
+  PennyLane takes its amplitudes in MHz and multiplies by 2π internally; with that conversion
+  its matrix equals this one.
 
 **What the two-level model leaves out:**
 

@@ -9,7 +9,8 @@ Units: ħ = 1, angular frequencies in rad/µs, lengths in µm, times in µs.
 
 The matrices are dense and built in torch (``float64`` / ``complex128``),
 without a PennyLane device: PennyLane's own ``qml.pulse.rydberg_interaction``
-and ``rydberg_drive`` need JAX, which this library does not depend on.
+and ``rydberg_drive`` (up to PennyLane 0.45; 0.46 removes ``qml.pulse``) need
+JAX, which this library does not depend on.
 
 Exported symbols
 ----------------

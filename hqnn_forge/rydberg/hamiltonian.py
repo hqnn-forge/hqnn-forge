@@ -76,8 +76,9 @@ __all__ = ["DEFAULT_C6", "MAX_ATOMS", "rydberg_hamiltonian"]
 
 #: ``C6`` of two ⁸⁷Rb atoms in ``70S₁/₂``, in rad/µs · µm⁶:
 #: ``2π × 862 690 MHz µm⁶ = 5 420 441``, positive (repulsive).  It is the
-#: value fixed in ``docs/rydberg-model.md`` and the default of PennyLane's
-#: ``qml.pulse.rydberg_interaction`` (which takes it in MHz µm⁶).  No function
+#: value fixed in ``docs/rydberg-model.md`` and, up to PennyLane 0.45, the
+#: default of ``qml.pulse.rydberg_interaction`` (which takes it in MHz µm⁶;
+#: 0.46 removes ``qml.pulse``).  No function
 #: here defaults to it: ``c6`` is always passed, so the atom is stated at the
 #: call.
 DEFAULT_C6: float = 2 * math.pi * 862690.0
