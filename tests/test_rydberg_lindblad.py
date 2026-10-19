@@ -36,6 +36,7 @@ from hqnn_forge.rydberg import (
     readout,
     rydberg_hamiltonian,
 )
+from hqnn_forge.rydberg.lindblad import _populations_to_features
 
 C128 = torch.complex128
 F64 = torch.float64
@@ -213,6 +214,49 @@ class TestReadout:
     def test_pairs_is_keyword_only(self) -> None:
         with pytest.raises(TypeError, match="positional"):
             readout(torch.eye(2, dtype=C128) / 2, True)  # type: ignore[misc]
+
+
+class TestPopulationsToFeatures:
+    """``_populations_to_features``: features from diagonal populations or integer counts."""
+
+    @pytest.mark.parametrize("n_atoms", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("pairs", [False, True])
+    def test_equivalence_with_readout_for_single_and_batched_states(
+        self, n_atoms: int, pairs: bool
+    ) -> None:
+        dim = 2**n_atoms
+        generator = torch.Generator().manual_seed(n_atoms)
+        # 1D state
+        a = torch.randn(dim, dim, generator=generator, dtype=C128)
+        rho_1d = (a @ a.mH) / torch.trace(a @ a.mH)
+        diag_1d = rho_1d.diagonal(dim1=-2, dim2=-1).real
+        expected_1d = readout(rho_1d, pairs=pairs)
+        actual_1d = _populations_to_features(diag_1d, pairs=pairs)
+        assert torch.equal(actual_1d, expected_1d)
+
+        # Batched 2D state
+        b = torch.randn(3, dim, dim, generator=generator, dtype=C128)
+        rho_2d = b @ b.mH
+        diag_2d = rho_2d.diagonal(dim1=-2, dim2=-1).real
+        expected_2d = readout(rho_2d, pairs=pairs)
+        actual_2d = _populations_to_features(diag_2d, pairs=pairs)
+        assert torch.equal(actual_2d, expected_2d)
+
+    def test_exact_integer_counts_preserved(self) -> None:
+        """Integer counts return exact integer feature counts with the same dtype."""
+        counts = torch.zeros(8, dtype=torch.int64)
+        counts[7] = 10  # state |rrr> (all atoms excited)
+        counts[3] = 5  # state |grr> (atoms 1 and 2 excited)
+        features = _populations_to_features(counts, pairs=True)
+        assert features.dtype == torch.int64
+        # singles: atom 0 -> 10, atom 1 -> 15, atom 2 -> 15
+        # pairs: (0,1) -> 10, (0,2) -> 10, (1,2) -> 15
+        assert features.tolist() == [10, 15, 15, 10, 10, 15]
+
+    def test_one_atom_has_no_pair(self) -> None:
+        counts = torch.tensor([4, 6], dtype=torch.int64)
+        assert _populations_to_features(counts).tolist() == [6]
+        assert _populations_to_features(counts, pairs=True).tolist() == [6]
 
 
 class TestOneAtomWithoutDephasing:

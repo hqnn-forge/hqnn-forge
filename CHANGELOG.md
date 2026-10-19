@@ -376,6 +376,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   p-values in the records and CSV; experiment records retain the comparison (#597)
 
 ### Changed
+- `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
+  allocating a dense diagonal state tensor; shot estimates are the correctly rounded value of
+  `count / S`, guaranteeing bit-for-bit identical results across chunk sizes for the same drawn bitstrings (#617)
 - `rydberg_hamiltonian` allocates the dense Hamiltonian directly as `complex128`, reducing peak
   memory usage during construction by avoiding an intermediate `float64` matrix (#591)
 - `shot_sweep` evaluates and scores each exact (`shots=None`) reference once, repeating
@@ -516,6 +519,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- `examples/does_the_quantum_layer_help.py` now reuses the rounding-aware
+  feature standardisation so near-constant columns are centred rather than
+  incorrectly scaled to unit variance (#604)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its

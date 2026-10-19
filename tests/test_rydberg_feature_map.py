@@ -671,7 +671,8 @@ class TestChunks:
 
         ``estimate · shots`` is the number of bitstrings with the atom (or the
         pair) excited, an integer: the counts are the same in every chunking,
-        and the estimates equal to the rounding of the last division and sum.
+        and the estimates are the correctly rounded value of ``count / S``,
+        the same bit for bit in every chunking.
         """
         shots = 200
         feature_map = RydbergFeatureMap(
@@ -689,8 +690,7 @@ class TestChunks:
             chunked = feature_map.transform(
                 x, shots=shots, generator=torch.Generator().manual_seed(11), chunk_size=chunk_size
             )
-            assert torch.equal(torch.round(chunked * shots), torch.round(whole * shots))
-            assert (chunked - whole).abs().max().item() <= self.ROUNDING
+            assert torch.equal(chunked, whole)
 
     @pytest.mark.parametrize("method", ["transform", "states"])
     def test_the_solver_sees_at_most_chunk_size_samples(
@@ -802,7 +802,7 @@ class TestShots:
             inputs(8, 3, seed=9), shots=shots, generator=torch.Generator().manual_seed(1)
         )
         counts = estimates * shots
-        assert torch.allclose(counts, counts.round(), rtol=0, atol=1e-9)
+        assert torch.equal(counts, counts.round())
         assert estimates.min().item() >= 0.0
         assert estimates.max().item() <= 1.0
         # b_i b_j <= b_i and <= b_j in every bitstring: columns (0,1), (0,2), (1,2)
@@ -830,6 +830,53 @@ class TestShots:
         )
         ratio = ((estimates - exact) ** 2).sum() / (exact * (1 - exact) / shots).sum()
         assert ratio.item() == pytest.approx(1.0, abs=0.15)
+
+    @pytest.mark.parametrize("shots", [1, 2, 4, 8, 16, 25, 40, 50, 64, 100, 128])
+    def test_exact_shot_fractions(self, shots: int) -> None:
+        """
+        Each estimate is the correctly rounded value of ``count / S``.
+
+        Multiplying the estimate by ``S``, rounding to the nearest integer count,
+        and dividing by ``S`` reproduces the estimate bit for bit.
+        """
+        feature_map = self.build(3)
+        estimates = feature_map.transform(
+            inputs(6, 3, seed=15), shots=shots, generator=torch.Generator().manual_seed(shots)
+        )
+        counts = (estimates * shots).round()
+        assert torch.equal(estimates, counts / shots)
+
+    @pytest.mark.parametrize("n_atoms", [2, 3, 4, 5, 6])
+    @pytest.mark.parametrize("shots", [10, 50, 200])
+    @pytest.mark.parametrize("seed", [0, 42])
+    def test_seeded_compatibility_within_1e_12_against_dense_diagonal_readout(
+        self, n_atoms: int, shots: int, seed: int
+    ) -> None:
+        """
+        The integer-count sampling path agrees within 1e-12 with the dense diagonal
+        readout reference calculation for the same random seed.
+        """
+        feature_map = self.build(n_atoms)
+        x = inputs(5, n_atoms, seed=seed)
+
+        gen1 = torch.Generator().manual_seed(seed)
+        estimates = feature_map.transform(x, shots=shots, generator=gen1)
+
+        gen2 = torch.Generator().manual_seed(seed)
+        delta = feature_map._encoding.detunings(x)
+        rho = feature_map._evolve(delta)
+        populations = rho.diagonal(dim1=-2, dim2=-1).real.clamp(min=0.0).to(gen2.device)
+        frequencies = torch.empty_like(populations)
+        for sample in range(populations.shape[0]):
+            outcomes = torch.multinomial(
+                populations[sample], shots, replacement=True, generator=gen2
+            )
+            c = torch.bincount(outcomes, minlength=populations.shape[1])
+            frequencies[sample] = c.to(torch.float64) / shots
+        dense_reference = readout(torch.diag_embed(frequencies), pairs=feature_map.correlations)
+
+        assert torch.equal((estimates * shots).round(), (dense_reference * shots).round())
+        assert (estimates - dense_reference).abs().max().item() <= 1e-12
 
     def test_the_estimates_converge_to_the_exact_features(self) -> None:
         """At ``S = 4 · 10⁵`` every estimate is within 6 standard errors (plus 5 counts)."""

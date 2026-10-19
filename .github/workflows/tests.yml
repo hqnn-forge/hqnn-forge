@@ -128,9 +128,10 @@ jobs:
         
     # Every extra the suite can import, which is the same set the locked job
     # installs with --all-extras below. An extra left out here does not fail the
-    # job: tests/test_evaluation_plots.py and tests/test_sklearn_estimator.py
-    # skip their whole module when matplotlib or scikit-learn is missing, so the
-    # tests would just stop running. Keep the two jobs' sets identical.
+    # job: tests/test_evaluation_plots.py, tests/test_sklearn_estimator.py and
+    # tests/test_does_the_quantum_layer_help.py skip their whole module when
+    # matplotlib or scikit-learn is missing, so the tests would just stop
+    # running. Keep the two jobs' sets identical.
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
