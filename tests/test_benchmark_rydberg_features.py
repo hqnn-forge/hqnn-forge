@@ -1126,7 +1126,7 @@ class TestCommandLine:
             out.mkdir()
             (out / "earlier.jsonl").write_text("an earlier run\n", encoding="utf-8")
         else:
-            if os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0:
+            if os.name != "posix" or os.geteuid() == 0:
                 pytest.skip("root writes to a read-only file")
             out, reason = tmp_path / "results.jsonl", "Permission denied"
             out.write_text("an earlier run\n", encoding="utf-8")
