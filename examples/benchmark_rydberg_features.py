@@ -2294,7 +2294,11 @@ def check_writable(out: str | os.PathLike[str]) -> None:
             if name_max > 0 and len(os.fsencode(path.name)) > name_max:
                 raise OSError(errno.ENAMETOOLONG, os.strerror(errno.ENAMETOOLONG), str(path))
             prefix = f".{path.name}."
-            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max:
+            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max or (
+                name_max <= 0
+                and os.name == "nt"
+                and len(prefix.encode("utf-16-le")) // 2 + 8 > 255
+            ):
                 prefix = ".out."
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=prefix):
                 pass

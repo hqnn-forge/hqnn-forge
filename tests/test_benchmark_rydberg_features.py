@@ -3775,3 +3775,31 @@ class TestSeparationSubsamplingIntegration:
         sep1 = r1[0]["separation"]["train"]["mean_within_distance"]
         sep2 = r2[0]["separation"]["train"]["mean_within_distance"]
         assert sep1 != sep2
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific filename handling")
+def test_long_filename_uses_short_probe_prefix_when_limit_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use a short temporary prefix when the filename limit is unavailable."""
+    out = tmp_path / ("a" * 250)
+    try:
+        out.touch()
+    except OSError as error:
+        if error.errno == errno.ENAMETOOLONG:
+            pytest.skip("the filesystem does not support a 250-byte basename")
+        raise
+    out.unlink()
+
+    prefixes: list[str] = []
+    original = bench.tempfile.NamedTemporaryFile
+
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        prefixes.append(kwargs["prefix"])
+        return original(*args, **kwargs)
+
+    monkeypatch.delattr(bench.os, "pathconf", raising=False)
+    monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
+
+    bench.check_writable(out)
+
+    assert prefixes == [".out."]
+    assert list(tmp_path.iterdir()) == []
