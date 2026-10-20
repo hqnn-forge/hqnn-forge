@@ -9,6 +9,10 @@ package so user code stays concise:
     from hqnn_forge.encoding  import QuantumEncodingLayer
     from hqnn_forge.models    import HybridBinaryClassifier
     from hqnn_forge.utils     import FocalLoss
+
+Exported symbols
+----------------
+__version__  The installed package version ("0.1.0-dev" when running from source without an install).
 """
 
 from importlib.metadata import PackageNotFoundError, version

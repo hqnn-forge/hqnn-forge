@@ -197,8 +197,20 @@ imports, though, so an edit saved while they run (the script is read before
 ``torch`` is imported, the package while PennyLane is) still files the old
 code's features under the new code's key (#574).  A package without source
 files, or with a module that is not source, cannot be fingerprinted and is
-refused; ``--no-cache`` runs there.  Entries of other versions stay in the
-directory under their own names and are not removed (#575).
+refused; ``--no-cache`` runs there.  Entries of other versions or code stay
+in the directory under their own names until pruned.  ``--prune-cache``
+(:meth:`FeatureCache.prune`) removes stale entries whose stored ``code_sha256``
+or key environment differs from the running process, reports the files and
+bytes removed, and exits without running the benchmark; files it cannot read as
+an entry (such as ``*.part`` files or entries from before #543) are listed and
+left untouched (#575).
+
+A power loss shortly after ``os.replace`` can still leave the final ``.npz`` entry empty or
+partially written.  On the next request, ``fetch`` treats an unreadable entry as a cache
+miss, warns, and recomputes the features, replacing the damaged entry.  This costs
+recomputation but does not return a false cache hit.  Calling ``fsync`` on every
+temporary file and the cache directory would add overhead to every write to guard
+against this rare failure, so the cache does not do so.
 
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
@@ -326,14 +338,18 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
 import math
 import numbers
 import os
+import stat
 import tempfile
 import time
+import warnings
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1390,6 +1406,44 @@ class CachedFeatures(NamedTuple):
     environment: dict[str, Any] | None = None
 
 
+class PruneReport(NamedTuple):
+    """
+    The outcome of pruning a :class:`FeatureCache`.
+
+    Parameters
+    ----------
+    files:
+        Number of stale cache entries removed.
+    bytes:
+        Total bytes of the removed entries.
+    unreadable:
+        Files in the cache directory that could not be read as a valid
+        entry (leftover ``*.part`` files, legacy entries from before #543,
+        or corrupt files), left untouched.
+    """
+
+    files: int
+    bytes: int
+    unreadable: tuple[Path, ...]
+
+
+_ENTRY_ERRORS = (
+    OSError,
+    EOFError,
+    ValueError,
+    KeyError,
+    TypeError,
+    zipfile.BadZipFile,
+)
+
+
+def _stored_environment(stored: Mapping[str, Any]) -> dict[str, Any]:
+    environment = json.loads(str(stored["environment"]))
+    if not isinstance(environment, dict):
+        raise TypeError("the stored environment is not a JSON object")
+    return environment
+
+
 class FeatureCache:
     """
     Features on disk, one ``.npz`` file per input matrix, feature-map
@@ -1402,7 +1456,8 @@ class FeatureCache:
     they were computed in (JSON) and the code digest; it is written to a
     temporary name and renamed, so an interrupted run leaves no partial
     entry.  With ``directory=None`` nothing is stored and every request
-    computes.
+    computes.  With ``--prune-cache``, stale entries are removed, the outcome
+    is reported, and the process exits without running the benchmark.
 
     Parameters
     ----------
@@ -1479,14 +1534,24 @@ class FeatureCache:
         ``compute(inputs)``, timed and stored with this cache's environment.
         """
         path = self.path(inputs, labels, config)
-        if path is not None and path.exists():
-            with np.load(path, allow_pickle=False) as stored:
-                return CachedFeatures(
-                    np.asarray(stored["features"], dtype=np.float64),
-                    float(stored["seconds"]),
-                    True,
-                    json.loads(str(stored["environment"])),
+        if path is not None:
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    return CachedFeatures(
+                        np.asarray(stored["features"], dtype=np.float64),
+                        float(stored["seconds"]),
+                        True,
+                        _stored_environment(stored),
+                    )
+            except FileNotFoundError:
+                pass
+            except _ENTRY_ERRORS as error:
+                warnings.warn(
+                    f"feature cache entry {path} is unreadable ({error!r}); recomputing",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
+
         start = time.perf_counter()
         features = np.ascontiguousarray(compute(inputs), dtype=np.float64)
         seconds = time.perf_counter() - start
@@ -1502,6 +1567,69 @@ class FeatureCache:
                 )
             os.replace(partial, path)
         return CachedFeatures(features, seconds, False, self.environment)
+
+    def prune(self) -> PruneReport:
+        """
+        Remove entries of other code or versions from this cache directory.
+
+        Inspects every file in :attr:`directory`.  An entry is removed if its
+        stored ``code_sha256`` or :func:`key_environment` differs from this
+        cache.  Entries with matching code and key environment are kept.
+        Files that cannot be read as a valid entry (leftover ``*.part``
+        files, entries from before #543, or corrupt files) are not removed
+        and are listed in :attr:`PruneReport.unreadable`.
+
+        Returns
+        -------
+        PruneReport
+            Number of removed files, total bytes removed, and unreadable files.
+        """
+        if self.directory is None or not self.directory.exists():
+            return PruneReport(files=0, bytes=0, unreadable=())
+        assert self.code_sha256 is not None, "cache directory exists but code_sha256 is None"
+        removed_files = 0
+        removed_bytes = 0
+        unreadable: list[Path] = []
+        current_key_env = key_environment(self.environment)
+
+        for path in sorted(self.directory.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix != ".npz":
+                unreadable.append(path)
+                continue
+
+            is_stale = False
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    if "code_sha256" not in stored:
+                        unreadable.append(path)
+                        continue
+                    entry_code = str(stored["code_sha256"])
+                    if entry_code != self.code_sha256:
+                        is_stale = True
+                    else:
+                        raw_env = _stored_environment(stored)
+                        entry_key_env = key_environment(raw_env)
+                        is_stale = entry_key_env != current_key_env
+            except _ENTRY_ERRORS:
+                unreadable.append(path)
+                continue
+
+            if is_stale:
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+                except OSError:
+                    unreadable.append(path)
+
+        return PruneReport(
+            files=removed_files,
+            bytes=removed_bytes,
+            unreadable=tuple(unreadable),
+        )
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
@@ -2169,11 +2297,18 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     """
     Refuse an ``out`` that cannot be written, and change nothing.
 
-    An existing file is opened for appending and closed without a write, so
-    its content stays as it is; for a new one a temporary file is created in
-    its directory and removed.  Either raises what writing ``out`` would,
-    here, as a ``ValueError`` naming ``out``: a missing directory, a
-    directory in its place, no write permission.
+    An existing regular file is opened for appending and closed without a
+    write, so its content stays as it is.  FIFOs and character or block
+    devices are checked with ``os.access`` without opening them, using effective
+    IDs where supported: opening a FIFO would interfere with its reader.
+    Other existing targets are probed by opening them for appending too.
+    For a new file a temporary file is created in its directory and removed,
+    keeping the output basename in the probe's prefix unless it would exceed
+    ``PC_NAME_MAX`` with the eight random characters appended.  The output
+    basename's byte length is checked against that limit where available;
+    an unavailable filesystem limit is ignored.  Errors become a ``ValueError``
+    naming ``out``: a missing directory, a directory in its place, no write
+    permission, or a name that is too long.
 
     Checked up front rather than by writing to a temporary file renamed over
     ``out`` at the end: :func:`run` writes each record as it comes, so that
@@ -2184,12 +2319,28 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     """
     path = Path(out)
     try:
+        try:
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and (stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+            if not os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
         # A broken symlink counts as existing: opening it fails here, not at the first record.
-        if path.exists() or path.is_symlink():
+        elif mode is not None or path.is_symlink():
             with open(path, "a", encoding="utf-8"):
                 pass
         else:
-            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}."):
+            try:
+                name_max = os.pathconf(path.parent, "PC_NAME_MAX")
+            except (AttributeError, OSError, ValueError):
+                name_max = -1
+            if name_max > 0 and len(os.fsencode(path.name)) > name_max:
+                raise OSError(errno.ENAMETOOLONG, os.strerror(errno.ENAMETOOLONG), str(path))
+            prefix = f".{path.name}."
+            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max:
+                prefix = ".out."
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=prefix):
                 pass
     except OSError as error:
         reason = error.strerror or str(error)
@@ -2283,6 +2434,14 @@ def _parser() -> argparse.ArgumentParser:
         help="directory for the feature cache; disabled by --no-cache",
     )
     parser.add_argument("--no-cache", action="store_true", help="do not store features")
+    parser.add_argument(
+        "--prune-cache",
+        action="store_true",
+        help=(
+            "remove stale feature cache entries, report the outcome, and exit "
+            "without running the benchmark"
+        ),
+    )
     parser.add_argument(
         "--n-atoms",
         type=int,
@@ -2455,6 +2614,20 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
             f"got {args.patience}"
         )
+    if args.prune_cache:
+        if args.no_cache:
+            parser.error("--prune-cache cannot be used with --no-cache")
+        cache = FeatureCache(args.cache_dir)
+        report = cache.prune()
+        print(
+            f"pruned cache ({args.cache_dir}): removed {report.files} file"
+            f"{'' if report.files == 1 else 's'} ({report.bytes} bytes)"
+        )
+        if report.unreadable:
+            print(
+                f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
+            )
+        return []
     max_sep = (
         None
         if args.max_separation_rows is not None and args.max_separation_rows <= 0

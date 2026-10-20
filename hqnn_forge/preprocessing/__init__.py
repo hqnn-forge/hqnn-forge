@@ -11,7 +11,7 @@ stratified_kfold  Fold indices that keep class prevalence.
 smote             SMOTE oversampling of a binary minority class.
 oversample_fold   SMOTE one fold's training rows only; validation rows untouched.
 iter_folds        Stratified folds with fold-safe oversampling.
-Fold, SmoteResult Result types of the above.
+Fold, SmoteResult  Result types of the above.
 """
 
 from hqnn_forge.preprocessing.cv import (
