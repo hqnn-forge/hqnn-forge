@@ -17,6 +17,10 @@ Requires the scikit-learn extra:
 
     pip install "hqnn-forge[sklearn]"
 
+This script imports ``standardise_features`` from
+``benchmark_rydberg_features.py`` in the same folder, so run it from
+the repository or copy it together with that file.
+
 Usage
 -----
     python examples/does_the_quantum_layer_help.py
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from benchmark_rydberg_features import standardise_features
 
 from hqnn_forge.evaluation import (
     find_optimal_threshold,
@@ -67,12 +72,20 @@ def load_data() -> tuple[np.ndarray, np.ndarray]:
     return X, y
 
 
-def standardise(train: np.ndarray, *others: np.ndarray) -> list[np.ndarray]:
-    # Fitted on the training rows only: statistics computed over test rows
-    # would leak them into training, and the test score would be optimistic.
-    mean, std = train.mean(axis=0), train.std(axis=0)
-    std[std == 0] = 1.0
-    return [(a - mean) / std for a in (train, *others)]
+def standardise(
+    features: np.ndarray,
+    fit_rows: np.ndarray,
+    *other_rows: np.ndarray,
+) -> list[np.ndarray]:
+    """Standardise rows using only the fitting rows' statistics.
+
+    Statistics computed over test rows would leak them into training,
+    making the test score optimistic. Reuses ``standardise_features``,
+    including its rounding-aware constant-column rule, so near-constant
+    columns are only centred.
+    """
+    scaled = standardise_features(features, fit_rows)
+    return [scaled[rows] for rows in (fit_rows, *other_rows)]
 
 
 def score_at_tuned_threshold(
@@ -102,7 +115,7 @@ def main() -> None:
         # test fold is touched once, for the final score.
         inner_train, val = stratified_kfold(y[train], 5, random_state=SEED + k)[0]
         fit_idx, val_idx = train[inner_train], train[val]
-        X_fit, X_val, X_test = standardise(X[fit_idx], X[val_idx], X[test])
+        X_fit, X_val, X_test = standardise(X, fit_idx, val_idx, test)
 
         # SMOTE only the rows the models learn from, after scaling (it measures
         # distances).  Oversampling before the split would put synthetic

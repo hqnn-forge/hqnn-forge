@@ -128,9 +128,10 @@ jobs:
         
     # Every extra the suite can import, which is the same set the locked job
     # installs with --all-extras below. An extra left out here does not fail the
-    # job: tests/test_evaluation_plots.py and tests/test_sklearn_estimator.py
-    # skip their whole module when matplotlib or scikit-learn is missing, so the
-    # tests would just stop running. Keep the two jobs' sets identical.
+    # job: tests/test_evaluation_plots.py, tests/test_sklearn_estimator.py and
+    # tests/test_does_the_quantum_layer_help.py skip their whole module when
+    # matplotlib or scikit-learn is missing, so the tests would just stop
+    # running. Keep the two jobs' sets identical.
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -236,8 +237,10 @@ jobs:
         uv pip install --resolution lowest-direct -e ".[lightning,sklearn]"
         PYTEST_SPEC=$(uv run --no-sync python -c 'import re, tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"pytest\s*[<>=!~]", d)))')
         uv pip install "$PYTEST_SPEC"
-        uv run --no-sync python -c 'import re, tomllib; print("\n".join(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if re.match(r"qutip\s*[<>=!~]", d)))' > qutip-floors.txt
-        uv pip install --resolution lowest-direct -r qutip-floors.txt
+        specs=$(uv run --no-sync python .github/scripts/check_floors.py --print-dev-floors)
+        [ -n "$specs" ] || { echo "::error::check_floors.py --print-dev-floors printed no specs"; exit 1; }
+        mapfile -t SPECS <<< "$specs"
+        uv pip install --resolution lowest-direct "${SPECS[@]}"
 
     # The resolver silently installs a newer version when another dependency
     # requires one, so an unreachable floor would otherwise still go green
