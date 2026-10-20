@@ -330,6 +330,7 @@ import hashlib
 import itertools
 import json
 import math
+import numbers
 import os
 import tempfile
 import time
@@ -388,49 +389,35 @@ DATASETS: tuple[str, ...] = (
 )
 #: Losses by name.  ``bce`` makes the linear head on the inputs a logistic regression.
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
-#: Training settings the shared search space may vary, as in ``hqnn_forge.benchmark``.
-TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
 
-TRAINING_SETTING_RULES = {
-    "lr": (
-        lambda value: (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value > 0
-        ),
-        "must be finite and > 0",
-        "must hold finite values > 0",
-    ),
-    "max_epochs": (
-        lambda value: (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 1
-        ),
-        "must be >= 1",
-        "must hold values >= 1",
-    ),
-    "batch_size": (
-        lambda value: (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 1
-        ),
-        "must be >= 1",
-        "must hold values >= 1",
-    ),
+
+def _positive_integer(value: Any) -> bool:
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and value >= 1
+
+
+def _positive_real(value: Any) -> bool:
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+#: Validation predicate and shared bound wording for each tunable training setting.
+TRAINING_SETTING_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "lr": (_positive_real, "finite and > 0"),
+    "max_epochs": (_positive_integer, ">= 1"),
+    "batch_size": (_positive_integer, ">= 1"),
     "patience": (
-        lambda value: value is None
-        or (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 1
-        ),
-        "must be >= 1 or None",
-        "must hold values >= 1 or None",
+        lambda value: value is None or _positive_integer(value),
+        ">= 1 or None",
     ),
 }
+
+#: Training settings the shared search space may vary, as in ``hqnn_forge.benchmark``.
+TUNABLE: frozenset[str] = frozenset(TRAINING_SETTING_RULES)
+
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
 #: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
@@ -558,10 +545,12 @@ class Settings:
             raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
         if "D" in self.arms and self.circuit_layers < 1:
             raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
-        for key, (predicate, description, _) in TRAINING_SETTING_RULES.items():
-            value = self.defaults[key]
+        # Also where tuning overrides them: a refused default should not depend on --trials.
+        defaults = self.defaults
+        for key, (predicate, bound) in TRAINING_SETTING_RULES.items():
+            value = defaults[key]
             if not predicate(value):
-                raise ValueError(f"{key} {description}; got {value!r}.")
+                raise ValueError(f"{key} must be {bound}; got {value!r}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -585,12 +574,12 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
+
         for key, values in self.search_space.items():
-            predicate, _, description = TRAINING_SETTING_RULES[key]
+            predicate, bound = TRAINING_SETTING_RULES[key]
             if not all(predicate(value) for value in values):
-                raise ValueError(
-                    f"search_space['{key}'] {description}; got {list(values)!r}."
-                )
+                raise ValueError(f"search_space['{key}'] must hold {bound}; got {list(values)!r}.")
+
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
