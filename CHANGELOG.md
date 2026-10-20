@@ -523,6 +523,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- `examples/benchmark_rydberg_features.py`: on Windows, `check_writable()` uses a short
+  temporary probe prefix for long output filenames when `os.pathconf` cannot provide
+  `PC_NAME_MAX` (#657)
 - Circuit diagnostics (`circuit_summary`, `draw_circuit`, `count_inert_parameters`) no
   longer fail on PennyLane 0.46 development builds, where `qml.transforms.decompose` stopped
   accepting a tape (#623)
