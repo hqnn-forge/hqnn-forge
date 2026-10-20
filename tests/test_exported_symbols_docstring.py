@@ -14,6 +14,7 @@ import pkgutil
 import re
 from collections import Counter
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -33,6 +34,14 @@ def public_packages() -> list[str]:
         if info.ispkg and not info.name.startswith("_")
     )
     return ["hqnn_forge", *subpackages]
+
+
+def exported_names(module: Any, package: str) -> list[str]:
+    """Return a package's exports, raising a clear error if __all__ is missing."""
+    assert hasattr(module, "__all__"), (
+        f"{package} has no __all__; every public package must define its exports"
+    )
+    return list(module.__all__)
 
 
 def is_underline(line: str) -> bool:
@@ -58,7 +67,7 @@ def listed_symbols(doc: str, owner: str) -> dict[str, list[int]]:
     Entries start at column 0 with one name, or several separated by commas,
     optionally followed by two or more spaces and a description. Descriptions
     may continue on indented lines immediately after an entry or another
-    continuation line.
+    continuation line. Descriptions must be wrapped onto indented lines only.
 
     Group headings end in a colon and are followed by a blank line. Lines
     with a name/description separator are always entries. Parsing stops at
@@ -110,9 +119,8 @@ def listed_symbols(doc: str, owner: str) -> dict[str, list[int]]:
 
         has_entry_separator = bool(ENTRY_SEPARATOR.search(stripped))
 
-        # Recognize group headings without swallowing malformed entries.
-        # The next nonblank line may be a valid entry or an indented line;
-        # the latter will be rejected when the parser reaches it.
+        # A colon line can be a group heading only when it has no entry
+        # separator and is followed by a blank line and further content.
         if stripped.endswith(":") and not has_entry_separator:
             next_index = index + 1
             while next_index < len(lines) and not lines[next_index].strip():
@@ -158,10 +166,10 @@ def assert_docstring_lists_exactly_all(
     exported_counts = Counter(exported)
 
     listed_names = set(listed)
-    exported_names = set(exported_counts)
+    exported_names_set = set(exported_counts)
 
-    docstring_only = {name: listed[name] for name in listed_names - exported_names}
-    all_only = exported_names - listed_names
+    docstring_only = {name: listed[name] for name in listed_names - exported_names_set}
+    all_only = exported_names_set - listed_names
     duplicate_docstring_names = {
         name: numbers for name, numbers in listed.items() if len(numbers) > 1
     }
@@ -184,12 +192,10 @@ def assert_docstring_lists_exactly_all(
 @pytest.mark.parametrize("package", public_packages())
 def test_docstring_lists_exactly_all(package: str) -> None:
     module = importlib.import_module(package)
-    assert hasattr(module, "__all__"), (
-        f"{package} has no __all__; every public package must define its exports"
-    )
+    exported = exported_names(module, package)
     assert_docstring_lists_exactly_all(
         module.__doc__ or "",
-        list(module.__all__),
+        exported,
         package,
     )
 
@@ -265,17 +271,11 @@ def test_a_section_title_with_a_long_enough_underline_stops_parsing() -> None:
     assert listed_symbols(doc, "pkg") == {"Alpha": [3]}
 
 
-def test_a_module_without_all_has_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        importlib,
-        "import_module",
-        lambda _package: SimpleNamespace(__doc__=SECTION),
-    )
+def test_a_module_without_all_has_a_clear_error() -> None:
+    module = SimpleNamespace(__doc__=SECTION)
+
     with pytest.raises(AssertionError, match=r"sample_package has no __all__"):
-        module = importlib.import_module("sample_package")
-        assert hasattr(module, "__all__"), (
-            "sample_package has no __all__; every public package must define its exports"
-        )
+        exported_names(module, "sample_package")
 
 
 @pytest.mark.parametrize(
