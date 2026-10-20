@@ -138,8 +138,9 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         VQC ansatz layers.  Default: 2.  At 1, with angle encoding and
         ``readout="first"``, ⟨Z_0⟩ misses the first encoded angle under the
         default ring and RX embedding, and most of them under
-        ``entangler="brickwork"``; under ``"hardware_efficient"`` it sees at most
-        ``n_layers + 1`` of them at any depth.  Use 2 or more with a ring.  See step 2 of
+        ``entangler="brickwork"``; under ``"hardware_efficient"`` and ``"rydberg"``
+        it sees at most ``n_layers + 1`` of them at any depth.  Use 2 or more with a
+        ring.  See step 2 of
         :func:`hqnn_forge.encoding.angle_embedding._make_angle_embedding_circuit`.
     classical_hidden_dim:
         Width of the classical MLP branch.  Default: 16.
