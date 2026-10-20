@@ -1125,3 +1125,26 @@ class TestGlobalNumpyRng:
         layer, X = _reuploading(), _angles(3)
         with numpy_rng_untouched():
             compute(X, layer)
+
+
+def test_binary_labels_maps_to_plus_minus_one_and_keeps_the_graph():
+    from hqnn_forge.kernels import _binary_labels
+
+    out = _binary_labels([0, 1, 1, 0], 4)
+    assert out.dtype == torch.float64
+    assert out.tolist() == [-1.0, 1.0, 1.0, -1.0]
+    assert _binary_labels(torch.tensor([-1, 1]), 2).tolist() == [-1.0, 1.0]
+    # The helper neither detaches nor moves labels; `separation._classes` does that itself.
+    y = torch.tensor([-1.0, 1.0], dtype=torch.float64, requires_grad=True)
+    assert _binary_labels(y, 2).requires_grad
+
+
+@pytest.mark.parametrize(
+    ("y", "n", "message"),
+    [([0, 1], 3, "must have 3 labels"), ([1, 1], 2, "both classes"), ([0, 2], 2, "both classes")],
+)
+def test_binary_labels_rejects_bad_labels(y, n, message):
+    from hqnn_forge.kernels import _binary_labels
+
+    with pytest.raises(ValueError, match=message):
+        _binary_labels(y, n)

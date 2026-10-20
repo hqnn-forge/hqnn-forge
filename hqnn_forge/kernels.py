@@ -110,7 +110,9 @@ References
 from __future__ import annotations
 
 import numbers
+from typing import Any
 
+import numpy as np
 import pennylane as qml
 import torch
 from torch import nn
@@ -498,6 +500,28 @@ def quantum_kernel_matrix(
 # ---------------------------------------------------------------------------
 
 
+def _binary_labels(y: Any, n_samples: int) -> torch.Tensor:
+    """
+    Validate binary labels and return them as ``±1`` in a ``float64`` tensor.
+
+    ``y`` must hold ``n_samples`` labels, ``{0, 1}`` or ``{-1, +1}``, with both
+    classes present; ``0/1`` labels are mapped to ``-1/+1``.  The result stays
+    on ``y``'s device and keeps its autograd history, so a caller that needs a
+    detached CPU copy takes it itself.  Shared by :func:`kernel_target_alignment`
+    and :mod:`hqnn_forge.diagnostics.separation`, so the two cannot drift apart.
+    """
+    labels = y if isinstance(y, torch.Tensor) else torch.as_tensor(np.asarray(y))
+    labels = labels.reshape(-1).to(torch.float64)
+    if labels.numel() != n_samples:
+        raise ValueError(f"y must have {n_samples} labels; got {labels.numel()}.")
+    values = set(labels.unique().tolist())
+    if values == {0.0, 1.0}:
+        return 2.0 * labels - 1.0
+    if values != {-1.0, 1.0}:
+        raise ValueError(f"y must hold both classes as 0/1 or -1/+1; got values {sorted(values)}.")
+    return labels
+
+
 def kernel_target_alignment(K: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     Centred kernel-target alignment of ``K`` with labels ``y`` (Cortes et al.
@@ -524,14 +548,7 @@ def kernel_target_alignment(K: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     if K.ndim != 2 or K.shape[0] != K.shape[1]:
         raise ValueError(f"K must be a square matrix; got shape {tuple(K.shape)}.")
-    labels = torch.as_tensor(y).reshape(-1).to(torch.float64)
-    if labels.numel() != K.shape[0]:
-        raise ValueError(f"y must have {K.shape[0]} labels; got {labels.numel()}.")
-    values = set(labels.unique().tolist())
-    if values == {0.0, 1.0}:
-        labels = 2.0 * labels - 1.0
-    elif values != {-1.0, 1.0}:
-        raise ValueError(f"y must hold both classes as 0/1 or -1/+1; got values {sorted(values)}.")
+    labels = _binary_labels(y, K.shape[0])
     m = K.shape[0]
     centring = torch.eye(m, dtype=torch.float64) - torch.full((m, m), 1.0 / m, dtype=torch.float64)
     Kc = centring @ K.to(torch.float64) @ centring
