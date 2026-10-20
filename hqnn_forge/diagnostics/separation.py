@@ -295,8 +295,10 @@ def _features(F: Any) -> torch.Tensor:
 
 
 def _classes(y: Any, n_samples: int) -> torch.Tensor:
-    """Boolean CPU mask of class 1, from labels checked by ``kernel_target_alignment``'s rule."""
-    return _binary_labels(y, n_samples).detach().to("cpu") > 0
+    """Boolean CPU mask of class 1, from labels checked as ``kernel_target_alignment`` checks them."""
+    if isinstance(y, torch.Tensor):
+        y = y.detach().to("cpu")
+    return _binary_labels(y, n_samples) > 0
 
 
 def _ratio(numerator: float, denominator: float) -> float:

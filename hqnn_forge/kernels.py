@@ -115,6 +115,7 @@ from typing import Any
 import numpy as np
 import pennylane as qml
 import torch
+from numpy.typing import ArrayLike
 from torch import nn
 
 from hqnn_forge._encoding_contract import EncodingLayer
@@ -504,13 +505,22 @@ def _binary_labels(y: Any, n_samples: int) -> torch.Tensor:
     """
     Validate binary labels and return them as ``±1`` in a ``float64`` tensor.
 
-    ``y`` must hold ``n_samples`` labels, ``{0, 1}`` or ``{-1, +1}``, with both
-    classes present; ``0/1`` labels are mapped to ``-1/+1``.  The result stays
-    on ``y``'s device and keeps its autograd history, so a caller that needs a
-    detached CPU copy takes it itself.  Shared by :func:`kernel_target_alignment`
-    and :mod:`hqnn_forge.diagnostics.separation`, so the two cannot drift apart.
+    ``y`` is a tensor or an array-like of ``n_samples`` labels, ``{0, 1}`` or
+    ``{-1, +1}``, with both classes present; ``0/1`` labels are mapped to
+    ``-1/+1``.  A list or tuple goes through :func:`torch.as_tensor`, which also
+    reads a list of 0-d tensors; any other array-like (an ndarray, a pandas
+    Series) goes through :func:`numpy.asarray`, so a Series is read by position,
+    not by label.  The result stays on ``y``'s device and keeps its autograd
+    history, so a caller that needs a detached CPU copy detaches and moves ``y``
+    before calling.  Shared by :func:`kernel_target_alignment` and
+    :mod:`hqnn_forge.diagnostics.separation`, so the two cannot drift apart.
     """
-    labels = y if isinstance(y, torch.Tensor) else torch.as_tensor(np.asarray(y))
+    if isinstance(y, torch.Tensor):
+        labels = y
+    elif isinstance(y, (list, tuple)):
+        labels = torch.as_tensor(y)
+    else:
+        labels = torch.as_tensor(np.asarray(y))
     labels = labels.reshape(-1).to(torch.float64)
     if labels.numel() != n_samples:
         raise ValueError(f"y must have {n_samples} labels; got {labels.numel()}.")
@@ -522,7 +532,7 @@ def _binary_labels(y: Any, n_samples: int) -> torch.Tensor:
     return labels
 
 
-def kernel_target_alignment(K: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def kernel_target_alignment(K: torch.Tensor, y: torch.Tensor | ArrayLike) -> torch.Tensor:
     """
     Centred kernel-target alignment of ``K`` with labels ``y`` (Cortes et al.
     2012): the cosine between the centred kernel ``HKH`` and the centred ideal
@@ -539,7 +549,9 @@ def kernel_target_alignment(K: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         Square kernel matrix; differentiable if it comes from the
         ``differentiable=True`` path.
     y:
-        Binary labels, ``{0, 1}`` or ``{-1, +1}``, with both classes present.
+        Binary labels, ``{0, 1}`` or ``{-1, +1}``, with both classes present: a
+        tensor or an array-like of shape ``(n,)`` (a list, a NumPy array, a
+        pandas Series).
 
     Returns
     -------

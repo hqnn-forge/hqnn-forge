@@ -514,6 +514,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
   smoke-test configuration on the positive control and ignores conflicting grid, model,
   dataset-selection, and training options (#563)
+- `kernel_target_alignment` accepts array-like labels such as a NumPy array or pandas Series
+  (#539)
 
 ### Fixed
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
