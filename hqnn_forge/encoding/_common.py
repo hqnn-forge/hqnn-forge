@@ -23,7 +23,13 @@ import pennylane as qml
 import torch
 from pennylane.exceptions import AllocationError, DeviceError
 
-from hqnn_forge.circuits import hardware_efficient_layer, strongly_entangling_layer
+from hqnn_forge.circuits import (
+    RYDBERG_BLOCKADE_RADIUS,
+    hardware_efficient_layer,
+    neutral_atom_layer,
+    rydberg_chain,
+    strongly_entangling_layer,
+)
 from hqnn_forge.utils.rng import as_seed
 
 logger = logging.getLogger(__name__)
@@ -48,7 +54,7 @@ KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
 _SEED_NONE_DEVICES: frozenset[str] = frozenset({*KNOWN_DEVICES, "default.mixed"})
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
-Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient"]
+Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient", "rydberg"]
 Readout = Literal["all", "first"]
 
 #: Devices tried, in order, after the requested one fails.  Each is a strict
@@ -184,13 +190,22 @@ def apply_variational_layers(
       :func:`hqnn_forge.circuits.hardware_efficient_layer`.  One angle per
       qubit per layer and ``n − 1`` two-qubit gates per layer: a third of the
       parameters of the ``Rot`` blocks, with CZ native on many devices.
+    * ``"rydberg"``: the blockade CZs of a neutral-atom register in their
+      parallel layers, then ``Rot(φ, θ, ω)`` on every qubit:
+      :func:`hqnn_forge.circuits.neutral_atom_layer` on the fixed register
+      :func:`hqnn_forge.circuits.rydberg_chain` ``(n_qubits)`` at
+      :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`.  Its graph is the
+      nearest-neighbour path, so the block is ``CZ(i, i+1)`` for every ``i``
+      (no wrap-around, no CCZ) and then ``Rot``, run in ``min(3, n − 1)``
+      blockade layers (``CircuitSummary.n_blockade_layers``).
 
-    ``"ring"``, ``"strongly_entangling"`` and ``"brickwork"`` take ``weights``
+    ``"ring"``, ``"strongly_entangling"``, ``"brickwork"`` and ``"rydberg"`` take ``weights``
     of shape ``(n_layers, n_qubits, 3)`` and use ``n_layers · n_qubits``
     ``Rot`` gates.  The ring and ``"strongly_entangling"`` use ``n_qubits``
     CNOTs per layer and differ in gate order and, from the second layer on, in
     which qubits the CNOTs connect; ``"brickwork"`` uses ``n_qubits - 1``.
-    ``"hardware_efficient"`` takes ``(n_layers, n_qubits)``.
+    ``"hardware_efficient"`` takes ``(n_layers, n_qubits)``.  ``"rydberg"``
+    uses ``n_qubits - 1`` CZs per layer.
     :func:`variational_weight_shape` gives the shape for each.  The ``"ring"``
     block is :func:`hqnn_forge.circuits.strongly_entangling_layer` applied per
     layer.
@@ -200,8 +215,8 @@ def apply_variational_layers(
     a few at a time: the ``"strongly_entangling"`` range of block ``ℓ`` is
     ``(layer_offset + ℓ) mod (n-1) + 1``, so applying the blocks one by one
     with offsets ``0 … L-1`` gives the same ranges as applying all ``L`` at
-    once.  The ``"ring"``, ``"brickwork"`` and ``"hardware_efficient"``
-    blocks do not depend on the layer index.
+    once.  The ``"ring"``, ``"brickwork"``, ``"hardware_efficient"`` and
+    ``"rydberg"`` blocks do not depend on the layer index.
     """
     if entangler == "strongly_entangling":
         # A single wire has no CNOT partner: leave the ranges to the template,
@@ -221,6 +236,10 @@ def apply_variational_layers(
         elif entangler == "hardware_efficient":
             # CZ ladder, then RY(θ) on every qubit
             hardware_efficient_layer(weights[layer], n_qubits)
+        elif entangler == "rydberg":
+            # Blockade CZs in parallel layers, then Rot(φ, θ, ω) on every atom;
+            # the same register in every layer (#418)
+            neutral_atom_layer(weights[layer], rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS)
         elif entangler == "brickwork":
             # Brickwork: even nearest-neighbour pairs, then odd ones
             for start in (0, 1):
@@ -249,7 +268,7 @@ def variational_weight_shape(
     the layer index, which :func:`~hqnn_forge.initializers.block_local_init_`
     and the diagnostics' ``n_layers`` fallback rely on: ``(n_layers, n_qubits,
     3)`` for the ``Rot`` blocks (``"ring"``, ``"strongly_entangling"``,
-    ``"brickwork"``), ``(n_layers, n_qubits)`` for the ``RY`` of
+    ``"brickwork"``, ``"rydberg"``), ``(n_layers, n_qubits)`` for the ``RY`` of
     ``"hardware_efficient"``.
 
     Raises

@@ -120,7 +120,9 @@ limits `N` only from above.
   graph of the gate-based `hqnn_forge.circuits.neutral_atom_layer`) connects the pairs with
   `V_ij > Ω`. A pair at exactly `R_b` has `V_ij = Ω` and lies on the boundary of that graph,
   as the nearest neighbours do in the `V/Ω = 1` column below; the graph leaves it out
-  (strict `|r_i − r_j| < R_b`), and this model does not depend on it.
+  (strict `|r_i − r_j| < R_b`), and this model does not depend on it. The encoders'
+  `entangler="rydberg"` uses this `R_b` and a chain at `a = 6 µm`, where only nearest
+  neighbours are inside the radius (`V/Ω = 9.25`, next-nearest `0.14`).
 - **The regime is not fixed: `V/Ω` is swept through the spacing**, from weakly interacting
   through `V ≈ Ω` into the blockade. At the reference Ω:
 

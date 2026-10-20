@@ -140,8 +140,9 @@ def _make_angle_embedding_circuit(
     * ``inputs``  — shape ``(n_qubits,)`` — the pre-processed feature vector.
     * ``weights`` — shape :func:`variational_weight_shape`: ``(n_layers,
                     n_qubits, 3)``, the ``qml.Rot`` angles (φ, θ, ω) per layer
-                    and qubit, or ``(n_layers, n_qubits)``, the ``RY`` angles,
-                    for ``entangler="hardware_efficient"``.
+                    and qubit (also for ``entangler="rydberg"``), or
+                    ``(n_layers, n_qubits)``, the ``RY`` angles, for
+                    ``entangler="hardware_efficient"``.
 
     Called inside a QNode it records one ``qml.expval(PauliZ)`` measurement per
     readout wire; the QNode turns them into the expectation values.
@@ -200,7 +201,13 @@ def _make_angle_embedding_circuit(
        After L layers ⟨Z_i⟩ sees x_{i-L} … x_{i+L}, except that under RX
        (⟨X⟩ = 0) a single layer leaves it seeing x_i alone; under
        ``readout="first"``, ⟨Z_0⟩ thus sees L + 1 features (one at L = 1
-       under RX).
+       under RX).  ``entangler="rydberg"`` runs the same ``CZ(i, i+1)``
+       chain (the blockade graph of its default register) but follows it
+       with ``Rot``, which mixes in Y_i as well as X_i; ⟨Y⟩ = −sin x under
+       RX, so the exception disappears: after L layers ⟨Z_i⟩ sees
+       x_{i-L} … x_{i+L} under RX and RY alike, from the first layer on, and
+       ⟨Z_0⟩ under ``readout="first"`` sees L + 1 features, all of them only
+       from L = n − 1 (see :func:`hqnn_forge.circuits.neutral_atom_layer`).
 
     3. **Per-qubit SU(2) rotation block**:
        ``qml.Rot(φ, θ, ω, wires=i)`` applies Rz(ω)·Ry(θ)·Rz(φ), covering the
@@ -227,6 +234,11 @@ def _make_angle_embedding_circuit(
        under ``"all"``; under ``"first"`` the k-th layer counted back from
        the readout (k = 0 the last) leaves max(0, n − 1 − k) dead, 6 of 12
        at 4 qubits and 3 layers, and ``n_inert_params`` matches autograd.
+       ``"rydberg"`` (CZ chain, then ``Rot``) loses the ``n_qubits``
+       last-layer ω under ``"all"``.  Under ``"first"``, the k-th layer counted
+       back (k < n) keeps ``Rot`` live on wires 0 … k − 1, wire k's ω dead and
+       every ``Rot`` beyond wire k dead, so 1 + 3(n − 1 − k) dead.  Layers
+       with k ≥ n leave none dead.  That is 21 of 36 at 4 qubits and 3 layers.
 
     4. **Measurement**:
        Returns ``[qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]``.
@@ -246,8 +258,10 @@ def _make_angle_embedding_circuit(
         ``"ring"`` (steps 2 and 3 above), ``"strongly_entangling"``
         (``qml.StronglyEntanglingLayers``: Rot first, then a CNOT ring of
         range ``ℓ mod (n-1) + 1``), ``"brickwork"`` (nearest-neighbour
-        CNOT pairs, no wrap-around, then Rot) or ``"hardware_efficient"`` (a
-        CZ ladder, then ``RY``; ``weights`` of shape ``(n_layers, n_qubits)``).
+        CNOT pairs, no wrap-around, then Rot), ``"hardware_efficient"`` (a
+        CZ ladder, then ``RY``; ``weights`` of shape ``(n_layers, n_qubits)``)
+        or ``"rydberg"`` (the blockade CZs of
+        :func:`hqnn_forge.circuits.rydberg_chain`, then Rot).
         See :func:`apply_variational_layers`.
     readout:
         ``"all"`` (step 4 above) or ``"first"`` (``[⟨Z_0⟩]`` only, as in the
@@ -333,8 +347,9 @@ def build_encoding_qnode(
         - ``"backprop"``        — auto-diff through simulator; requires default.qubit.
         - ``"finite-diff"``     — approximate; avoid for training.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` or
-        ``"hardware_efficient"``; see :func:`apply_variational_layers`.
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"``,
+        ``"hardware_efficient"`` or ``"rydberg"``; see
+        :func:`apply_variational_layers`.
     readout:
         ``"all"`` (default): ⟨Z_i⟩ on every qubit.  ``"first"``: ⟨Z_0⟩ only.
     shots, seed:
@@ -467,9 +482,10 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         with ``shots`` or on any other device.  Or one of ``"adjoint"``,
         ``"parameter-shift"``, ``"backprop"``, ``"finite-diff"``.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` (the
-        same parameter count) or ``"hardware_efficient"`` (a third of it: one
-        ``RY`` angle per qubit per layer); see :func:`apply_variational_layers`.
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"``,
+        ``"rydberg"`` (the same parameter count) or ``"hardware_efficient"``
+        (a third of it: one ``RY`` angle per qubit per layer); see
+        :func:`apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``, the published SHNN readout.

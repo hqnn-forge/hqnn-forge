@@ -346,6 +346,13 @@ class TestReadoutFeatures:
                 2,
                 [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]],
             ),
+            # The same CZ chain followed by Rot, which mixes in Y_i too (⟨Y⟩ = −sin x
+            # under RX): after L layers ⟨Z_i⟩ sees x_{i-L} … x_{i+L} under RX and RY
+            # from the first layer on, the graph ball of neutral_atom_layer
+            ("rydberg", "X", 1, [[0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4], [3, 4]]),
+            ("rydberg", "Y", 1, [[0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4], [3, 4]]),
+            ("rydberg", "X", 2, [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]]),
+            ("rydberg", "Y", 2, [[0, 1, 2], [0, 1, 2, 3], _ALL, [1, 2, 3, 4], [2, 3, 4]]),
             # "Z" sees nothing at any depth and is refused; see TestRotationZIsRefused
         ],
     )

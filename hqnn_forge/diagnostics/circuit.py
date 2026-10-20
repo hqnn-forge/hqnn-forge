@@ -47,6 +47,7 @@ import torch.nn as nn
 
 from hqnn_forge._encoding_contract import CircuitLayer
 from hqnn_forge._resolve import resolve_encoding_layer
+from hqnn_forge.circuits import RYDBERG_BLOCKADE_RADIUS, blockade_schedule, rydberg_chain
 
 #: Gate names a circuit is decomposed to before its resources are counted.
 #: Every gate the library's circuits emit is in here, so the count is of the
@@ -79,7 +80,10 @@ class CircuitSummary:
     n_trainable_params:
         Trainable entries in the layer's weight tensors (``requires_grad``).
     depth:
-        Longest path of gates through the logical circuit.
+        Longest path of gates through the logical circuit.  Gates on disjoint
+        wires count as parallel, so for ``entangler="rydberg"`` this is a lower
+        bound on the device depth: two CZs within the blockade radius of each
+        other cannot run together, see ``n_blockade_layers``.
     n_gates:
         Total gate count after decomposition to ``LOGICAL_GATE_SET`` (with
         ``MultiRZ`` kept only on at most two wires).
@@ -104,6 +108,15 @@ class CircuitSummary:
         The count is of **weight entries** (:func:`count_inert_weights`): an
         entry is inert when every gate parameter it feeds is inert, so it is
         on the same footing as ``n_trainable_params``.
+    n_blockade_layers:
+        For ``entangler="rydberg"``: the parallel CZ/CCZ layers of the whole
+        stack on its atom register, ``n_layers`` times
+        ``len(blockade_schedule(rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS))``.
+        That is ``n_layers · min(3, n_qubits − 1)``
+        (:func:`hqnn_forge.circuits.rydberg_chain`).  The ``Rot`` on every atom
+        between two blocks keeps their gate layers apart, so the per-block
+        counts add.  ``None`` for every other entangler, which has no
+        blockade constraint.
     """
 
     layer_type: str
@@ -116,6 +129,7 @@ class CircuitSummary:
     device_name: str = ""
     diff_method: str = ""
     n_inert_params: int = 0
+    n_blockade_layers: int | None = None
 
     @property
     def n_effective_params(self) -> int:
@@ -142,7 +156,7 @@ class CircuitSummary:
         return d
 
     def __str__(self) -> str:
-        rows = (
+        rows: list[tuple[str, int]] = [
             ("qubits", self.n_qubits),
             ("trainable params", self.n_trainable_params),
             ("inert params", self.n_inert_params),
@@ -150,7 +164,9 @@ class CircuitSummary:
             ("depth", self.depth),
             ("gates", self.n_gates),
             ("two-qubit gates", self.n_two_qubit_gates),
-        )
+        ]
+        if self.n_blockade_layers is not None:
+            rows.append(("blockade layers", self.n_blockade_layers))
         # Gate names are indented two columns further, so they get two less padding
         width = max(
             max(len(label) for label, _ in rows),
@@ -706,7 +722,19 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
         device_name=str(qnode.device.name),
         diff_method=str(qnode.diff_method),
         n_inert_params=n_inert,
+        n_blockade_layers=_blockade_layers(layer, n_qubits),
     )
+
+
+def _blockade_layers(layer: CircuitLayer, n_qubits: int) -> int | None:
+    """``CircuitSummary.n_blockade_layers``: ``None`` unless ``layer.entangler == "rydberg"``."""
+    if getattr(layer, "entangler", None) != "rydberg":
+        return None
+    n_layers = getattr(layer, "n_layers", None)
+    if not isinstance(n_layers, int):
+        raise TypeError(f"{type(layer).__name__} has entangler='rydberg' but no int n_layers.")
+    per_block = blockade_schedule(rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS)
+    return n_layers * len(per_block)
 
 
 def draw_circuit(target: nn.Module, inputs: torch.Tensor | None = None, decimals: int = 2) -> str:

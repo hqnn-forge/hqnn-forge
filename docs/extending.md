@@ -199,8 +199,11 @@ shows a block written inline, and `"strongly_entangling"` one that depends on th
 
 The functions in `hqnn_forge/circuits/` are the per-layer blocks the encoders run:
 `strongly_entangling_layer` is `entangler="ring"` (not `"strongly_entangling"`, which is
-PennyLane's `qml.StronglyEntanglingLayers`) and `hardware_efficient_layer` is
-`entangler="hardware_efficient"`. The block the encoders use is selected by their `entangler`
+PennyLane's `qml.StronglyEntanglingLayers`), `hardware_efficient_layer` is
+`entangler="hardware_efficient"` and `neutral_atom_layer` is `entangler="rydberg"` on the fixed
+register `rydberg_chain(n_qubits)`. A primitive that needs data besides `n_qubits`, such as an
+atom register, has to derive it from `n_qubits` in order to become an `entangler` value: the
+signature below passes nothing else. The block the encoders use is selected by their `entangler`
 argument, so a new ansatz is a new primitive there plus a new `entangler` value; a primitive
 alone has no effect on the models.
 

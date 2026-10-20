@@ -26,6 +26,19 @@ Conventions
   ``i < j < k``; both are sorted lexicographically, and the schedule places
   them in that order, so it is a deterministic function of the positions.
 
+Default register
+----------------
+``entangler="rydberg"`` in the encoders runs this block on a register that
+depends on ``n_qubits`` alone (#418): :func:`rydberg_chain` at
+:data:`RYDBERG_BLOCKADE_RADIUS`, the open chain
+``AtomRegister.chain(n_qubits, RYDBERG_SPACING)``.  With ``a = 6 µm`` and
+``R_b = 8.69 µm``, ``a < R_b ≤ 2a``: neighbours are blockaded
+(``V/Ω = (R_b/a)⁶ = 9.25``) and next-nearest neighbours are not
+(``V/Ω = 0.144``), so the interaction graph is the path
+``0 — 1 — … — n−1`` and has no triangles.  Since the gates are ideal, every
+spacing in ``[R_b/2, R_b)`` gives this graph and so the same circuit.  A
+custom register reaches a circuit only through :func:`neutral_atom_layer`.
+
 The model is purely digital: each gate is the ideal CZ or CCZ, with no pulse,
 no residual interaction and no atom motion.  Pulses and analog evolution live
 in :mod:`hqnn_forge.rydberg`; shuttling atoms between layers is not modelled.
@@ -41,12 +54,30 @@ References
 
 from __future__ import annotations
 
+import math
+
 import pennylane as qml
 import torch
 
+from hqnn_forge.rydberg.hamiltonian import DEFAULT_C6
 from hqnn_forge.rydberg.register import AtomRegister
 
-__all__ = ["blockade_schedule", "neutral_atom_layer"]
+__all__ = [
+    "RYDBERG_BLOCKADE_RADIUS",
+    "RYDBERG_SPACING",
+    "blockade_schedule",
+    "neutral_atom_layer",
+    "rydberg_chain",
+]
+
+#: Blockade radius of ``entangler="rydberg"``, in µm: ``(C6/Ω)^(1/6)`` for
+#: :data:`~hqnn_forge.rydberg.DEFAULT_C6` and the reference ``Ω = 4π rad/µs``
+#: of ``docs/rydberg-model.md``, 8.69 µm.
+RYDBERG_BLOCKADE_RADIUS: float = AtomRegister.blockade_radius(DEFAULT_C6, 4 * math.pi)
+#: Atom spacing of :func:`rydberg_chain`, in µm: inside ``[R_b/2, R_b)``, so
+#: only neighbours interact, and inside the 4 to 15 µm chains
+#: ``docs/rydberg-model.md`` marks as supported.
+RYDBERG_SPACING: float = 6.0
 
 #: A scheduled gate: the atoms of a CZ ``(i, j)`` or a CCZ ``(i, j, k)``.
 Gate = tuple[int, ...]
@@ -188,6 +219,37 @@ def blockade_schedule(
         else:
             layers.append([gate])
     return layers
+
+
+def rydberg_chain(n_qubits: int) -> AtomRegister:
+    """
+    The register of ``entangler="rydberg"``: ``n_qubits`` atoms in an open chain.
+
+    Atom ``i`` sits at ``(i · RYDBERG_SPACING, 0)``.  At
+    :data:`RYDBERG_BLOCKADE_RADIUS` its interaction graph is the path
+    ``(0, 1), (1, 2), …, (n−2, n−1)``, since ``a < R_b ≤ 2a``.
+
+    Schedule.  Two chain CZs ``(i, i+1)`` and ``(j, j+1)``, ``i < j``, are
+    closest at atoms ``i+1`` and ``j``, ``(j − i − 1)·a`` apart.  Rule (*) of
+    :func:`blockade_schedule` lets them share a layer exactly when
+    ``(j − i − 1)·a ≥ R_b``.  With ``a < R_b ≤ 2a`` that means
+    ``j − i − 1 ≥ 2``, i.e. ``j ≥ i + 3``.  The greedy colouring, in edge
+    order, therefore puts edge ``i`` in layer ``i mod 3``.  It needs
+    ``min(3, n − 1)`` layers (none for one atom).  That is the minimum:
+    any three consecutive edges conflict pairwise, and so do all edges when
+    there are fewer than three.
+
+    Raises
+    ------
+    ValueError
+        If ``n_qubits`` is not an integer ``>= 1``.
+
+    Examples
+    --------
+    >>> blockade_schedule(rydberg_chain(5), RYDBERG_BLOCKADE_RADIUS)
+    [[(0, 1), (3, 4)], [(1, 2)], [(2, 3)]]
+    """
+    return AtomRegister.chain(n_qubits, RYDBERG_SPACING)
 
 
 def neutral_atom_layer(

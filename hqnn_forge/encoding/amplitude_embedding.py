@@ -359,7 +359,7 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         methods* above.
     entangler:
         The variational block: ``"ring"`` (default), ``"strongly_entangling"``,
-        ``"brickwork"`` or ``"hardware_efficient"``; see
+        ``"brickwork"``, ``"hardware_efficient"`` or ``"rydberg"``; see
         :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.

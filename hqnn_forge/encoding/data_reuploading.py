@@ -365,8 +365,8 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         first upload, a global phase, unscaled.  Default: ``False``, so the
         parameter count matches the other encoders.
     entangler:
-        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"`` or
-        ``"hardware_efficient"``; see
+        ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"``,
+        ``"hardware_efficient"`` or ``"rydberg"``; see
         :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.

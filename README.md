@@ -400,9 +400,13 @@ Options shared by both models:
   (`qml.StronglyEntanglingLayers`: `Rot` first, then a CNOT ring whose range grows with the
   layer index), `"brickwork"` (nearest-neighbour CNOT pairs without wrap-around, so each
   ⟨Z_i⟩ readout depends on a few neighbouring qubits at shallow depth rather than on all of
-  them) or `"hardware_efficient"` (a nearest-neighbour `CZ` ladder then `RY` on every qubit,
+  them), `"hardware_efficient"` (a nearest-neighbour `CZ` ladder then `RY` on every qubit,
   Kandala et al. 2017: one angle per qubit per layer, so the weights have shape
-  `(n_layers, n_qubits)` instead of `(n_layers, n_qubits, 3)`).
+  `(n_layers, n_qubits)` instead of `(n_layers, n_qubits, 3)`) or `"rydberg"` (the blockade
+  `CZ` gates of a neutral-atom chain, 6 µm apart at a blockade radius of 8.69 µm, in their
+  parallel layers, then `Rot`; `circuit_summary` reports those layers as
+  `n_blockade_layers`. Other atom registers and `CCZ` are available through
+  `hqnn_forge.circuits.neutral_atom_layer`).
 - `readout="all"` (default: ⟨Z_i⟩ on every qubit) or `"first"` (⟨Z_0⟩ only, so the head reads
   a single number).
 - `encoder_activation="tanh"` (default: `tanh(·)·π`, in (-π, π)) or `"sigmoid"`
