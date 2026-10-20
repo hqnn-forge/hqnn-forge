@@ -116,10 +116,11 @@ limits `N` only from above.
   one more approximation to justify.
 - **Blockade radius.** `R_b = (C6/Ω)^(1/6)` is the distance at which two atoms interact with
   `V_ij = Ω`, so `V/Ω = (R_b/a)⁶` and `a = R_b · (V/Ω)^(−1/6)`. At the reference Ω,
-  `R_b = 8.69 µm`. A unit-disk graph at radius `R_b` (the gate-based entangler of #418)
-  connects the pairs with `V_ij > Ω`. A pair at exactly `R_b` has `V_ij = Ω` and lies on the
-  boundary of that graph, as the nearest neighbours do in the `V/Ω = 1` column below; which
-  side it falls on is for #418 to fix, and this model does not depend on it.
+  `R_b = 8.69 µm`. A unit-disk graph at radius `R_b` (`AtomRegister.interaction_graph`, the
+  graph of the gate-based `hqnn_forge.circuits.neutral_atom_layer`) connects the pairs with
+  `V_ij > Ω`. A pair at exactly `R_b` has `V_ij = Ω` and lies on the boundary of that graph,
+  as the nearest neighbours do in the `V/Ω = 1` column below; the graph leaves it out
+  (strict `|r_i − r_j| < R_b`), and this model does not depend on it.
 - **The regime is not fixed: `V/Ω` is swept through the spacing**, from weakly interacting
   through `V ≈ Ω` into the blockade. At the reference Ω:
 

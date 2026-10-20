@@ -652,5 +652,7 @@ APA.
 - Bernien et al. (2017) — *Probing many-body dynamics on a 51-atom quantum simulator*
 - Wurtz et al. (2023) — *Aquila: QuEra's 256-qubit neutral-atom quantum computer*
 - Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
+- Jaksch et al. (2000) — *Fast quantum gates for neutral atoms*
+- Levine et al. (2019) — *Parallel implementation of high-fidelity multiqubit gates with neutral atoms*
 - Fisher (1936) — *The use of multiple measurements in taxonomic problems*
 - Roy & Vetterli (2007) — *The effective rank: a measure of effective dimensionality*

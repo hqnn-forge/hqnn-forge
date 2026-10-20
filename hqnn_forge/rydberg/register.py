@@ -17,8 +17,11 @@ One register serves both ways of using the array:
   ``V_ij > Ω`` exactly when ``|r_i − r_j| < R_b``, that unit-disk graph is the
   set of pairs with ``V_ij > Ω``: the two views are the same geometry.  A
   pair at exactly ``R_b`` has ``V_ij = Ω`` and lies on the boundary of the
-  graph; which side it falls on is for the entangler (#418) to fix, and the
-  register does not decide it.
+  graph.  The convention is strict: it is **not** an edge
+  (:meth:`AtomRegister.interaction_graph`), since ``V_ij > Ω`` is what makes
+  the doubly excited state blockaded.  :meth:`AtomRegister.blockade_triangles`
+  lists the triples pairwise inside ``R_b``, and
+  :func:`hqnn_forge.circuits.blockade_schedule` schedules gates on both.
 
 A register holds positions and nothing else.  The atomic species (``C6``) and
 the drive (Ω) are arguments of the methods that need them.
@@ -310,6 +313,88 @@ class AtomRegister:
         c6 = _finite_number(c6, "c6", positive=True)
         omega = _finite_number(omega, "omega", positive=True)
         return (c6 / omega) ** (1 / 6)
+
+    def _blockaded(self, blockade_radius: float) -> torch.Tensor:
+        """
+        Boolean ``(n_atoms, n_atoms)`` matrix of ``|r_i − r_j| < R_b`` for ``i ≠ j``.
+
+        Compared as ``|r_i − r_j|² < R_b²``, without a square root, so a
+        distance that is exactly ``R_b`` (``5 µm`` against ``R_b = 5``, whose
+        squares are exact in ``float64``) falls outside, as the strict
+        convention says.
+        """
+        radius = _finite_number(blockade_radius, "blockade_radius", positive=True)
+        difference = self._positions[:, None, :] - self._positions[None, :, :]
+        squared = (difference**2).sum(dim=-1)
+        inside = squared < radius**2
+        inside.fill_diagonal_(False)
+        return inside
+
+    def interaction_graph(self, blockade_radius: float) -> list[tuple[int, int]]:
+        """
+        The edges of the unit-disk graph at radius ``R_b``: every pair with ``|r_i − r_j| < R_b``.
+
+        These are the pairs a blockade CZ can couple.  The comparison is
+        **strict**: a pair exactly ``R_b`` apart has ``V_ij = C6 / R_b⁶ = Ω``
+        (:meth:`blockade_radius`), the edge of the blockade, not inside it, so
+        it is not an edge.  Equivalently, the edges are the pairs with
+        ``V_ij > Ω`` for ``R_b = (C6/Ω)^(1/6)``.
+
+        Parameters
+        ----------
+        blockade_radius:
+            ``R_b`` in µm, a finite number ``> 0``; for instance
+            ``AtomRegister.blockade_radius(c6, omega)``.
+
+        Returns
+        -------
+        list of tuple of int
+            The edges ``(i, j)`` with ``i < j``, sorted lexicographically.
+            Atom indices are the rows of :attr:`positions` and the PennyLane
+            wires of the gate-based circuits.
+
+        Raises
+        ------
+        ValueError
+            If ``blockade_radius`` is not a finite number ``> 0``.
+
+        Examples
+        --------
+        >>> AtomRegister.chain(3, spacing=5.0).interaction_graph(6.0)
+        [(0, 1), (1, 2)]
+        """
+        inside = torch.triu(self._blockaded(blockade_radius), diagonal=1)
+        return [(int(i), int(j)) for i, j in inside.nonzero().tolist()]
+
+    def blockade_triangles(self, blockade_radius: float) -> list[tuple[int, int, int]]:
+        """
+        The triangles of :meth:`interaction_graph`: triples of atoms pairwise closer than ``R_b``.
+
+        Three atoms that blockade each other pairwise support a native CCZ
+        (Levine et al. 2019, PRL 123, 170503).  The same strict ``< R_b``
+        convention applies to each of the three pairs.
+
+        Returns
+        -------
+        list of tuple of int
+            The triples ``(i, j, k)`` with ``i < j < k``, sorted
+            lexicographically.
+
+        Raises
+        ------
+        ValueError
+            If ``blockade_radius`` is not a finite number ``> 0``.
+        """
+        inside = self._blockaded(blockade_radius).tolist()
+        n = self.n_atoms
+        return [
+            (i, j, k)
+            for i in range(n)
+            for j in range(i + 1, n)
+            if inside[i][j]
+            for k in range(j + 1, n)
+            if inside[i][k] and inside[j][k]
+        ]
 
     def __repr__(self) -> str:
         return f"AtomRegister(positions={self._positions.tolist()})"
