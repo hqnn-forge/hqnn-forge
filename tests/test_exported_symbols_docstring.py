@@ -13,6 +13,7 @@ import importlib
 import pkgutil
 import re
 from collections import Counter
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,8 @@ import hqnn_forge
 
 HEADING = "Exported symbols"
 IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+ENTRY_SEPARATOR = re.compile(r"\s{2,}")
+UNDERLINE_CHARACTERS = frozenset("-=~^`:#*+_'\"")
 
 
 def public_packages() -> list[str]:
@@ -32,18 +35,36 @@ def public_packages() -> list[str]:
     return ["hqnn_forge", *subpackages]
 
 
+def is_underline(line: str) -> bool:
+    """Return whether a non-empty line consists of one repeated RST character."""
+    stripped = line.strip()
+    return (
+        bool(stripped)
+        and stripped[0] in UNDERLINE_CHARACTERS
+        and all(character == stripped[0] for character in stripped)
+    )
+
+
+def is_entry(line: str) -> bool:
+    """Return whether a line begins with a valid symbol entry."""
+    stripped = line.strip()
+    head = ENTRY_SEPARATOR.split(stripped, maxsplit=1)[0]
+    return all(IDENTIFIER.fullmatch(part.strip()) for part in head.split(","))
+
+
 def listed_symbols(doc: str, owner: str) -> dict[str, list[int]]:
     """Return each documented symbol and the line numbers where it occurs.
 
-    An entry starts at column 0 with one name, or several separated by commas,
+    Entries start at column 0 with one name, or several separated by commas,
     optionally followed by two or more spaces and a description. Descriptions
-    that wrap onto additional lines must use indented continuation lines.
-    Indented lines before the first entry are rejected.
+    may continue on indented lines immediately after an entry or another
+    continuation line.
 
-    A group heading ends in a colon and is followed by a blank line. Parsing
-    stops at the next underlined section heading. Blank lines and the initial
-    underline below ``Exported symbols`` are skipped. Any other malformed
-    entry raises an assertion instead of being guessed at.
+    Group headings end in a colon and are followed by a blank line. Lines
+    with a name/description separator are always entries. Parsing stops at
+    the next underlined section heading, whose underline must be at least as
+    long as its title. Other underline-like lines and malformed entries
+    raise an assertion.
     """
     lines = doc.splitlines()
     start = next(
@@ -54,6 +75,7 @@ def listed_symbols(doc: str, owner: str) -> dict[str, list[int]]:
         raise AssertionError(f"{owner}: the docstring has no {HEADING!r} section")
 
     names: dict[str, list[int]] = {}
+    can_continue = False
 
     for index in range(start + 1, len(lines)):
         line = lines[index]
@@ -61,41 +83,59 @@ def listed_symbols(doc: str, owner: str) -> dict[str, list[int]]:
         stripped = line.strip()
 
         if not stripped:
+            can_continue = False
             continue
 
         # Skip the underline belonging to the Exported symbols heading.
-        if index == start + 1 and set(stripped) in ({"-"}, {"="}):
+        if index == start + 1 and is_underline(line):
             continue
 
-        # Stop before a subsequent section heading and its underline.
-        if (
-            index > start + 1
-            and index + 1 < len(lines)
-            and set(lines[index + 1].strip()) in ({"-"}, {"="})
-        ):
-            break
+        # Stop at a real section heading, but never mistake an entry for one.
+        if index + 1 < len(lines) and is_underline(lines[index + 1]):
+            underline = lines[index + 1].strip()
+            if len(underline) >= len(stripped) and not ENTRY_SEPARATOR.search(stripped):
+                break
 
-        if set(stripped) in ({"-"}, {"="}):
-            break
+        if is_underline(line):
+            raise AssertionError(f"{owner}: unexpected underline on line {number}: {line!r}")
 
         if line[0].isspace():
-            if not names:
+            if not can_continue:
                 raise AssertionError(
-                    f"{owner}: unexpected indented line {number} before the first entry: {line!r}"
+                    f"{owner}: unexpected indented line {number}; "
+                    f"a continuation must immediately follow an entry "
+                    f"or another continuation: {line!r}"
                 )
             continue
 
-        # A colon denotes a group heading only when followed by a blank line.
-        if stripped.endswith(":") and index + 1 < len(lines) and not lines[index + 1].strip():
-            continue
+        has_entry_separator = bool(ENTRY_SEPARATOR.search(stripped))
 
-        head = re.split(r"\s{2,}", stripped, maxsplit=1)[0]
+        # Recognize group headings without swallowing malformed entries.
+        # The next nonblank line may be a valid entry or an indented line;
+        # the latter will be rejected when the parser reaches it.
+        if stripped.endswith(":") and not has_entry_separator:
+            next_index = index + 1
+            while next_index < len(lines) and not lines[next_index].strip():
+                next_index += 1
+
+            has_blank_after = index + 1 < len(lines) and not lines[index + 1].strip()
+            has_following_content = next_index < len(lines) and (
+                lines[next_index][0].isspace() or is_entry(lines[next_index])
+            )
+
+            if has_blank_after and has_following_content:
+                can_continue = False
+                continue
+
+        head = ENTRY_SEPARATOR.split(stripped, maxsplit=1)[0]
         for name in (part.strip() for part in head.split(",")):
             if not IDENTIFIER.fullmatch(name):
                 raise AssertionError(
                     f"{owner}: cannot read an entry from line {number} of the docstring: {line!r}"
                 )
             names.setdefault(name, []).append(number)
+
+        can_continue = True
 
     return names
 
@@ -144,6 +184,9 @@ def assert_docstring_lists_exactly_all(
 @pytest.mark.parametrize("package", public_packages())
 def test_docstring_lists_exactly_all(package: str) -> None:
     module = importlib.import_module(package)
+    assert hasattr(module, "__all__"), (
+        f"{package} has no __all__; every public package must define its exports"
+    )
     assert_docstring_lists_exactly_all(
         module.__doc__ or "",
         list(module.__all__),
@@ -162,6 +205,7 @@ SECTION = "Exported symbols\n----------------\n"
         ("Alpha\n    description below\n", {"Alpha"}),
         ("Alpha, Beta, Gamma\n    one description\n", {"Alpha", "Beta", "Gamma"}),
         ("Group:\n\nAlpha  one\n\nMore things:\n\nBeta  two\n", {"Alpha", "Beta"}),
+        ("Alpha  built from:\n\nBeta  two\n", {"Alpha", "Beta"}),
     ],
 )
 def test_the_parser_reads_every_entry_layout(
@@ -196,14 +240,56 @@ def test_the_parser_records_duplicate_symbol_occurrences() -> None:
     assert listed_symbols(doc, "pkg") == {"Alpha": [3, 4]}
 
 
+def test_an_indented_line_after_a_group_heading_raises() -> None:
+    doc = SECTION + "Beta  b\n\nGroup:\n\n    Alpha  one\n"
+    with pytest.raises(AssertionError, match="unexpected indented line"):
+        listed_symbols(doc, "pkg")
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        SECTION + "Alpha  a\nBeta  b\n-----\nGamma  c\n",
+        SECTION + "Alpha  a\n----\n",
+        SECTION + "Alpha  a\n~~~~~\n",
+        SECTION + "Alpha  a\nNotes\n---\nBeta  b\n",
+    ],
+)
+def test_unexpected_underline_like_lines_raise(doc: str) -> None:
+    with pytest.raises(AssertionError, match="unexpected underline"):
+        listed_symbols(doc, "pkg")
+
+
+def test_a_section_title_with_a_long_enough_underline_stops_parsing() -> None:
+    doc = SECTION + "Alpha  a\nNotes\n-----\nBeta  b\n"
+    assert listed_symbols(doc, "pkg") == {"Alpha": [3]}
+
+
+def test_a_module_without_all_has_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda _package: SimpleNamespace(__doc__=SECTION),
+    )
+    with pytest.raises(AssertionError, match=r"sample_package has no __all__"):
+        module = importlib.import_module("sample_package")
+        assert hasattr(module, "__all__"), (
+            "sample_package has no __all__; every public package must define its exports"
+        )
+
+
 @pytest.mark.parametrize(
     ("doc", "message"),
     [
         ("Intro.\n", "no 'Exported symbols' section"),
         (SECTION + "Alpha one space only\n", "cannot read an entry from line 3"),
-        (SECTION + "    Alpha\n", "indented line 3 before the first entry"),
+        (SECTION + "    Alpha\n", "unexpected indented line 3"),
         (
             SECTION + "Alpha the one-space entry, built from:\n",
+            "cannot read an entry from line 3",
+        ),
+        (
+            SECTION + "Alpha the one-space entry, built from:\n\n",
             "cannot read an entry from line 3",
         ),
     ],
