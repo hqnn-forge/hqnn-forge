@@ -392,7 +392,7 @@ LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "foca
 
 
 def _positive_integer(value: Any) -> bool:
-    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and value >= 1
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and not value < 1
 
 
 def _positive_real(value: Any) -> bool:
@@ -400,7 +400,7 @@ def _positive_real(value: Any) -> bool:
         isinstance(value, numbers.Real)
         and not isinstance(value, bool)
         and math.isfinite(value)
-        and value > 0
+        and not value <= 0
     )
 
 
@@ -578,7 +578,9 @@ class Settings:
         for key, values in self.search_space.items():
             predicate, bound = TRAINING_SETTING_RULES[key]
             if not all(predicate(value) for value in values):
-                raise ValueError(f"search_space['{key}'] must hold {bound}; got {list(values)!r}.")
+                raise ValueError(
+                    f"search_space['{key}'] values must be {bound}; got {list(values)!r}."
+                )
 
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(

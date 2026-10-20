@@ -414,91 +414,91 @@ class TestGrid:
             (dict(patience=True), "patience must be >= 1 or None; got True."),
             (
                 dict(search_space={"batch_size": (32, 0)}),
-                "search_space['batch_size'] must hold >= 1; got [32, 0].",
+                "search_space['batch_size'] values must be >= 1; got [32, 0].",
             ),
             (
                 dict(search_space={"batch_size": (None,)}),
-                "search_space['batch_size'] must hold >= 1; got [None].",
+                "search_space['batch_size'] values must be >= 1; got [None].",
             ),
             (
                 dict(search_space={"batch_size": ("64",)}),
-                "search_space['batch_size'] must hold >= 1; got ['64'].",
+                "search_space['batch_size'] values must be >= 1; got ['64'].",
             ),
             (
                 dict(search_space={"lr": (0.01, 0.0)}),
-                "search_space['lr'] must hold finite and > 0; got [0.01, 0.0].",
+                "search_space['lr'] values must be finite and > 0; got [0.01, 0.0].",
             ),
             (
                 dict(search_space={"lr": (-0.1,)}),
-                "search_space['lr'] must hold finite and > 0; got [-0.1].",
+                "search_space['lr'] values must be finite and > 0; got [-0.1].",
             ),
             (
                 dict(search_space={"lr": (0.01, math.inf)}),
-                "search_space['lr'] must hold finite and > 0; got [0.01, inf].",
+                "search_space['lr'] values must be finite and > 0; got [0.01, inf].",
             ),
             (
                 dict(search_space={"lr": (True,)}),
-                "search_space['lr'] must hold finite and > 0; got [True].",
+                "search_space['lr'] values must be finite and > 0; got [True].",
             ),
             (
                 dict(search_space={"lr": (None,)}),
-                "search_space['lr'] must hold finite and > 0; got [None].",
+                "search_space['lr'] values must be finite and > 0; got [None].",
             ),
             (
                 dict(search_space={"lr": ("0.01",)}),
-                "search_space['lr'] must hold finite and > 0; got ['0.01'].",
+                "search_space['lr'] values must be finite and > 0; got ['0.01'].",
             ),
             (
                 dict(search_space={"max_epochs": (0,)}),
-                "search_space['max_epochs'] must hold >= 1; got [0].",
+                "search_space['max_epochs'] values must be >= 1; got [0].",
             ),
             (
                 dict(search_space={"max_epochs": (None,)}),
-                "search_space['max_epochs'] must hold >= 1; got [None].",
+                "search_space['max_epochs'] values must be >= 1; got [None].",
             ),
             (
                 dict(search_space={"max_epochs": ("64",)}),
-                "search_space['max_epochs'] must hold >= 1; got ['64'].",
+                "search_space['max_epochs'] values must be >= 1; got ['64'].",
             ),
             (
                 dict(search_space={"max_epochs": (10, -1)}),
-                "search_space['max_epochs'] must hold >= 1; got [10, -1].",
+                "search_space['max_epochs'] values must be >= 1; got [10, -1].",
             ),
             (
                 dict(search_space={"max_epochs": (True,)}),
-                "search_space['max_epochs'] must hold >= 1; got [True].",
+                "search_space['max_epochs'] values must be >= 1; got [True].",
             ),
             (
                 dict(search_space={"patience": (0,)}),
-                "search_space['patience'] must hold >= 1 or None; got [0].",
+                "search_space['patience'] values must be >= 1 or None; got [0].",
             ),
             (
                 dict(search_space={"patience": (5, -3, None)}),
-                "search_space['patience'] must hold >= 1 or None; got [5, -3, None].",
+                "search_space['patience'] values must be >= 1 or None; got [5, -3, None].",
             ),
             (
                 dict(search_space={"max_epochs": (math.nan,)}),
-                "search_space['max_epochs'] must hold >= 1; got [nan].",
+                "search_space['max_epochs'] values must be >= 1; got [nan].",
             ),
             (
                 dict(search_space={"max_epochs": (2.5,)}),
-                "search_space['max_epochs'] must hold >= 1; got [2.5].",
+                "search_space['max_epochs'] values must be >= 1; got [2.5].",
             ),
             (
                 dict(search_space={"batch_size": (math.nan,)}),
-                "search_space['batch_size'] must hold >= 1; got [nan].",
+                "search_space['batch_size'] values must be >= 1; got [nan].",
             ),
             (
                 dict(search_space={"batch_size": (2.5,)}),
-                "search_space['batch_size'] must hold >= 1; got [2.5].",
+                "search_space['batch_size'] values must be >= 1; got [2.5].",
             ),
             (
                 dict(search_space={"patience": (math.nan,)}),
-                "search_space['patience'] must hold >= 1 or None; got [nan].",
+                "search_space['patience'] values must be >= 1 or None; got [nan].",
             ),
             (
                 dict(search_space={"patience": (2.5,)}),
-                "search_space['patience'] must hold >= 1 or None; got [2.5].",
+                "search_space['patience'] values must be >= 1 or None; got [2.5].",
             ),
         ],
     )
@@ -1121,7 +1121,7 @@ class TestCommandLine:
             out.mkdir()
             (out / "earlier.jsonl").write_text("an earlier run\n", encoding="utf-8")
         else:
-            if os.name != "posix" or os.geteuid() == 0:
+            if os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0:
                 pytest.skip("root writes to a read-only file")
             out, reason = tmp_path / "results.jsonl", "Permission denied"
             out.write_text("an earlier run\n", encoding="utf-8")
