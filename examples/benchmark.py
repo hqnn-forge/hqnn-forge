@@ -1,3 +1,4 @@
+from hqnn_forge.noise import validate_noise
 """
 examples/benchmark.py
 =====================
@@ -79,6 +80,12 @@ def main(argv: list[str] | None = None) -> None:
         "--record", help="write an experiment record (JSON) for reproducing the run here"
     )
     args = parser.parse_args(argv)
+    if args.noise is not None:
+        for p in args.noise:
+            try:
+                validate_noise(p, "all", p_name="--noise")
+            except ValueError as exc:
+                parser.error(str(exc))
 
     if args.max_rows < 2:
         parser.error("--max-rows must be at least 2")
