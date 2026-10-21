@@ -89,7 +89,9 @@ import torch.nn.functional as F
 from hqnn_forge.evaluation.thresholds import _validate_scores
 
 __all__ = [
+    "CalibrationFitError",
     "MulticlassTemperatureScaler",
+    "NoFiniteFitError",
     "PlattScaler",
     "TemperatureScaler",
     "brier_score",
@@ -101,6 +103,13 @@ __all__ = [
 ]
 
 BinStrategy = Literal["uniform", "quantile"]
+
+
+class CalibrationFitError(ValueError):
+    """Raised when post-hoc calibration has no finite fit."""
+
+
+NoFiniteFitError = CalibrationFitError
 
 
 def _pair(y_true: object, prob: object) -> tuple[torch.Tensor, torch.Tensor]:
@@ -243,10 +252,15 @@ def classwise_ece(
 def _logit_pair(logits: object, y_true: object) -> tuple[torch.Tensor, torch.Tensor]:
     z = torch.as_tensor(logits).detach().reshape(-1).cpu().to(torch.float64)
     if not torch.isfinite(z).all():
-        raise ValueError("logits must be finite.")
-    y, _ = _pair(y_true, torch.sigmoid(z))
+        raise CalibrationFitError("logits must be finite.")
+    try:
+        y, _ = _pair(y_true, torch.sigmoid(z))
+    except ValueError as exc:
+        if "only 0/1 labels" in str(exc):
+            raise CalibrationFitError(str(exc)) from exc
+        raise
     if torch.unique(y).numel() < 2:
-        raise ValueError("fitting a calibration needs both classes in y_true.")
+        raise CalibrationFitError("fitting a calibration needs both classes in y_true.")
     return z, y
 
 
@@ -291,12 +305,12 @@ class TemperatureScaler:
         z, y = _logit_pair(logits, y_true)
         margin = (2 * y - 1) * z
         if margin.sum() <= 0:
-            raise ValueError(
+            raise CalibrationFitError(
                 "the logits rank no better than chance (sum of signed margins <= 0), so the "
                 "NLL falls as the temperature grows without bound; there is no finite fit."
             )
         if not (margin < 0).any():
-            raise ValueError(
+            raise CalibrationFitError(
                 "the logits separate the classes at 0, so the NLL falls as the temperature "
                 "shrinks to 0; there is no finite fit."
             )
@@ -329,7 +343,7 @@ class PlattScaler:
         z, y = _logit_pair(logits, y_true)
         neg, pos = z[y == 0], z[y == 1]
         if neg.max() <= pos.min() or pos.max() <= neg.min():
-            raise ValueError(
+            raise CalibrationFitError(
                 "a threshold on the logits separates the classes, so the NLL falls as |a| "
                 "grows without bound; there is no finite fit."
             )
@@ -369,19 +383,26 @@ class MulticlassTemperatureScaler:
         if z.ndim != 2 or z.shape[1] < 2:
             raise ValueError(f"logits must have shape (n, K) with K ≥ 2; got {tuple(z.shape)}.")
         if not torch.isfinite(z).all():
-            raise ValueError("logits must be finite.")
-        y = _class_labels(y_true, "logits", z.shape[0], z.shape[1])
+            raise CalibrationFitError("logits must be finite.")
+        try:
+            y = _class_labels(y_true, "logits", z.shape[0], z.shape[1])
+        except ValueError as exc:
+            if "integer class labels" in str(exc):
+                raise CalibrationFitError(str(exc)) from exc
+            raise
         if torch.unique(y).numel() < 2:
-            raise ValueError("fitting a calibration needs at least two classes in y_true.")
+            raise CalibrationFitError(
+                "fitting a calibration needs at least two classes in y_true."
+            )
         true = z.gather(1, y[:, None]).squeeze(1)
         if (true - z.mean(1)).sum() <= 0:
-            raise ValueError(
+            raise CalibrationFitError(
                 "the logits rank the true class no better than chance (sum of true-class "
                 "logits minus row means <= 0), so the NLL falls as the temperature grows "
                 "without bound; there is no finite fit."
             )
         if not (true < z.max(1).values).any():
-            raise ValueError(
+            raise CalibrationFitError(
                 "every true class has the top logit, so the NLL falls as the temperature "
                 "shrinks to 0; there is no finite fit."
             )

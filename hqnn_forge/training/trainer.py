@@ -48,6 +48,7 @@ from hqnn_forge.evaluation import (
     TemperatureScaler,
     find_optimal_threshold,
 )
+from hqnn_forge.evaluation.calibration import CalibrationFitError
 from hqnn_forge.training.spsa import SPSA
 from hqnn_forge.utils.modes import _modes, _restore, eval_mode, train_mode
 
@@ -434,7 +435,7 @@ def _validation_temperature(
         return None
     try:
         return TemperatureScaler.fit(logits, y_v).temperature
-    except ValueError:
+    except CalibrationFitError:
         # Soft targets, one class, non-finite logits or a split the logits
         # separate (no finite temperature) all train fine; they just have no
         # temperature to report, so the finished run must not fail here.
