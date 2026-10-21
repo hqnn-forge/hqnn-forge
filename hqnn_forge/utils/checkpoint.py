@@ -438,6 +438,29 @@ def load_checkpoint(
             f"checkpoint config does not match {class_name}'s constructor: {'; '.join(details)}."
         )
 
+    # Only binary checkpoints saved before #404 can legitimately hold a dropout_p
+    # outside [0, 1); for the other classes such a file was edited or is corrupt.
+    # dropout_p is weight-safe, so name the override that loads it.  An override
+    # is the caller's own value and is left to the constructor's message.
+    # Lazy for the same reason as in _registry.
+    from hqnn_forge.models._trunk import validate_dropout_p
+
+    dropout_p = config.get("dropout_p")
+    if (
+        "dropout_p" not in overrides
+        and isinstance(dropout_p, (int, float))
+        and not isinstance(dropout_p, bool)
+    ):
+        try:
+            validate_dropout_p(dropout_p)
+        except ValueError:
+            raise ValueError(
+                f"checkpoint holds dropout_p={dropout_p}, outside [0, 1), which "
+                f"{class_name} does not accept.  dropout_p only acts in training and "
+                f"does not touch the weights, so load it with "
+                f"load_checkpoint(path, dropout_p=0.0); a negative value trained with "
+                f"no dropout, so 0.0 rebuilds that model exactly."
+            ) from None
     # The constructor's weight draw is overwritten below, so a warning about
     # it (a toy size whose restricted init restricts nothing) is noise here.
     with _not_restricting_ignored():

@@ -28,15 +28,19 @@ What the numbers are checked against:
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
 import math
 import os
 import re
+import socket
 import sys
 import warnings
+from concurrent.futures import Future
 from pathlib import Path
+from threading import Thread
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -107,9 +111,10 @@ def _fold_by_hand(X: np.ndarray, y: np.ndarray, settings: Any, dataset_index: in
     tr, va = stratified_kfold(y[train_part], settings.validation_folds, random_state=inner_seed)[0]
     train_idx, val_idx = train_part[tr], train_part[va]
 
-    mean, std = X[train_part].mean(0), X[train_part].std(0)
-    std[std == 0] = 1.0
-    scaled = (X - mean) / std
+    # Step 2's constant rule is that of ``standardise_features`` (#580),
+    # tested on its own; the run's inputs are compared exactly, so the same
+    # rounding is needed here.
+    scaled = bench.standardise_features(X, train_part)
     pca = PCANormalizer(n_components=settings.n_atoms, scale_to_pi=True).fit(scaled[train_part])
     inputs = pca.transform(scaled).double().numpy()
     oversampled = smote(inputs[train_idx], y[train_idx], random_state=smote_seed)
@@ -394,47 +399,116 @@ class TestGrid:
                 dict(n_atoms=11, arms=("A", "D")),
                 "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 11.",
             ),
+            (dict(max_epochs=math.nan), "max_epochs must be >= 1; got nan."),
+            (dict(batch_size=math.nan), "batch_size must be >= 1; got nan."),
+            (dict(patience=math.nan), "patience must be >= 1 or None; got nan."),
+            (dict(batch_size=2.5), "batch_size must be >= 1; got 2.5."),
+            (dict(batch_size=True), "batch_size must be >= 1; got True."),
             (dict(batch_size=0), "batch_size must be >= 1; got 0."),
             (dict(batch_size=-4, n_trials=0), "batch_size must be >= 1; got -4."),
+            (dict(batch_size=None), "batch_size must be >= 1; got None."),
+            (dict(batch_size="64"), "batch_size must be >= 1; got '64'."),
             (dict(lr=0.0), "lr must be finite and > 0; got 0.0."),
             (dict(lr=-0.01, n_trials=0), "lr must be finite and > 0; got -0.01."),
             (dict(lr=math.nan), "lr must be finite and > 0; got nan."),
             (dict(lr=math.inf), "lr must be finite and > 0; got inf."),
+            (dict(lr=True), "lr must be finite and > 0; got True."),
+            (dict(lr=None), "lr must be finite and > 0; got None."),
+            (dict(lr="0.01"), "lr must be finite and > 0; got '0.01'."),
+            (dict(max_epochs=None), "max_epochs must be >= 1; got None."),
+            (dict(max_epochs="64"), "max_epochs must be >= 1; got '64'."),
+            (dict(max_epochs=2.5), "max_epochs must be >= 1; got 2.5."),
+            (dict(max_epochs=True), "max_epochs must be >= 1; got True."),
+            (dict(patience=0), "patience must be >= 1 or None; got 0."),
+            (dict(patience=2.5), "patience must be >= 1 or None; got 2.5."),
+            (dict(patience=True), "patience must be >= 1 or None; got True."),
             (
                 dict(search_space={"batch_size": (32, 0)}),
-                "search_space['batch_size'] must hold values >= 1; got [32, 0].",
+                "search_space['batch_size'] values must be >= 1; got [32, 0].",
             ),
             (
-                dict(search_space={"lr": (0.01, 0.0), "batch_size": (32,)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, 0.0].",
+                dict(search_space={"batch_size": (None,)}),
+                "search_space['batch_size'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"batch_size": ("64",)}),
+                "search_space['batch_size'] values must be >= 1; got ['64'].",
+            ),
+            (
+                dict(search_space={"lr": (0.01, 0.0)}),
+                "search_space['lr'] values must be finite and > 0; got [0.01, 0.0].",
             ),
             (
                 dict(search_space={"lr": (-0.1,)}),
-                "search_space['lr'] must hold finite values > 0; got [-0.1].",
+                "search_space['lr'] values must be finite and > 0; got [-0.1].",
             ),
             (
                 dict(search_space={"lr": (0.01, math.inf)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, inf].",
+                "search_space['lr'] values must be finite and > 0; got [0.01, inf].",
+            ),
+            (
+                dict(search_space={"lr": (True,)}),
+                "search_space['lr'] values must be finite and > 0; got [True].",
+            ),
+            (
+                dict(search_space={"lr": (None,)}),
+                "search_space['lr'] values must be finite and > 0; got [None].",
+            ),
+            (
+                dict(search_space={"lr": ("0.01",)}),
+                "search_space['lr'] values must be finite and > 0; got ['0.01'].",
             ),
             (
                 dict(search_space={"max_epochs": (0,)}),
-                "search_space['max_epochs'] must hold values >= 1; got [0].",
+                "search_space['max_epochs'] values must be >= 1; got [0].",
+            ),
+            (
+                dict(search_space={"max_epochs": (None,)}),
+                "search_space['max_epochs'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"max_epochs": ("64",)}),
+                "search_space['max_epochs'] values must be >= 1; got ['64'].",
             ),
             (
                 dict(search_space={"max_epochs": (10, -1)}),
-                "search_space['max_epochs'] must hold values >= 1; got [10, -1].",
+                "search_space['max_epochs'] values must be >= 1; got [10, -1].",
             ),
             (
-                dict(search_space={"max_epochs": (None, 50)}),
-                "search_space['max_epochs'] must hold values >= 1; got [None, 50].",
+                dict(search_space={"max_epochs": (True,)}),
+                "search_space['max_epochs'] values must be >= 1; got [True].",
             ),
             (
                 dict(search_space={"patience": (0,)}),
-                "search_space['patience'] must hold values >= 1 or None; got [0].",
+                "search_space['patience'] values must be >= 1 or None; got [0].",
             ),
             (
                 dict(search_space={"patience": (5, -3, None)}),
-                "search_space['patience'] must hold values >= 1 or None; got [5, -3, None].",
+                "search_space['patience'] values must be >= 1 or None; got [5, -3, None].",
+            ),
+            (
+                dict(search_space={"max_epochs": (math.nan,)}),
+                "search_space['max_epochs'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"max_epochs": (2.5,)}),
+                "search_space['max_epochs'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"batch_size": (math.nan,)}),
+                "search_space['batch_size'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"batch_size": (2.5,)}),
+                "search_space['batch_size'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"patience": (math.nan,)}),
+                "search_space['patience'] values must be >= 1 or None; got [nan].",
+            ),
+            (
+                dict(search_space={"patience": (2.5,)}),
+                "search_space['patience'] values must be >= 1 or None; got [2.5].",
             ),
         ],
     )
@@ -462,6 +536,27 @@ class TestGrid:
         settings = bench.Settings(search_space=space)
         for key, expected in space.items():
             assert settings.search_space[key] == expected
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("max_epochs", np.int64(10)),
+            ("batch_size", np.int64(32)),
+            ("patience", np.int64(5)),
+            ("lr", np.float32(0.01)),
+        ],
+    )
+    @pytest.mark.parametrize("as_search_space", [False, True])
+    def test_numpy_numeric_training_settings_are_accepted(
+        self, key: str, value: Any, as_search_space: bool
+    ) -> None:
+        """NumPy integer and real scalars are valid training-setting values."""
+        if as_search_space:
+            settings = bench.Settings(search_space={key: (value,)})
+            assert settings.search_space[key] == (value,)
+        else:
+            settings = bench.Settings(**{key: value})
+            assert getattr(settings, key) == value
 
     def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
         """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
@@ -955,6 +1050,243 @@ class TestUciData:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def probe_prefixes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the prefix of each temporary file the writability probe creates."""
+    prefixes: list[str] = []
+    temporary_file = bench.tempfile.NamedTemporaryFile
+
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        prefixes.append(kwargs["prefix"])
+        return temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
+    return prefixes
+
+
+class TestCheckWritable:
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="named pipes require POSIX")
+    def test_a_fifo_probe_returns_without_a_reader(self, tmp_path: Path) -> None:
+        """Exercise the real probe, with a deadline even if it starts opening the FIFO."""
+        out = tmp_path / "log"
+        os.mkfifo(out)
+        result: Future[None] = Future()
+
+        def check() -> None:
+            try:
+                bench.check_writable(out)
+            except BaseException as error:  # noqa: BLE001 - re-raise in the test thread
+                result.set_exception(error)
+            else:
+                result.set_result(None)
+
+        worker = Thread(target=check, daemon=True)
+        worker.start()
+        try:
+            result.result(timeout=2)
+        finally:
+            if not result.done():
+                # Release a writer blocked by a regression so it cannot leak into later tests.
+                reader = os.open(out, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    worker.join(timeout=2)
+                finally:
+                    os.close(reader)
+            else:
+                worker.join(timeout=2)
+        assert not worker.is_alive()
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="named pipes require POSIX")
+    @pytest.mark.parametrize("symlink", [False, True])
+    @pytest.mark.parametrize("writable", [False, True])
+    @pytest.mark.parametrize("effective_ids", [False, True])
+    def test_a_fifo_is_checked_without_opening_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        symlink: bool,
+        writable: bool,
+        effective_ids: bool,
+    ) -> None:
+        """#625: opening a FIFO without a reader would hang instead of failing the test."""
+        fifo = tmp_path / "log"
+        os.mkfifo(fifo)
+        out = fifo
+        if symlink:
+            out = tmp_path / "link"
+            out.symlink_to(fifo)
+
+        def refuse_open(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("the writability probe opened a FIFO")
+
+        access: list[tuple[Path, int, bool]] = []
+
+        def can_write(path: Path, mode: int, *, effective_ids: bool) -> bool:
+            access.append((path, mode, effective_ids))
+            return writable
+
+        monkeypatch.setattr(bench, "open", refuse_open, raising=False)
+        monkeypatch.setattr(bench.os, "access", can_write)
+        monkeypatch.setattr(
+            bench.os, "supports_effective_ids", {can_write} if effective_ids else set()
+        )
+        if writable:
+            bench.check_writable(out)
+        else:
+            message = f"out {str(out)!r} cannot be written: {os.strerror(errno.EACCES)}."
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                bench.check_writable(out)
+        assert access == [(out, os.W_OK, effective_ids)]
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="Unix sockets require POSIX")
+    def test_a_socket_is_refused_before_any_dataset_is_loaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out = tmp_path / "socket"
+        loaded = TestCommandLine._spy_on_loading(monkeypatch)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(out))
+            out.chmod(0o666)
+            message = f"out {str(out)!r} cannot be written:"
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}"):
+                bench.main(["--quick", "--out", str(out), "--no-cache"])
+        assert loaded == []
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="requires a POSIX null device")
+    def test_a_device_is_checked_without_opening_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse_open(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("the writability probe opened a device")
+
+        monkeypatch.setattr(bench, "open", refuse_open, raising=False)
+        bench.check_writable(os.devnull)
+
+    @pytest.mark.may_skip
+    def test_a_250_byte_filename_is_accepted(self, tmp_path: Path) -> None:
+        out = tmp_path / ("a" * 250)
+        # Verify that this filesystem supports the name before testing the probe.
+        try:
+            out.touch()
+        except OSError as error:
+            if error.errno == errno.ENAMETOOLONG:
+                pytest.skip("the filesystem does not support a 250-byte basename")
+            raise
+        out.unlink()
+        bench.check_writable(out)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("name", ["a" * 15, "a" * 16, "a" * 17, "é" * 9])
+    def test_the_filename_limit_counts_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        calls: list[tuple[Path, str]] = []
+
+        def pathconf(path: Path, key: str) -> int:
+            calls.append((path, key))
+            return 16
+
+        monkeypatch.setattr(bench.os, "pathconf", pathconf, raising=False)
+        out = tmp_path / name
+        if len(os.fsencode(name)) <= 16:
+            bench.check_writable(out)
+        else:
+            message = f"out {str(out)!r} cannot be written: {os.strerror(errno.ENAMETOOLONG)}."
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                bench.check_writable(out)
+        assert calls == [(tmp_path, "PC_NAME_MAX")]
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("name", "prefix"),
+        [("log", ".log."), ("a" * 6, "." + "a" * 6 + "."), ("a" * 7, ".out."), ("é" * 4, ".out.")],
+    )
+    def test_the_probe_keeps_the_basename_when_it_fits(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        name: str,
+        prefix: str,
+    ) -> None:
+        monkeypatch.setattr(bench.os, "pathconf", lambda path, key: 16, raising=False)
+        bench.check_writable(tmp_path / name)
+        assert probe_prefixes == [prefix]
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "limit", [None, OSError(errno.EIO, "unsupported"), ValueError(), -1, 0]
+    )
+    def test_an_unavailable_filename_limit_still_probes_the_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        limit: Exception | int | None,
+    ) -> None:
+        def pathconf(path: Path, key: str) -> int:
+            if isinstance(limit, Exception):
+                raise limit
+            assert isinstance(limit, int)
+            return limit
+
+        if limit is None:
+            monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        else:
+            monkeypatch.setattr(bench.os, "pathconf", pathconf, raising=False)
+        bench.check_writable(tmp_path / "new.jsonl")
+        assert probe_prefixes == [".new.jsonl."]
+        assert list(tmp_path.iterdir()) == []
+        with pytest.raises(ValueError, match="cannot be written"):
+            bench.check_writable(tmp_path / "missing" / "new.jsonl")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("name", "prefix"),
+        [
+            ("a" * 250, ".out."),
+            # An unpaired surrogate must not crash the measurement.
+            ("x\udc80" + "a" * 240, "." + "x\udc80" + "a" * 240 + "."),
+        ],
+    )
+    def test_windows_without_pathconf_limits_names_to_255_utf16_units(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        name: str,
+        prefix: str,
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        bench.check_writable(tmp_path / name)
+        assert probe_prefixes == [prefix]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_windows_measures_names_in_utf16_code_units(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        # 250 UTF-16 code units, although 500 bytes in UTF-8.
+        assert bench._filename_length("é" * 250) == 250
+        assert bench._filename_length("\U0001f600" * 100) == 200
+        assert bench._filename_length("x\udc80") == 2
+
+    def test_windows_without_pathconf_refuses_a_name_over_255_utf16_units(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_prefixes: list[str]
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        out = tmp_path / ("a" * 256)
+        message = f"out {str(out)!r} cannot be written: {os.strerror(errno.ENAMETOOLONG)}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.check_writable(out)
+        assert probe_prefixes == []
+        assert list(tmp_path.iterdir()) == []
+
+
 class TestCommandLine:
     @pytest.mark.parametrize(
         ("flags", "match"),
@@ -1387,11 +1719,13 @@ class TestInputs:
 
     def test_inputs_are_standardised_components_squashed_to_pi(self) -> None:
         """By hand: standardise, project on the leading eigenvectors, ``π tanh(· / std)``."""
+        from sklearn.preprocessing import StandardScaler
+
         X, _ = self._data()
         rows = np.arange(0, 90)
-        mean, std = X[rows].mean(0), X[rows].std(0)
-        std[std == 0] = 1.0
-        scaled = (X - mean) / std
+        # ``StandardScaler`` has the constant rule of ``standardise_features``
+        # (#580): a variance within its rounding bound is only centred.
+        scaled = StandardScaler().fit(X[rows]).transform(X)
         centred = scaled[rows] - scaled[rows].mean(0)
         values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
         leading = vectors[:, np.argsort(values)[::-1][:4]]
@@ -1399,6 +1733,75 @@ class TestInputs:
         projected = (scaled - scaled[rows].mean(0)) @ leading
         by_hand = math.pi * np.tanh(projected / projected[rows].std(0, ddof=1))
         np.testing.assert_allclose(bench.preprocess(X, rows, 4), by_hand, rtol=0, atol=2e-6)
+
+    def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
+        """
+        A raw column constant on the fitting rows up to rounding enters no component (#580).
+
+        Column 3 holds ``1.5`` and its float64 neighbour ``1.5 + 2⁻⁵²``, the
+        values a sum that is 1.5 in exact arithmetic leaves after rounding,
+        written out so they depend on no random stream or summation order:
+        a σ of about ``1e-16``, not 0, and a variance (about ``1e-32``) below
+        the rounding bound of :func:`standardise_features`
+        (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
+        The other three columns, standardised, span a plane plus a direction
+        of variance ``2.4e-5``, so with three components the third is that
+        small direction.  The rounding noise, scaled to unit variance by the
+        ``σ == 0`` rule, would take that slot instead: an independent column
+        of variance 1 against ``2.4e-5``.
+
+        Expected value by hand: the columns scaled by scikit-learn's
+        ``StandardScaler`` (which centres the rounding column only), then the
+        principal components with ``numpy.linalg.eigh``.  It must also equal
+        :func:`preprocess` on the three other columns alone.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X = np.column_stack([a, b, a + b + 0.01 * rng.standard_normal(200), rounding])
+        rows = np.arange(150)
+        # The premise: σ is not 0 (so ``σ == 0`` scales it), but the column is
+        # constant to scikit-learn as well.
+        assert 0 < X[rows, 3].std() < 1e-15
+        assert StandardScaler().fit(X[rows]).scale_[3] == 1.0
+
+        scaled = StandardScaler().fit(X[rows]).transform(X)
+        centred = scaled[rows] - scaled[rows].mean(0)
+        values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
+        leading = vectors[:, np.argsort(values)[::-1][:3]]
+        leading = leading * np.sign(leading[np.abs(leading).argmax(0), np.arange(3)])
+        assert np.abs(leading[3]).max() < 1e-12  # the column loads on no component
+        projected = (scaled - scaled[rows].mean(0)) @ leading
+        # ``PCANormalizer`` adds 1e-8 to each component's σ; on the third,
+        # σ ≈ 4.9e-3, that is a relative 2e-6, above the float32 tolerance.
+        by_hand = math.pi * np.tanh(projected / (projected[rows].std(0, ddof=1) + 1e-8))
+
+        inputs = bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(inputs, by_hand, rtol=0, atol=2e-6)
+        np.testing.assert_allclose(inputs, bench.preprocess(X[:, :3], rows, 3), rtol=0, atol=2e-6)
+
+    def test_a_column_constant_up_to_rounding_adds_no_rank(self) -> None:
+        """
+        Only centred, such a column adds nothing to the centred rank (#580).
+
+        Two independent columns and one of ``1.5`` and ``1.5 + 2⁻⁵²`` have
+        centred rank 2, so three components are refused rather than filled
+        with the rounding noise, which the ``σ == 0`` rule scaled to unit
+        variance and took as the third input.  Two components still work.
+        """
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X = np.column_stack([a, b, rounding])
+        rows = np.arange(150)
+        assert 0 < X[rows, 2].std() < 1e-15
+        with pytest.raises(ValueError, match=r"rank 2 < n_components=3"):
+            bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(
+            bench.preprocess(X, rows, 2), bench.preprocess(X[:, :2], rows, 2), rtol=0, atol=2e-6
+        )
 
     def test_split_blocks_and_synthetic_rows(self) -> None:
         X, y = self._data()
@@ -1535,6 +1938,108 @@ class TestCache:
         assert second.seconds == first.seconds > 0
         assert len(list((tmp_path / "cache").glob("*.npz"))) == 1
         assert not list((tmp_path / "cache").glob("*.part"))
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "empty",
+            "invalid",
+            "missing_features",
+            "missing_environment",
+            "invalid_seconds",
+            "non_object_environment",
+        ],
+    )
+    def test_unreadable_cache_entries_are_recomputed(
+        self, tmp_path: Path, corruption: str
+    ) -> None:
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        cache = bench.FeatureCache(tmp_path)
+        first_path = cache.path(self.inputs, self.labels, config)
+        assert first_path is not None
+
+        # Create a valid entry, then damage it.
+        cache.fetch(self.inputs, self.labels, config, compute)
+        if corruption == "empty":
+            first_path.write_bytes(b"")
+        elif corruption == "invalid":
+            first_path.write_bytes(b"not a valid npz archive")
+        elif corruption == "missing_features":
+            np.savez(
+                first_path,
+                seconds=np.float64(1.0),
+                environment=np.array(json.dumps(cache.environment)),
+            )
+        elif corruption == "invalid_seconds":
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.array([1.0, 2.0]),
+                environment=np.array(json.dumps(cache.environment)),
+            )
+        elif corruption == "non_object_environment":
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.float64(1.0),
+                environment=np.array("[1]"),
+            )
+        else:
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.float64(1.0),
+            )
+
+        with pytest.warns(RuntimeWarning, match="unreadable"):
+            recovered = cache.fetch(self.inputs, self.labels, config, compute)
+
+        assert recovered.hit is False
+        assert calls == [12, 12]
+
+        np.testing.assert_array_equal(
+            recovered.features,
+            _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs),
+        )
+
+        again = cache.fetch(self.inputs, self.labels, config, compute)
+        assert again.hit is True
+        assert calls == [12, 12]
+        np.testing.assert_array_equal(again.features, recovered.features)
+
+    def test_cache_disappearing_during_load_is_recomputed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        cache = bench.FeatureCache(tmp_path)
+        cache.fetch(self.inputs, self.labels, config, compute)
+
+        original_load = bench.np.load
+        disappeared = False
+
+        def load_with_disappearance(file: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal disappeared
+            if not disappeared:
+                disappeared = True
+                raise FileNotFoundError("simulated cache removal during load")
+            return original_load(file, *args, **kwargs)
+
+        monkeypatch.setattr(bench.np, "load", load_with_disappearance)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            recovered = cache.fetch(self.inputs, self.labels, config, compute)
+
+        assert recovered.hit is False
+        assert calls == [12, 12]
+        monkeypatch.setattr(bench.np, "load", original_load)
+        assert cache.fetch(self.inputs, self.labels, config, compute).hit is True
+        assert calls == [12, 12]
+        np.testing.assert_array_equal(
+            recovered.features,
+            _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs),
+        )
 
     def test_a_change_of_the_data_is_a_miss(self, tmp_path: Path) -> None:
         compute, calls = self._counting()
@@ -1977,6 +2482,213 @@ class TestCache:
         for line, record in zip(bench.read_records(tmp_path / "b.jsonl"), second, strict=True):
             assert line["tuning"] == record["tuning"]
 
+    def test_prune_removes_entries_under_another_code_digest_and_keeps_current_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """Pruning deletes entries of other code and leaves current entries intact (#575)."""
+        compute, _ = self._counting()
+        config1 = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        config2 = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
+
+        # One entry written under other code digest, one written under current code
+        other_code = "0" * 64
+        cache_other = bench.FeatureCache(tmp_path, code_sha256=other_code)
+        entry_other = cache_other.fetch(self.inputs, self.labels, config1, compute)
+        assert entry_other.hit is False
+
+        cache_current = bench.FeatureCache(tmp_path)
+        entry_current = cache_current.fetch(self.inputs, self.labels, config2, compute)
+        assert entry_current.hit is False
+
+        entries_before = list(tmp_path.glob("*.npz"))
+        assert len(entries_before) == 2
+        path_other = cache_other.path(self.inputs, self.labels, config1)
+        path_current = cache_current.path(self.inputs, self.labels, config2)
+        assert path_other is not None and path_current is not None
+        stale_size = path_other.stat().st_size
+
+        report = cache_current.prune()
+        assert report.files == 1
+        assert report.bytes == stale_size
+        assert report.unreadable == ()
+
+        assert not path_other.exists()
+        assert path_current.exists()
+
+        # The kept entry is still a hit
+        hit = cache_current.fetch(self.inputs, self.labels, config2, compute)
+        assert hit.hit is True
+        np.testing.assert_array_equal(hit.features, entry_current.features)
+
+    def test_prune_removes_entries_under_another_environment(self, tmp_path: Path) -> None:
+        """Pruning deletes entries whose key_environment differs (#575)."""
+        compute, _ = self._counting()
+        config1 = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        config2 = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
+
+        env = environment()
+        other_env = {**env, "packages": {**env["packages"], "torch": "0.0.0+other"}}
+        cache_other = bench.FeatureCache(tmp_path, env=other_env)
+        cache_other.fetch(self.inputs, self.labels, config1, compute)
+
+        cache_current = bench.FeatureCache(tmp_path)
+        cache_current.fetch(self.inputs, self.labels, config2, compute)
+
+        path_other = cache_other.path(self.inputs, self.labels, config1)
+        path_current = cache_current.path(self.inputs, self.labels, config2)
+        assert path_other is not None and path_current is not None
+        stale_size = path_other.stat().st_size
+
+        report = cache_current.prune()
+        assert report.files == 1
+        assert report.bytes == stale_size
+        assert not path_other.exists()
+        assert path_current.exists()
+
+        hit = cache_current.fetch(self.inputs, self.labels, config2, compute)
+        assert hit.hit is True
+
+    def test_prune_preserves_entries_whose_platform_alone_differs(self, tmp_path: Path) -> None:
+        """Entries from another platform share key_environment and are preserved (#575)."""
+        compute, _ = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+
+        env = environment()
+        elsewhere = {**env, "platform": "Elsewhere-1.0-riscv64"}
+        cache_elsewhere = bench.FeatureCache(tmp_path, env=elsewhere)
+        entry = cache_elsewhere.fetch(self.inputs, self.labels, config, compute)
+        assert entry.hit is False
+
+        cache_current = bench.FeatureCache(tmp_path)
+        path = cache_current.path(self.inputs, self.labels, config)
+        assert path is not None and path.exists()
+
+        report = cache_current.prune()
+        assert report.files == 0
+        assert report.bytes == 0
+        assert report.unreadable == ()
+        assert path.exists()
+
+        # The entry is still a hit for the running process
+        hit = cache_current.fetch(self.inputs, self.labels, config, compute)
+        assert hit.hit is True
+
+    def test_prune_leaves_unreadable_legacy_and_partial_files_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Files that cannot be read as valid entries are reported, not removed (#575)."""
+        compute, _ = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        cache = bench.FeatureCache(tmp_path)
+        cache.fetch(self.inputs, self.labels, config, compute)
+
+        # Legacy entry without code_sha256 or environment (pre-#543)
+        legacy_path = tmp_path / "legacy.npz"
+        np.savez(legacy_path, features=np.full((12, 4), 1.0), seconds=np.float64(0.5))
+
+        # Partial file
+        part_path = tmp_path / "in_flight.part"
+        part_path.write_bytes(b"partial content")
+
+        # Corrupt npz file
+        corrupt_path = tmp_path / "corrupt.npz"
+        corrupt_path.write_bytes(b"not a valid zip file")
+
+        # Zero-byte npz file
+        empty_npz_path = tmp_path / "empty.npz"
+        empty_npz_path.touch()
+
+        # Non-npz file
+        txt_path = tmp_path / "notes.txt"
+        txt_path.write_bytes(b"some notes")
+
+        report = cache.prune()
+        assert report.files == 0
+        assert report.bytes == 0
+        assert set(report.unreadable) == {
+            legacy_path,
+            part_path,
+            corrupt_path,
+            empty_npz_path,
+            txt_path,
+        }
+
+        # All files still exist
+        assert legacy_path.exists()
+        assert part_path.exists()
+        assert corrupt_path.exists()
+        assert empty_npz_path.exists()
+        assert txt_path.exists()
+        assert cache.fetch(self.inputs, self.labels, config, compute).hit is True
+
+    def test_prune_empty_or_nonexistent_or_disabled_directory(self, tmp_path: Path) -> None:
+        """prune() handles None, nonexistent, or empty directories cleanly (#575)."""
+        assert bench.FeatureCache(None).prune() == bench.PruneReport(0, 0, ())
+        assert bench.FeatureCache(tmp_path / "empty").prune() == bench.PruneReport(0, 0, ())
+        cache_missing = bench.FeatureCache(tmp_path / "missing")
+        (tmp_path / "missing").rmdir()
+        assert cache_missing.prune() == bench.PruneReport(0, 0, ())
+
+    def test_prune_removes_stale_entry_with_obsolete_environment_schema(
+        self, tmp_path: Path
+    ) -> None:
+        """Entries under another code digest are pruned even with an obsolete environment (#575)."""
+        cache = bench.FeatureCache(tmp_path)
+        stale_path = tmp_path / "stale_obsolete.npz"
+        np.savez(
+            stale_path,
+            features=np.full((12, 4), 1.0),
+            seconds=np.float64(0.5),
+            code_sha256=np.array("0" * 64),
+            environment=np.array(json.dumps({"obsolete_schema": True})),
+        )
+        report = cache.prune()
+        assert report.files == 1
+        assert not stale_path.exists()
+        assert report.unreadable == ()
+
+    def test_prune_cli_option(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """--prune-cache removes stale entries and exits without running the benchmark (#575)."""
+        compute, _ = self._counting()
+        config_stale = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        config_current = {"config": _map_by_hand(4, 3.0, 0.0, 1).get_config()}
+        cache_dir = tmp_path / "cache"
+
+        # Stale entry under another code digest
+        cache_other = bench.FeatureCache(cache_dir, code_sha256="1" * 64)
+        cache_other.fetch(self.inputs, self.labels, config_stale, compute)
+        path_stale = cache_other.path(self.inputs, self.labels, config_stale)
+        assert path_stale is not None and path_stale.exists()
+        stale_size = path_stale.stat().st_size
+
+        # Current valid entry
+        cache_current = bench.FeatureCache(cache_dir)
+        cache_current.fetch(self.inputs, self.labels, config_current, compute)
+        path_current = cache_current.path(self.inputs, self.labels, config_current)
+        assert path_current is not None and path_current.exists()
+
+        assert len(list(cache_dir.glob("*.npz"))) == 2
+
+        out_file = tmp_path / "out.jsonl"
+        records = bench.main(
+            ["--quick", "--prune-cache", "--cache-dir", str(cache_dir), "--out", str(out_file)]
+        )
+
+        assert records == []
+        assert not out_file.exists()
+        assert not path_stale.exists()
+        assert path_current.exists()
+        assert cache_current.fetch(self.inputs, self.labels, config_current, compute).hit is True
+
+        captured = capsys.readouterr().out
+        assert f"pruned cache ({cache_dir}): removed 1 file ({stale_size} bytes)" in captured
+        assert "wrote" not in captured
+
+    def test_prune_cli_conflicts_with_no_cache(self, tmp_path: Path) -> None:
+        """--prune-cache cannot be combined with --no-cache (#575)."""
+        with pytest.raises(SystemExit):
+            bench.main(["--no-cache", "--prune-cache", "--out", str(tmp_path / "out.jsonl")])
+
 
 # ---------------------------------------------------------------------------
 # Standardising a feature matrix (#518)
@@ -2242,20 +2954,38 @@ class TestStandardisationInARun:
         Each call fits on the first rows of its split's training block, as
         many as the split has real training rows (counted here from the
         folds rebuilt by hand): no synthetic, validation or test row.  Arm C
-        is standardised too; ``D-hybrid`` never is.
+        is standardised too; ``D-hybrid`` never is.  :func:`preprocess`
+        standardises the raw columns with the same function (step 2, #580):
+        its calls are told apart by a flag it sets, and fit on the outer
+        fold's training part and on each tuning fold's fitting rows.
         """
         calls: list[tuple[int, np.ndarray]] = []
+        raw_calls: list[np.ndarray] = []
+        in_preprocess = False
         original = bench.standardise_features
+        original_preprocess = bench.preprocess
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
-            calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
+            if in_preprocess:
+                raw_calls.append(np.asarray(fit_rows))
+            else:
+                calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
             return original(features, fit_rows)
 
-        monkeypatch.setattr(bench, "standardise_features", spy)
+        def preprocess_spy(X: Any, fit_rows: np.ndarray, n_components: int) -> Any:
+            nonlocal in_preprocess
+            in_preprocess = True
+            try:
+                return original_preprocess(X, fit_rows, n_components)
+            finally:
+                in_preprocess = False
+
         settings = _replace(QUICK, arms=("A", "C"))
         X, y, _ = bench.load_dataset("positive-control", settings)
+        fold = _fold_by_hand(X, y, settings, 0)  # before the spies: it standardises too
+        monkeypatch.setattr(bench, "standardise_features", spy)
+        monkeypatch.setattr(bench, "preprocess", preprocess_spy)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
-        fold = _fold_by_hand(X, y, settings, 0)
         n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
         inner = stratified_kfold(
             y[fold.train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
@@ -2267,11 +2997,18 @@ class TestStandardisationInARun:
         assert [(n, rows.size) for n, rows in calls] == expected * 2  # arm A, then arm C
         for _, rows in calls:
             np.testing.assert_array_equal(rows, np.arange(rows.size))
+        expected_raw = [fold.train_part] + [fold.train_part[fit] for fit, _ in inner]
+        assert len(raw_calls) == len(expected_raw)
+        for rows, want in zip(raw_calls, expected_raw, strict=True):
+            np.testing.assert_array_equal(rows, want)
 
         calls.clear()
+        raw_calls.clear()
         settings = _replace(QUICK, arms=("D",), n_trials=0, max_epochs=1)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
         assert [(n, rows.size) for n, rows in calls] == [(n_outer, fold.train_idx.size)]
+        assert len(raw_calls) == 1
+        np.testing.assert_array_equal(raw_calls[0], fold.train_part)
 
     def test_the_cache_holds_the_features_as_returned_and_serves_either_setting(
         self, tmp_path: Path
@@ -3239,6 +3976,95 @@ class TestArmBReuse:
             assert r1["separation"] == r2["separation"]
             assert r1["hyperparameters"] == r2["hyperparameters"]
 
+    def test_a_reused_line_records_the_cache_hit_of_its_source_line(self, tmp_path: Path) -> None:
+        """
+        A reused arm B line fetches nothing itself: its ``feature_cache_hit``,
+        like its ``feature_environment`` and the hits of its tuning folds, is
+        that of the line it was taken from, as the module docstring states
+        (#541).  Cold cache: ``False`` on both; warm: ``True`` on both.
+        """
+        rng = np.random.RandomState(7)
+        data = {"positive-control": (rng.randn(40, 2), np.array([0, 1] * 20), 0)}
+        settings = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=2,
+            n_splits=2,
+            n_steps=10,
+            v_over_omega=(0.5, 1.0),
+            gamma_over_omega=(0.1,),
+        )
+        cache = tmp_path / "cache"
+        for name, hit in (("cold", False), ("warm", True)):
+            records = bench.run(data, settings, tmp_path / f"{name}.jsonl", cache_dir=cache)
+            source = [r for r in records if r["reused_from_v_over_omega"] is None]
+            reused = [r for r in records if r["reused_from_v_over_omega"] == 0.5]
+            assert len(source) == len(reused) == 2  # two heads, one fold
+            for first, again in zip(source, reused, strict=True):
+                assert first["v_over_omega"] == 0.5 and again["v_over_omega"] == 1.0
+                assert first["feature_cache_hit"] is again["feature_cache_hit"] is hit
+                assert again["feature_environment"] == first["feature_environment"]
+                assert again["tuning"]["feature_cache_hits"] == [hit] * settings.inner_folds
+        # entries for the 0.5 register only: the fold and its tuning folds
+        assert len(list(cache.iterdir())) == 1 + settings.inner_folds
+
+
+class TestSummary:
+    @staticmethod
+    def _line(v: float | None, arm: str, feature: float, train: float, **extra: Any) -> dict:
+        return {
+            "dataset": "positive-control",
+            "v_over_omega": v,
+            "gamma_over_omega": None if v is None else 0.1,
+            "arm": arm,
+            "head": "linear",
+            "mcc": 0.5,
+            "pr_auc": 0.6,
+            "feature_dim": 2,
+            "n_parameters": 3,
+            "feature_seconds": feature,
+            "train_seconds": train,
+            **extra,
+        }
+
+    def _row(self, table: str, v: str, arm: str) -> list[str]:
+        (row,) = [
+            line.split()
+            for line in table.splitlines()[1:]
+            if line.split()[1] == v and line.split()[3] == arm
+        ]
+        return row
+
+    def test_reused_lines_show_no_time_and_are_left_out_of_the_mean(self) -> None:
+        """
+        ``feat s`` and ``fit s`` are means over the lines that were computed:
+        a group of reused arm B lines only prints ``-`` (#541), and the zero
+        timings of reused lines do not lower the mean of a group that also
+        has computed ones.  Lines without the field (an older file) count as
+        computed.
+        """
+        records = [
+            self._line(0.5, "B", 2.0, 0.5, reused_from_v_over_omega=None),
+            self._line(0.5, "B", 4.0, 1.5, reused_from_v_over_omega=None),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "A", 3.0, 0.25, reused_from_v_over_omega=None),
+            # a group with one computed and one reused line
+            self._line(2.0, "B", 6.0, 1.0, reused_from_v_over_omega=None),
+            self._line(2.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(None, "C", 0.0, 0.75),
+        ]
+        table = bench.summarise(records)
+        # columns: ..., dim, params, feat s, fit s, n
+        assert self._row(table, "0.5", "B")[-3:] == ["3.00", "1.00", "2"]
+        assert self._row(table, "1", "B")[-3:] == ["-", "-", "2"]
+        assert self._row(table, "1", "A")[-3:] == ["3.00", "0.25", "1"]
+        assert self._row(table, "2", "B")[-3:] == ["6.00", "1.00", "2"]
+        assert self._row(table, "-", "C")[-3:] == ["0.00", "0.75", "1"]
+        widths = {len(line) for line in table.splitlines()[1:]}
+        assert len(widths) == 1  # a "-" keeps the columns aligned
+
 
 class TestSeparationSubsamplingIntegration:
     def test_parser_options(self) -> None:
@@ -3251,13 +4077,67 @@ class TestSeparationSubsamplingIntegration:
         args_zero = parser.parse_args(["--max-separation-rows", "0"])
         assert args_zero.max_separation_rows == 0
 
-    def test_settings_validates_max_separation_rows(self) -> None:
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 2"):
-            bench.Settings(max_separation_rows=2)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 0"):
-            bench.Settings(max_separation_rows=0)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got -10"):
-            bench.Settings(max_separation_rows=-10)
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [
+            (2, "2"),
+            (0, "0"),
+            (-10, "-10"),
+            (30.0, "30.0"),
+            (30.5, "30.5"),
+            (True, "True"),
+            ("2000", "'2000'"),
+        ],
+    )
+    def test_settings_validates_max_separation_rows(self, value: Any, shown: str) -> None:
+        """An integer ``>= 3`` or ``None``; a float, a bool or a string is refused (#541)."""
+        message = rf"^max_separation_rows must be an integer >= 3 or None; got {shown}\.$"
+        with pytest.raises(ValueError, match=message):
+            bench.Settings(max_separation_rows=value)
+
+    def test_settings_accepts_an_integer_max_separation_rows(self) -> None:
+        assert bench.Settings(max_separation_rows=3).max_separation_rows == 3
+        assert bench.Settings(max_separation_rows=np.int64(500)).max_separation_rows == 500
+        assert bench.Settings(max_separation_rows=None).max_separation_rows is None
+
+    @pytest.mark.parametrize("value", ["1", "2", "-1", "-2000"])
+    def test_the_command_line_refuses_a_limit_below_three_other_than_zero(
+        self,
+        value: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """
+        ``0`` is the one spelling of "no limit"; 1, 2 and a negative value end
+        in an argparse error naming the option, before anything runs (#541).
+        """
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("the run must not start")
+
+        monkeypatch.setattr(bench, "run", run)
+        for quick in ([], ["--quick"]):
+            with pytest.raises(SystemExit) as raised:
+                bench.main(
+                    [*quick, "--max-separation-rows", value, "--out", str(tmp_path / "o.jsonl")]
+                )
+            assert raised.value.code == 2
+            error = capsys.readouterr().err.splitlines()[-1]
+            assert error.endswith(
+                "error: argument --max-separation-rows: must be 0 (no limit) or an integer "
+                f">= 3; got {value}"
+            )
+
+    def test_the_help_text_names_the_spelling_of_no_limit(self) -> None:
+        parser = bench._parser()
+        (action,) = [a for a in parser._actions if "--max-separation-rows" in a.option_strings]
+        assert action.help == (
+            "rows of a training or test part above which its separation measures are computed "
+            "on a class-stratified subsample of that many rows: an integer >= 3, or 0 for no "
+            "limit"
+        )
+        assert action.default == 2000
 
     def test_quick_respects_separation_flags(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

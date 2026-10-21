@@ -60,3 +60,21 @@ def test_dim_zero_is_the_layer_index() -> None:
 def test_unknown_entangler() -> None:
     with pytest.raises(ValueError, match="entangler must be"):
         variational_weight_shape("ladder", 3, 2)  # type: ignore[arg-type]
+
+
+# n_qubits=4 differs from the Rot dim 3, so a swapped axis is caught.
+EXPECTED_SHAPES: dict[Entangler, tuple[int, ...]] = {
+    "ring": (2, 4, 3),
+    "strongly_entangling": (2, 4, 3),
+    "brickwork": (2, 4, 3),
+    "hardware_efficient": (2, 4),
+}
+
+
+def test_expected_shapes_cover_every_entangler() -> None:
+    assert set(EXPECTED_SHAPES) == set(ENTANGLERS)
+
+
+@pytest.mark.parametrize(("entangler", "expected_shape"), EXPECTED_SHAPES.items())
+def test_shapes_for_each_entangler(entangler: Entangler, expected_shape: tuple[int, ...]) -> None:
+    assert variational_weight_shape(entangler, 4, 2) == expected_shape

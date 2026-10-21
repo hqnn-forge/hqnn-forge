@@ -358,7 +358,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stratified subsampling, exported as `stratified_subsample_indices` from
   `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
   `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
-  dephasing rate and fold (#519, #520)
+  dephasing rate and fold. The limit is on by default at 2000 rows: a training or test part
+  above 2000 rows records its `separation` from a subsample, a smaller part is measured in
+  full (#519, #520)
 - `examples/benchmark_rydberg_features.py` standardises each head's features per fold, with the
   mean and standard deviation of the fold's real training rows (never synthetic, validation or
   test rows), for arms A, B, C and D alike (not `D-hybrid`), so that a score under strong
@@ -374,6 +376,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `run_benchmark` reports a cross-dataset Wilcoxon comparison of mean MCCs, its
   rank-biserial effect and attainable p-value floor, and Holm-adjusted per-dataset
   p-values in the records and CSV; experiment records retain the comparison (#597)
+- `--prune-cache` on `examples/benchmark_rydberg_features.py` and `FeatureCache.prune`:
+  removes cache entries computed under another code digest or key environment and
+  reports the removed files and bytes, leaving unreadable, legacy and partial files
+  untouched (#575, #618)
 
 ### Changed
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
@@ -517,14 +523,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
   smoke-test configuration on the positive control and ignores conflicting grid, model,
   dataset-selection, and training options (#563)
+- `kernel_target_alignment` accepts array-like labels such as a NumPy array or pandas Series
+  (#539)
+- `HybridBinaryClassifier` and `ParallelHybridClassifier` reject `dropout_p` outside `[0, 1)`
+  with the same message as `MulticlassHybridClassifier`, before any layer is built. A
+  checkpoint saved with such a value no longer loads as is; `load_checkpoint` names the fix,
+  `load_checkpoint(path, dropout_p=0.0)`. `ClassicalBaseline` now words its `dropout_p` error
+  the same way (#651)
 
 ### Fixed
+- `examples/benchmark_rydberg_features.py`: `check_writable()` applies Windows' limit of 255
+  UTF-16 code units per filename when `os.pathconf` is unavailable, so a long output
+  filename is refused, or probed with a short prefix, instead of failing (#650, #657)
+- `examples/benchmark_rydberg_features.py` treats a feature cache entry it cannot read (empty, truncated, missing a field, or removed while being read) as a miss: it warns, recomputes the features and replaces the entry, instead of stopping the run (#621, #631)
 - Circuit diagnostics (`circuit_summary`, `draw_circuit`, `count_inert_parameters`) no
   longer fail on PennyLane 0.46 development builds, where `qml.transforms.decompose` stopped
   accepting a tape (#623)
 - `examples/does_the_quantum_layer_help.py` now reuses the rounding-aware
   feature standardisation so near-constant columns are centred rather than
   incorrectly scaled to unit variance (#604)
+- `examples/benchmark_rydberg_features.py`: the summary's `feat s` and `fit s` columns average
+  only the lines that were computed, so a row of reused arm B lines shows `-` instead of
+  `0.00`; `--max-separation-rows` 1, 2 or a negative value ends in a command-line error
+  instead of a traceback or no limit, and `0` is the one spelling of no limit; the docstring
+  states that a reused line's `feature_cache_hit` is that of its source line (#541, #607)
+- `separation_measures` and `stratified_subsample_indices` refuse a `max_rows` that is a
+  float, a bool or a string with a `ValueError` naming it, where they failed late or took
+  `True` for one row, and so does `max_separation_rows` of the Rydberg benchmark's
+  `Settings`; with fewer rows than classes, ties between equally large classes go to the
+  lower label on every NumPy; both docstrings state that a small class can be left with one
+  row and what that does to the measures. `stratified_subset` of `examples/benchmark.py`
+  uses `stratified_subsample_indices`, so it keeps exactly `--max-rows` rows and every class
+  (the rows of the credit-card data at the default are unchanged) (#541, #607)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
@@ -619,6 +649,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--patience` ends in a command-line error), and a dataset name outside `DATASETS` raises a
   `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
   (#540, #605, #606)
+- `examples/benchmark_rydberg_features.py`: checking `--out` no longer opens FIFOs or
+  devices, and valid long output filenames are accepted without making the temporary
+  probe name too long (#628)
+- `examples/benchmark_rydberg_features.py`: `preprocess` standardises the raw columns with
+  `standardise_features`, so a column constant on the fitting rows up to rounding (σ of a few
+  ulp, not exactly 0) is only centred instead of scaled to unit variance, where its rounding
+  noise could take a principal component. Inputs, and so every arm's scores, change only on
+  datasets with such a column. Such a column no longer adds to the centred rank either, so on
+  a dataset where it was what lifted the rank to `n_atoms`, `PCANormalizer.fit` now raises
+  `centred data has rank r < n_components` and the run stops, where it used to take the
+  rounding noise as an input (#580, #600)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
