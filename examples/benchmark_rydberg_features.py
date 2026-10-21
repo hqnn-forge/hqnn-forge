@@ -2297,8 +2297,8 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     ``train_seconds`` of the lines that were computed: a reused arm B line
     (``reused_from_v_over_omega`` not ``null``) has both at 0 and is left
     out, and a row whose lines are all reused shows ``-``.  The cost of arm B
-    is therefore in the row of the ``V/Ω`` it was computed at, the first of
-    the grid.
+    is therefore in the row of the ``V/Ω`` it was computed at: the first
+    value given to ``--v-over-omega``, which need not be the smallest.
     """
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for record in records:

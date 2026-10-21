@@ -52,11 +52,16 @@ def stratified_subset(
     present), in their original order; all rows if there are no more than
     ``max_rows``.  These are the rows the per-class rounding
     ``round(max_rows · share)`` it replaces (#541) drew with the same seed
-    whenever that rounding kept ``max_rows`` rows and both classes, as on
+    whenever that rounding kept ``max_rows`` rows and both classes and the
+    two quotas ``max_rows · share`` did not both end in exactly ½, as on
     the credit-card data (492 frauds in 284,807 rows) at ``--max-rows``
-    1000, 5000, 20,000 (the default) and 50,000.
+    1000, 5000, 20,000 (the default) and 50,000.  On such a tie ``round``
+    went to the even count, the quotas go to the lower label: classes of
+    5 and 3 rows at ``max_rows=4`` kept 2 and 2 and now keep 3 and 1.
     """
     keep = stratified_subsample_indices(y, max_rows, seed=seed)
+    if keep.size == y.size:
+        return X, y
     return X[keep], y[keep]
 
 

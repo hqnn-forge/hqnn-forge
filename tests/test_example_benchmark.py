@@ -100,4 +100,10 @@ class TestStratifiedSubset:
     def test_a_small_dataset_is_kept_whole(self) -> None:
         X, y = _data([8, 2])
         X_sub, y_sub = example.stratified_subset(X, y, 10)
-        assert np.array_equal(X_sub, X) and np.array_equal(y_sub, y)
+        assert X_sub is X and y_sub is y
+
+    def test_a_tie_goes_to_the_lower_label(self) -> None:
+        """Quotas 2.5 and 1.5: the old rounding kept 2 and 2, the quotas give class 0 the row."""
+        X, y = _data([5, 3])
+        _, y_sub = example.stratified_subset(X, y, 4)
+        assert np.bincount(y_sub).tolist() == [3, 1]
