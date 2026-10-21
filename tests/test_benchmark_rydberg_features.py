@@ -3926,6 +3926,95 @@ class TestArmBReuse:
             assert r1["separation"] == r2["separation"]
             assert r1["hyperparameters"] == r2["hyperparameters"]
 
+    def test_a_reused_line_records_the_cache_hit_of_its_source_line(self, tmp_path: Path) -> None:
+        """
+        A reused arm B line fetches nothing itself: its ``feature_cache_hit``,
+        like its ``feature_environment`` and the hits of its tuning folds, is
+        that of the line it was taken from, as the module docstring states
+        (#541).  Cold cache: ``False`` on both; warm: ``True`` on both.
+        """
+        rng = np.random.RandomState(7)
+        data = {"positive-control": (rng.randn(40, 2), np.array([0, 1] * 20), 0)}
+        settings = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=2,
+            n_splits=2,
+            n_steps=10,
+            v_over_omega=(0.5, 1.0),
+            gamma_over_omega=(0.1,),
+        )
+        cache = tmp_path / "cache"
+        for name, hit in (("cold", False), ("warm", True)):
+            records = bench.run(data, settings, tmp_path / f"{name}.jsonl", cache_dir=cache)
+            source = [r for r in records if r["reused_from_v_over_omega"] is None]
+            reused = [r for r in records if r["reused_from_v_over_omega"] == 0.5]
+            assert len(source) == len(reused) == 2  # two heads, one fold
+            for first, again in zip(source, reused, strict=True):
+                assert first["v_over_omega"] == 0.5 and again["v_over_omega"] == 1.0
+                assert first["feature_cache_hit"] is again["feature_cache_hit"] is hit
+                assert again["feature_environment"] == first["feature_environment"]
+                assert again["tuning"]["feature_cache_hits"] == [hit] * settings.inner_folds
+        # entries for the 0.5 register only: the fold and its tuning folds
+        assert len(list(cache.iterdir())) == 1 + settings.inner_folds
+
+
+class TestSummary:
+    @staticmethod
+    def _line(v: float | None, arm: str, feature: float, train: float, **extra: Any) -> dict:
+        return {
+            "dataset": "positive-control",
+            "v_over_omega": v,
+            "gamma_over_omega": None if v is None else 0.1,
+            "arm": arm,
+            "head": "linear",
+            "mcc": 0.5,
+            "pr_auc": 0.6,
+            "feature_dim": 2,
+            "n_parameters": 3,
+            "feature_seconds": feature,
+            "train_seconds": train,
+            **extra,
+        }
+
+    def _row(self, table: str, v: str, arm: str) -> list[str]:
+        (row,) = [
+            line.split()
+            for line in table.splitlines()[1:]
+            if line.split()[1] == v and line.split()[3] == arm
+        ]
+        return row
+
+    def test_reused_lines_show_no_time_and_are_left_out_of_the_mean(self) -> None:
+        """
+        ``feat s`` and ``fit s`` are means over the lines that were computed:
+        a group of reused arm B lines only prints ``-`` (#541), and the zero
+        timings of reused lines do not lower the mean of a group that also
+        has computed ones.  Lines without the field (an older file) count as
+        computed.
+        """
+        records = [
+            self._line(0.5, "B", 2.0, 0.5, reused_from_v_over_omega=None),
+            self._line(0.5, "B", 4.0, 1.5, reused_from_v_over_omega=None),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "A", 3.0, 0.25, reused_from_v_over_omega=None),
+            # a group with one computed and one reused line
+            self._line(2.0, "B", 6.0, 1.0, reused_from_v_over_omega=None),
+            self._line(2.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(None, "C", 0.0, 0.75),
+        ]
+        table = bench.summarise(records)
+        # columns: ..., dim, params, feat s, fit s, n
+        assert self._row(table, "0.5", "B")[-3:] == ["3.00", "1.00", "2"]
+        assert self._row(table, "1", "B")[-3:] == ["-", "-", "2"]
+        assert self._row(table, "1", "A")[-3:] == ["3.00", "0.25", "1"]
+        assert self._row(table, "2", "B")[-3:] == ["6.00", "1.00", "2"]
+        assert self._row(table, "-", "C")[-3:] == ["0.00", "0.75", "1"]
+        widths = {len(line) for line in table.splitlines()[1:]}
+        assert len(widths) == 1  # a "-" keeps the columns aligned
+
 
 class TestSeparationSubsamplingIntegration:
     def test_parser_options(self) -> None:
@@ -3938,13 +4027,67 @@ class TestSeparationSubsamplingIntegration:
         args_zero = parser.parse_args(["--max-separation-rows", "0"])
         assert args_zero.max_separation_rows == 0
 
-    def test_settings_validates_max_separation_rows(self) -> None:
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 2"):
-            bench.Settings(max_separation_rows=2)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 0"):
-            bench.Settings(max_separation_rows=0)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got -10"):
-            bench.Settings(max_separation_rows=-10)
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [
+            (2, "2"),
+            (0, "0"),
+            (-10, "-10"),
+            (30.0, "30.0"),
+            (30.5, "30.5"),
+            (True, "True"),
+            ("2000", "'2000'"),
+        ],
+    )
+    def test_settings_validates_max_separation_rows(self, value: Any, shown: str) -> None:
+        """An integer ``>= 3`` or ``None``; a float, a bool or a string is refused (#541)."""
+        message = rf"^max_separation_rows must be an integer >= 3 or None; got {shown}\.$"
+        with pytest.raises(ValueError, match=message):
+            bench.Settings(max_separation_rows=value)
+
+    def test_settings_accepts_an_integer_max_separation_rows(self) -> None:
+        assert bench.Settings(max_separation_rows=3).max_separation_rows == 3
+        assert bench.Settings(max_separation_rows=np.int64(500)).max_separation_rows == 500
+        assert bench.Settings(max_separation_rows=None).max_separation_rows is None
+
+    @pytest.mark.parametrize("value", ["1", "2", "-1", "-2000"])
+    def test_the_command_line_refuses_a_limit_below_three_other_than_zero(
+        self,
+        value: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """
+        ``0`` is the one spelling of "no limit"; 1, 2 and a negative value end
+        in an argparse error naming the option, before anything runs (#541).
+        """
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("the run must not start")
+
+        monkeypatch.setattr(bench, "run", run)
+        for quick in ([], ["--quick"]):
+            with pytest.raises(SystemExit) as raised:
+                bench.main(
+                    [*quick, "--max-separation-rows", value, "--out", str(tmp_path / "o.jsonl")]
+                )
+            assert raised.value.code == 2
+            error = capsys.readouterr().err.splitlines()[-1]
+            assert error.endswith(
+                "error: argument --max-separation-rows: must be 0 (no limit) or an integer "
+                f">= 3; got {value}"
+            )
+
+    def test_the_help_text_names_the_spelling_of_no_limit(self) -> None:
+        parser = bench._parser()
+        (action,) = [a for a in parser._actions if "--max-separation-rows" in a.option_strings]
+        assert action.help == (
+            "rows of a training or test part above which its separation measures are computed "
+            "on a class-stratified subsample of that many rows: an integer >= 3, or 0 for no "
+            "limit"
+        )
+        assert action.default == 2000
 
     def test_quick_respects_separation_flags(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -248,6 +248,7 @@ References
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import dataclass
 from typing import Any
 
@@ -292,6 +293,19 @@ def _features(F: Any) -> torch.Tensor:
     if not bool(torch.isfinite(tensor).all()):
         raise ValueError("F must be finite; got a NaN or an infinity.")
     return tensor
+
+
+def _row_limit(max_rows: Any, floor: int) -> int | None:
+    """``max_rows`` as an int ``>= floor``, or ``None``; a bool, a float or a string is refused."""
+    if max_rows is None:
+        return None
+    if (
+        isinstance(max_rows, bool)
+        or not isinstance(max_rows, numbers.Integral)
+        or max_rows < floor
+    ):
+        raise ValueError(f"max_rows must be an integer >= {floor} or None; got {max_rows!r}.")
+    return int(max_rows)
 
 
 def _classes(y: Any, n_samples: int) -> torch.Tensor:
@@ -739,24 +753,55 @@ def stratified_subsample_indices(
     seed: int = 0,
 ) -> np.ndarray:
     """
-    Deterministic, class-stratified subsample indices of length at most ``max_rows``.
+    Deterministic, class-stratified subsample indices: ``min(max_rows, n)`` rows.
 
-    Preserves class proportions as closely as possible via proportional quota
-    allocation with largest-remainder rounding. When ``max_rows`` is at least
-    the number of classes present, every class with at least one sample is
-    guaranteed representation (any class with zero allocated rows after proportional
-    distribution receives one row transferred from the class with the largest allocation).
-    The selected indices are returned in sorted order, keeping features and labels
-    aligned.
+    With ``n`` labels in ``K`` classes of ``n_1, …, n_K`` rows (in ascending
+    order of the label) and ``m = max_rows < n``, each class gets a quota of
+    rows in proportion to its size, rounded by the largest-remainder method::
+
+        q_c = m · n_c / n,        a_c = ⌊q_c⌋,        r = m − Σ_c a_c
+
+    Since ``Σ_c q_c = m`` and each ``q_c − a_c`` lies in ``[0, 1)``, ``r`` is
+    an integer in ``[0, K)``; the ``r`` classes with the largest remainders
+    ``q_c − a_c`` get one row more, of equal remainders (as computed in
+    floating point) the lower label first.  Then ``Σ_c a_c = m`` and
+    ``a_c ≤ n_c`` (``q_c < n_c`` because ``m < n``).  Each class whose
+    ``a_c`` is still 0 (``q_c < 1`` without a remainder among the ``r``
+    largest), in ascending order of the label, takes one row from the class
+    that has the most rows at that point (the lowest label of equal ones),
+    so that every class is present.  With ``m ≥ K`` that class has at least
+    2 rows to give (at most ``K − 1`` classes share the ``m ≥ K`` rows), so
+    none is emptied.  Counts ``[100, 1900]`` with ``m = 20`` give
+    ``q = [1, 19]``; counts ``[5, 995]`` give ``q = [0.1, 19.9]``, rounded to
+    ``a = [0, 20]`` and raised to ``[1, 19]``.
+
+    **A small class can be left with one row**, and there is no minimum of
+    two: every class with ``q_c < 1`` ends with exactly one, and a larger
+    one can be reduced to one by the transfers (counts ``[1, 1, 98]`` with
+    ``m = 3`` give one row each).  Such a class contributes no pair within
+    a class to a distance measure, and its class mean is that one row: the
+    Notes of :func:`separation_measures` say what this does to the measures
+    computed on the subsample.
+
+    If ``m`` is less than ``K``, not every class can be present: the ``m``
+    largest classes give one row each, of equally large classes the lower
+    label first.
+
+    The rows of a class are drawn without replacement from one
+    ``numpy.random.default_rng(seed)``, class after class in ascending
+    order of the label (in the order of size if ``m < K``), so a seed gives
+    the same rows on every call.  The indices are returned sorted, which
+    keeps features and labels aligned.
 
     Parameters
     ----------
     y:
-        Labels of shape ``(n_samples,)``, array-like or tensor.
+        Labels of shape ``(n_samples,)``, array-like or tensor, any number of
+        classes.
     max_rows:
-        Maximum number of samples to select. If ``None`` or greater than or equal to
-        the total number of samples, all sample indices ``np.arange(n_samples)``
-        are returned. Must be ``>= 1`` if specified.
+        Maximum number of samples to select, an integer ``>= 1``.  If
+        ``None`` or ``>= n_samples``, all sample indices
+        ``np.arange(n_samples)`` are returned.
     seed:
         Seed for the pseudorandom generator. Default is 0.
 
@@ -769,10 +814,10 @@ def stratified_subsample_indices(
     Raises
     ------
     ValueError
-        If ``max_rows is not None`` and ``max_rows < 1``.
+        If ``max_rows`` is neither ``None`` nor an integer ``>= 1`` (a bool,
+        a float or a string included), before the labels are read.
     """
-    if max_rows is not None and max_rows < 1:
-        raise ValueError(f"max_rows must be >= 1 or None; got {max_rows}.")
+    max_rows = _row_limit(max_rows, 1)
 
     labels = np.asarray(y if not isinstance(y, torch.Tensor) else y.detach().cpu().numpy())
     labels = labels.reshape(-1)
@@ -785,7 +830,7 @@ def stratified_subsample_indices(
     rng = np.random.default_rng(seed)
 
     if max_rows < n_classes:
-        order = np.argsort(-counts)
+        order = np.argsort(-counts, kind="stable")
         chosen_classes = order[:max_rows]
         selected = [
             rng.choice(np.where(labels == classes[c])[0], size=1, replace=False)[0]
@@ -837,10 +882,11 @@ def separation_measures(
     F, y:
         As for :func:`pairwise_distances`; at least 3 samples.
     max_rows:
-        Optional maximum number of samples; must be at least 3 if specified. If the
-        input exceeds this limit, a deterministic, class-stratified subsample of
-        size ``max_rows`` is drawn using ``seed`` before forming quadratic-size
-        matrices. If ``None`` (default), all samples are used.
+        Optional maximum number of samples, an integer ``>= 3``. If the
+        input exceeds this limit, the rows of
+        :func:`stratified_subsample_indices` with ``seed`` are used, before
+        forming quadratic-size matrices. If ``None`` (default), all samples
+        are used.
     seed:
         Random seed for the stratified subsample draw when ``max_rows`` is used.
         Default is 0.
@@ -853,8 +899,9 @@ def separation_measures(
     Raises
     ------
     TypeError, ValueError
-        As :func:`fisher_discriminant_ratio`; or if ``max_rows`` is not ``None``
-        and less than 3.
+        As :func:`fisher_discriminant_ratio`; or (``ValueError``) if
+        ``max_rows`` is neither ``None`` nor an integer ``>= 3`` (a bool, a
+        float or a string included), before the features are read.
 
     Notes
     -----
@@ -866,7 +913,35 @@ def separation_measures(
     When ``max_rows`` is given and fewer rows are evaluated than the full
     input matrix, the resulting numbers are stratified Monte Carlo estimates
     of the population separation measures on that subsample size, and
-    ``n_samples`` reports the number of rows actually used.
+    ``n_samples`` reports the number of rows actually used.  The result is
+    that of ``F[idx]`` and ``y[idx]`` with
+    ``idx = stratified_subsample_indices(y, max_rows, seed=seed)``.
+
+    **A class can be reduced to one row** by the subsample: a class of
+    ``n_c`` of the ``n`` input rows keeps about ``max_rows · n_c / n`` of
+    them, and at least one (:func:`stratified_subsample_indices`), so 5
+    positives among 1000 rows keep one at ``max_rows=20``.  The result does
+    not show this; ``n_samples`` is ``max_rows`` either way.  On the
+    subsample of ``M = max_rows`` rows, with class 1 a single row ``F[p]``
+    (``n1 = 1``; the same holds with the classes swapped):
+
+    * the distances within a class are the ``n0(n0 − 1)/2`` pairs of class
+      0 alone, and the ``n0`` distances between the classes are those of
+      ``F[p]`` to each row of class 0, so ``distance_ratio`` compares the
+      spread of class 0 with the distance of one point to it;
+    * ``δ = F[p] − μ0`` rests on one sample, and ``F[p]`` adds nothing to
+      ``S_w`` (its centred row is zero), which is the scatter of class 0
+      over ``M − 2``: the Fisher ratio is that one row's squared
+      Mahalanobis distance from the mean of class 0.  For two Gaussian
+      classes that do not differ, its mean is
+      ``(M − 2)/(M − d − 3) · d M/(M − 1)`` (``M > d + 3``), more than
+      ``d``, where two classes of equal size give about ``4 d / M``
+      ("Sample size" and "Class imbalance" in the module docstring);
+    * the alignment centres a label vector with one positive entry, and the
+      effective rank does not use the labels.
+
+    All of them are defined (``M ≥ 3`` leaves a pair within the other
+    class), but they say little about the class of one row.
 
     Examples
     --------
@@ -879,8 +954,7 @@ def separation_measures(
     >>> round(measures.kernel_alignment, 12)  # 8² / (20 · 4)
     0.8
     """
-    if max_rows is not None and max_rows < 3:
-        raise ValueError(f"max_rows must be >= 3 or None; got {max_rows}.")
+    max_rows = _row_limit(max_rows, 3)
     features = _features(F)
     n_samples, n_features = features.shape
     positive = _classes(y, n_samples)

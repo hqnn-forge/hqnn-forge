@@ -274,7 +274,14 @@ point (``v_over_omega``, ``gamma_over_omega``, ``spacing_um``, ``omega``,
 the interaction-grid value from which an arm B record was reused across the
 grid, or ``null`` if the record was computed rather than reused; for reused
 records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
-all zero); ``measurement`` and ``shots``; the fold (``fold``, ``n_splits``,
+all zero, and ``feature_cache_hit``, ``feature_environment`` and the
+``feature_cache_hits`` and ``feature_environments`` of ``tuning`` are those
+of the record it was reused from: they say how the features both lines
+rest on were obtained when that record was computed.  Nothing is fetched
+for a reused line, and the cache holds no entry under its own
+``feature_map``, so its ``feature_cache_hit`` is ``false`` on a cold cache
+and ``true`` on a warm one, as its source line's is); ``measurement`` and
+``shots``; the fold (``fold``, ``n_splits``,
 ``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
 dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
 ``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
@@ -308,7 +315,13 @@ and the alignment do change.  On a training or test partition exceeding
 class-stratified subsample drawn with ``--separation-seed`` (default 0)
 to bound memory.  Train and test partitions are subsampled independently
 with the same seed, so on a large dataset the two parts can rest on
-different bases (e.g. train subsampled, test in full).
+different bases (e.g. train subsampled, test in full).  A limit of ``0``
+is no limit, and 1, 2 or a negative value is refused.  The subsample keeps
+each class's share of the part, and at least one row of it, so a small
+class can be left with a single row (5 positives among 1000 rows keep one
+at a limit of 20), which the line does not show; the Notes of
+:func:`hqnn_forge.diagnostics.separation_measures` say what that does to
+the measures.
 ``separation[part]['n_samples']`` records the actual number of rows used;
 the dataset's size and SHA-256; ``settings`` and ``environment``.
 
@@ -407,6 +420,11 @@ DATASETS: tuple[str, ...] = (
 )
 #: Losses by name.  ``bce`` makes the linear head on the inputs a logistic regression.
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
+
+
+#: Fewest rows the separation measures accept as a subsample limit (``max_rows`` of
+#: :func:`~hqnn_forge.diagnostics.separation_measures`).
+MIN_SEPARATION_ROWS = 3
 
 
 def _positive_integer(value: Any) -> bool:
@@ -510,7 +528,8 @@ class Settings:
         Root seed of every split, draw, initialisation and batch order.
     max_separation_rows:
         Maximum rows used to compute separation measures (pairwise distances
-        and linear kernel), or ``None`` to use all rows. Default 2000.
+        and linear kernel), an integer ``>= 3``, or ``None`` to use all rows.
+        Default 2000.  ``--max-separation-rows 0`` is ``None``.
     separation_seed:
         Seed for the class-stratified subsample draw when eligible rows
         exceed ``max_separation_rows``. Default 0.
@@ -600,9 +619,11 @@ class Settings:
                     f"search_space['{key}'] values must be {bound}; got {list(values)!r}."
                 )
 
-        if self.max_separation_rows is not None and self.max_separation_rows < 3:
+        rows = self.max_separation_rows
+        if rows is not None and not (_positive_integer(rows) and rows >= MIN_SEPARATION_ROWS):
             raise ValueError(
-                f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
+                f"max_separation_rows must be an integer >= {MIN_SEPARATION_ROWS} or None; "
+                f"got {rows!r}."
             )
 
     @property
@@ -2274,8 +2295,24 @@ def run_dataset(
                 arm_b_cache[rep.gamma_over_omega] = arm_b_records
 
 
+def _mean_seconds(rows: Sequence[Mapping[str, Any]], name: str, width: int) -> str:
+    """The mean of ``name`` over ``rows`` as a column of ``width``, or ``-`` without a row."""
+    if not rows:
+        return format("-", f">{width}s")
+    return format(float(np.mean([r[name] for r in rows])), f"{width}.2f")
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
-    """Mean and fold spread of MCC and PR-AUC per dataset, arm, head and grid point."""
+    """
+    Mean and fold spread of MCC and PR-AUC per dataset, arm, head and grid point.
+
+    ``feat s`` and ``fit s`` are the mean ``feature_seconds`` and
+    ``train_seconds`` of the lines that were computed: a reused arm B line
+    (``reused_from_v_over_omega`` not ``null``) has both at 0 and is left
+    out, and a row whose lines are all reused shows ``-``.  The cost of arm B
+    is therefore in the row of the ``V/Ω`` it was computed at: the first
+    value given to ``--v-over-omega``, which need not be the smallest.
+    """
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for record in records:
         key = (
@@ -2292,6 +2329,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     )
     lines = [header]
     for (dataset, v, gamma, arm, head), rows in groups.items():
+        computed = [r for r in rows if r.get("reused_from_v_over_omega") is None]
         mcc = np.array([r["mcc"] for r in rows], dtype=np.float64)
         spread = mcc.std(ddof=1) if len(rows) > 1 else 0.0
         ap = float(np.mean([r["pr_auc"] for r in rows]))
@@ -2300,8 +2338,8 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
             f"{'-' if gamma is None else format(gamma, 'g'):>6s} {arm:8s} {head:6s} "
             f"{mcc.mean():7.3f} ± {spread:5.3f} {ap:7.3f} {rows[0]['feature_dim']:4d} "
             f"{rows[0]['n_parameters']:6d} "
-            f"{np.mean([r['feature_seconds'] for r in rows]):7.2f} "
-            f"{np.mean([r['train_seconds'] for r in rows]):6.2f}  {len(rows)}"
+            f"{_mean_seconds(computed, 'feature_seconds', 7)} "
+            f"{_mean_seconds(computed, 'train_seconds', 6)}  {len(rows)}"
         )
     return "\n".join(lines)
 
@@ -2597,7 +2635,11 @@ def _parser() -> argparse.ArgumentParser:
         "--max-separation-rows",
         type=int,
         default=default.max_separation_rows,
-        help="maximum rows for separation measures (<= 0 for full data; floor 3)",
+        help=(
+            "rows of a training or test part above which its separation measures are computed "
+            "on a class-stratified subsample of that many rows: an integer "
+            f">= {MIN_SEPARATION_ROWS}, or 0 for no limit"
+        ),
     )
     parser.add_argument(
         "--separation-seed",
@@ -2641,11 +2683,13 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
                 f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
             )
         return []
-    max_sep = (
-        None
-        if args.max_separation_rows is not None and args.max_separation_rows <= 0
-        else args.max_separation_rows
-    )
+    # 0 is the one spelling of "no limit": a negative value is a typo, not a second one.
+    if args.max_separation_rows < 0 or 0 < args.max_separation_rows < MIN_SEPARATION_ROWS:
+        parser.error(
+            "argument --max-separation-rows: must be 0 (no limit) or an integer "
+            f">= {MIN_SEPARATION_ROWS}; got {args.max_separation_rows}"
+        )
+    max_sep = args.max_separation_rows or None
     if args.quick:
         settings = dataclasses.replace(
             QUICK,
