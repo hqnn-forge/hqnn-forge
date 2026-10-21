@@ -1,7 +1,8 @@
 """
 tests/test_example_benchmark.py
 ===============================
-``examples/benchmark.py`` (#269): the subset it keeps of a large dataset.
+``examples/benchmark.py`` (#269): the subset it keeps of a large dataset,
+and validation of command-line arguments.
 
 ``stratified_subset`` keeps the rows of
 :func:`hqnn_forge.diagnostics.stratified_subsample_indices` (#541), checked
@@ -16,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 
 import numpy as np
+import pytest
 
 from hqnn_forge.diagnostics import stratified_subsample_indices
 
@@ -107,3 +109,25 @@ class TestStratifiedSubset:
         X, y = _data([5, 3])
         _, y_sub = example.stratified_subset(X, y, 4)
         assert np.bincount(y_sub).tolist() == [3, 1]
+
+
+class TestBenchmarkArgumentValidation:
+    @pytest.mark.parametrize(
+        "args,expected_msg",
+        [
+            (["--max-rows", "1"], "--max-rows must be at least 2"),
+            (["--max-rows", "0"], "--max-rows must be at least 2"),
+            (["--max-rows", "-5"], "--max-rows must be at least 2"),
+            (["--folds", "1"], "--folds must be at least 2"),
+            (["--folds", "0"], "--folds must be at least 2"),
+            (["--epochs", "0"], "--epochs must be at least 1"),
+            (["--epochs", "-10"], "--epochs must be at least 1"),
+            (["--qubits", "0"], "--qubits must be at least 1"),
+            (["--layers", "0"], "--layers must be at least 1"),
+            (["--seeds", "0"], "--seeds must be at least 1"),
+        ],
+    )
+    def test_invalid_arguments_refused(self, args: list[str], expected_msg: str) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            example.main(args)
+        assert exc_info.value.code == 2

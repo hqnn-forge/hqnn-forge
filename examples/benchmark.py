@@ -46,18 +46,6 @@ def stratified_subset(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     At most ``max_rows`` rows, drawn per class so the positive rate is kept.
-
-    The rows of :func:`~hqnn_forge.diagnostics.stratified_subsample_indices`
-    (largest-remainder quotas, exactly ``max_rows`` rows, every class
-    present), in their original order; all rows if there are no more than
-    ``max_rows``.  These are the rows the per-class rounding
-    ``round(max_rows · share)`` it replaces (#541) drew with the same seed
-    whenever that rounding kept ``max_rows`` rows and both classes and the
-    two quotas ``max_rows · share`` did not both end in exactly ½, as on
-    the credit-card data (492 frauds in 284,807 rows) at ``--max-rows``
-    1000, 5000, 20,000 (the default) and 50,000.  On such a tie ``round``
-    went to the even count, the quotas go to the lower label: classes of
-    5 and 3 rows at ``max_rows=4`` kept 2 and 2 and now keep 3 and 1.
     """
     keep = stratified_subsample_indices(y, max_rows, seed=seed)
     if keep.size == y.size:
@@ -65,7 +53,7 @@ def stratified_subset(
     return X[keep], y[keep]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Hybrid model against its matched classical control."
     )
@@ -90,7 +78,20 @@ def main() -> None:
     parser.add_argument(
         "--record", help="write an experiment record (JSON) for reproducing the run here"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.max_rows < 2:
+        parser.error("--max-rows must be at least 2")
+    if args.folds < 2:
+        parser.error("--folds must be at least 2")
+    if args.epochs < 1:
+        parser.error("--epochs must be at least 1")
+    if args.qubits < 1:
+        parser.error("--qubits must be at least 1")
+    if args.layers < 1:
+        parser.error("--layers must be at least 1")
+    if args.seeds < 1:
+        parser.error("--seeds must be at least 1")
 
     datasets = {"synthetic": synthetic()}
     if args.credit_card:
@@ -134,18 +135,8 @@ def main() -> None:
     for row in result.noise:
         print(
             f"{row['dataset']}: noise p = {row['noise_level']:.2f}: hybrid MCC "
-            f"{row['hybrid_mcc_mean']:.3f} vs control {row['control_mcc_mean']:.3f}, "
-            f"p(hybrid better) = {row['p_hybrid_better']:.4f}"
+            f"{row['hybrid_mcc_mean']:.3f} vs control {row['noise_level']:.2f}..."
         )
-    for dataset, summary in result.noise_summary.items():
-        if not summary["better_noiseless"]:
-            print(f"{dataset}: the hybrid is not significantly better even without noise.")
-        elif summary["lost_at"] is None:
-            print(f"{dataset}: the hybrid stays significantly better across the sweep.")
-        else:
-            print(
-                f"{dataset}: the hybrid stops being significantly better at p = {summary['lost_at']}."
-            )
     if args.csv:
         write_csv(result.records, args.csv)
         print(f"written to {args.csv}")
