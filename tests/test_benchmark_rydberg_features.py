@@ -111,9 +111,10 @@ def _fold_by_hand(X: np.ndarray, y: np.ndarray, settings: Any, dataset_index: in
     tr, va = stratified_kfold(y[train_part], settings.validation_folds, random_state=inner_seed)[0]
     train_idx, val_idx = train_part[tr], train_part[va]
 
-    mean, std = X[train_part].mean(0), X[train_part].std(0)
-    std[std == 0] = 1.0
-    scaled = (X - mean) / std
+    # Step 2's constant rule is that of ``standardise_features`` (#580),
+    # tested on its own; the run's inputs are compared exactly, so the same
+    # rounding is needed here.
+    scaled = bench.standardise_features(X, train_part)
     pca = PCANormalizer(n_components=settings.n_atoms, scale_to_pi=True).fit(scaled[train_part])
     inputs = pca.transform(scaled).double().numpy()
     oversampled = smote(inputs[train_idx], y[train_idx], random_state=smote_seed)
@@ -1668,11 +1669,13 @@ class TestInputs:
 
     def test_inputs_are_standardised_components_squashed_to_pi(self) -> None:
         """By hand: standardise, project on the leading eigenvectors, ``π tanh(· / std)``."""
+        from sklearn.preprocessing import StandardScaler
+
         X, _ = self._data()
         rows = np.arange(0, 90)
-        mean, std = X[rows].mean(0), X[rows].std(0)
-        std[std == 0] = 1.0
-        scaled = (X - mean) / std
+        # ``StandardScaler`` has the constant rule of ``standardise_features``
+        # (#580): a variance within its rounding bound is only centred.
+        scaled = StandardScaler().fit(X[rows]).transform(X)
         centred = scaled[rows] - scaled[rows].mean(0)
         values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
         leading = vectors[:, np.argsort(values)[::-1][:4]]
@@ -1685,15 +1688,17 @@ class TestInputs:
         """
         A raw column constant on the fitting rows up to rounding enters no component (#580).
 
-        Column 3 is a sum of tenths that is 1.5 in exact arithmetic, computed
-        in an order that leaves ``1.5`` and ``1.5 ± 2⁻⁵²``: a σ of about
-        ``5e-17``, not 0, and a variance (``2.6e-33``) below the rounding bound
-        of :func:`standardise_features` (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
+        Column 3 holds ``1.5`` and its float64 neighbour ``1.5 + 2⁻⁵²``, the
+        values a sum that is 1.5 in exact arithmetic leaves after rounding,
+        written out so they depend on no random stream or summation order:
+        a σ of about ``1e-16``, not 0, and a variance (about ``1e-32``) below
+        the rounding bound of :func:`standardise_features`
+        (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
         The other three columns, standardised, span a plane plus a direction
-        of variance ``2.9e-5``, so with three components the third is that
+        of variance ``2.4e-5``, so with three components the third is that
         small direction.  The rounding noise, scaled to unit variance by the
         ``σ == 0`` rule, would take that slot instead: an independent column
-        of variance 1 against ``2.9e-5``.
+        of variance 1 against ``2.4e-5``.
 
         Expected value by hand: the columns scaled by scikit-learn's
         ``StandardScaler`` (which centres the rounding column only), then the
@@ -1704,8 +1709,7 @@ class TestInputs:
 
         rng = np.random.default_rng(7)
         a, b = rng.standard_normal((2, 200))
-        tenths = rng.integers(0, 6, size=(200, 3)) * 0.1
-        rounding = (tenths[:, 0] + tenths[:, 1]) + (tenths[:, 2] + (1.5 - tenths.sum(axis=1)))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
         X = np.column_stack([a, b, a + b + 0.01 * rng.standard_normal(200), rounding])
         rows = np.arange(150)
         # The premise: σ is not 0 (so ``σ == 0`` scales it), but the column is
@@ -1721,12 +1725,33 @@ class TestInputs:
         assert np.abs(leading[3]).max() < 1e-12  # the column loads on no component
         projected = (scaled - scaled[rows].mean(0)) @ leading
         # ``PCANormalizer`` adds 1e-8 to each component's σ; on the third,
-        # σ ≈ 5.4e-3, that is a relative 2e-6, above the float32 tolerance.
+        # σ ≈ 4.9e-3, that is a relative 2e-6, above the float32 tolerance.
         by_hand = math.pi * np.tanh(projected / (projected[rows].std(0, ddof=1) + 1e-8))
 
         inputs = bench.preprocess(X, rows, 3)
         np.testing.assert_allclose(inputs, by_hand, rtol=0, atol=2e-6)
         np.testing.assert_allclose(inputs, bench.preprocess(X[:, :3], rows, 3), rtol=0, atol=2e-6)
+
+    def test_a_column_constant_up_to_rounding_adds_no_rank(self) -> None:
+        """
+        Only centred, such a column adds nothing to the centred rank (#580).
+
+        Two independent columns and one of ``1.5`` and ``1.5 + 2⁻⁵²`` have
+        centred rank 2, so three components are refused rather than filled
+        with the rounding noise, which the ``σ == 0`` rule scaled to unit
+        variance and took as the third input.  Two components still work.
+        """
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X = np.column_stack([a, b, rounding])
+        rows = np.arange(150)
+        assert 0 < X[rows, 2].std() < 1e-15
+        with pytest.raises(ValueError, match=r"rank 2 < n_components=3"):
+            bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(
+            bench.preprocess(X, rows, 2), bench.preprocess(X[:, :2], rows, 2), rtol=0, atol=2e-6
+        )
 
     def test_split_blocks_and_synthetic_rows(self) -> None:
         X, y = self._data()
@@ -2879,23 +2904,38 @@ class TestStandardisationInARun:
         Each call fits on the first rows of its split's training block, as
         many as the split has real training rows (counted here from the
         folds rebuilt by hand): no synthetic, validation or test row.  Arm C
-        is standardised too; ``D-hybrid`` never is.  Only the calls of
-        :func:`head_features` count: :func:`preprocess` standardises the raw
-        columns with the same function (step 2, #580).
+        is standardised too; ``D-hybrid`` never is.  :func:`preprocess`
+        standardises the raw columns with the same function (step 2, #580):
+        its calls are told apart by a flag it sets, and fit on the outer
+        fold's training part and on each tuning fold's fitting rows.
         """
         calls: list[tuple[int, np.ndarray]] = []
+        raw_calls: list[np.ndarray] = []
+        in_preprocess = False
         original = bench.standardise_features
+        original_preprocess = bench.preprocess
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
-            if sys._getframe(1).f_code.co_name == "head_features":
+            if in_preprocess:
+                raw_calls.append(np.asarray(fit_rows))
+            else:
                 calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
             return original(features, fit_rows)
 
-        monkeypatch.setattr(bench, "standardise_features", spy)
+        def preprocess_spy(X: Any, fit_rows: np.ndarray, n_components: int) -> Any:
+            nonlocal in_preprocess
+            in_preprocess = True
+            try:
+                return original_preprocess(X, fit_rows, n_components)
+            finally:
+                in_preprocess = False
+
         settings = _replace(QUICK, arms=("A", "C"))
         X, y, _ = bench.load_dataset("positive-control", settings)
+        fold = _fold_by_hand(X, y, settings, 0)  # before the spies: it standardises too
+        monkeypatch.setattr(bench, "standardise_features", spy)
+        monkeypatch.setattr(bench, "preprocess", preprocess_spy)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
-        fold = _fold_by_hand(X, y, settings, 0)
         n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
         inner = stratified_kfold(
             y[fold.train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
@@ -2907,11 +2947,18 @@ class TestStandardisationInARun:
         assert [(n, rows.size) for n, rows in calls] == expected * 2  # arm A, then arm C
         for _, rows in calls:
             np.testing.assert_array_equal(rows, np.arange(rows.size))
+        expected_raw = [fold.train_part] + [fold.train_part[fit] for fit, _ in inner]
+        assert len(raw_calls) == len(expected_raw)
+        for rows, want in zip(raw_calls, expected_raw, strict=True):
+            np.testing.assert_array_equal(rows, want)
 
         calls.clear()
+        raw_calls.clear()
         settings = _replace(QUICK, arms=("D",), n_trials=0, max_epochs=1)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
         assert [(n, rows.size) for n, rows in calls] == [(n_outer, fold.train_idx.size)]
+        assert len(raw_calls) == 1
+        np.testing.assert_array_equal(raw_calls[0], fold.train_part)
 
     def test_the_cache_holds_the_features_as_returned_and_serves_either_setting(
         self, tmp_path: Path
