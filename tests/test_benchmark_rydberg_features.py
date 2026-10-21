@@ -1049,6 +1049,20 @@ class TestUciData:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def probe_prefixes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the prefix of each temporary file the writability probe creates."""
+    prefixes: list[str] = []
+    temporary_file = bench.tempfile.NamedTemporaryFile
+
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        prefixes.append(kwargs["prefix"])
+        return temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
+    return prefixes
+
+
 class TestCheckWritable:
     @pytest.mark.may_skip
     @pytest.mark.skipif(os.name != "posix", reason="named pipes require POSIX")
@@ -1189,34 +1203,28 @@ class TestCheckWritable:
         [("log", ".log."), ("a" * 6, "." + "a" * 6 + "."), ("a" * 7, ".out."), ("é" * 4, ".out.")],
     )
     def test_the_probe_keeps_the_basename_when_it_fits(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, prefix: str
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        name: str,
+        prefix: str,
     ) -> None:
-        prefixes: list[str] = []
-        temporary_file = bench.tempfile.NamedTemporaryFile
-
-        def probe(*args: Any, **kwargs: Any) -> Any:
-            prefixes.append(kwargs["prefix"])
-            return temporary_file(*args, **kwargs)
-
         monkeypatch.setattr(bench.os, "pathconf", lambda path, key: 16, raising=False)
-        monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
         bench.check_writable(tmp_path / name)
-        assert prefixes == [prefix]
+        assert probe_prefixes == [prefix]
         assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.parametrize(
         "limit", [None, OSError(errno.EIO, "unsupported"), ValueError(), -1, 0]
     )
     def test_an_unavailable_filename_limit_still_probes_the_directory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: Exception | int | None
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        limit: Exception | int | None,
     ) -> None:
-        prefixes: list[str] = []
-        temporary_file = bench.tempfile.NamedTemporaryFile
-
-        def probe(*args: Any, **kwargs: Any) -> Any:
-            prefixes.append(kwargs["prefix"])
-            return temporary_file(*args, **kwargs)
-
         def pathconf(path: Path, key: str) -> int:
             if isinstance(limit, Exception):
                 raise limit
@@ -1227,12 +1235,54 @@ class TestCheckWritable:
             monkeypatch.delattr(bench.os, "pathconf", raising=False)
         else:
             monkeypatch.setattr(bench.os, "pathconf", pathconf, raising=False)
-        monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
         bench.check_writable(tmp_path / "new.jsonl")
-        assert prefixes == [".new.jsonl."]
+        assert probe_prefixes == [".new.jsonl."]
         assert list(tmp_path.iterdir()) == []
         with pytest.raises(ValueError, match="cannot be written"):
             bench.check_writable(tmp_path / "missing" / "new.jsonl")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("name", "prefix"),
+        [
+            ("a" * 250, ".out."),
+            # An unpaired surrogate must not crash the measurement.
+            ("x\udc80" + "a" * 240, "." + "x\udc80" + "a" * 240 + "."),
+        ],
+    )
+    def test_windows_without_pathconf_limits_names_to_255_utf16_units(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        probe_prefixes: list[str],
+        name: str,
+        prefix: str,
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        bench.check_writable(tmp_path / name)
+        assert probe_prefixes == [prefix]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_windows_measures_names_in_utf16_code_units(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        # 250 UTF-16 code units, although 500 bytes in UTF-8.
+        assert bench._filename_length("é" * 250) == 250
+        assert bench._filename_length("\U0001f600" * 100) == 200
+        assert bench._filename_length("x\udc80") == 2
+
+    def test_windows_without_pathconf_refuses_a_name_over_255_utf16_units(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_prefixes: list[str]
+    ) -> None:
+        monkeypatch.setattr(bench, "_WINDOWS", True)
+        monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        out = tmp_path / ("a" * 256)
+        message = f"out {str(out)!r} cannot be written: {os.strerror(errno.ENAMETOOLONG)}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            bench.check_writable(out)
+        assert probe_prefixes == []
         assert list(tmp_path.iterdir()) == []
 
 
@@ -3967,31 +4017,3 @@ class TestSeparationSubsamplingIntegration:
         sep1 = r1[0]["separation"]["train"]["mean_within_distance"]
         sep2 = r2[0]["separation"]["train"]["mean_within_distance"]
         assert sep1 != sep2
-@pytest.mark.skipif(os.name != "nt", reason="Windows-specific filename handling")
-def test_long_filename_uses_short_probe_prefix_when_limit_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Use a short temporary prefix when the filename limit is unavailable."""
-    out = tmp_path / ("a" * 250)
-    try:
-        out.touch()
-    except OSError as error:
-        if error.errno == errno.ENAMETOOLONG:
-            pytest.skip("the filesystem does not support a 250-byte basename")
-        raise
-    out.unlink()
-
-    prefixes: list[str] = []
-    original = bench.tempfile.NamedTemporaryFile
-
-    def probe(*args: Any, **kwargs: Any) -> Any:
-        prefixes.append(kwargs["prefix"])
-        return original(*args, **kwargs)
-
-    monkeypatch.delattr(bench.os, "pathconf", raising=False)
-    monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
-
-    bench.check_writable(out)
-
-    assert prefixes == [".out."]
-    assert list(tmp_path.iterdir()) == []
