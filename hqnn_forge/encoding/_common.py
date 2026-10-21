@@ -258,9 +258,11 @@ def variational_weight_shape(
         For an unknown ``entangler``.
     """
     _check_entangler(entangler)
+    if entangler == "ring" or entangler == "strongly_entangling" or entangler == "brickwork":
+        return (n_layers, n_qubits, 3)
     if entangler == "hardware_efficient":
         return (n_layers, n_qubits)
-    return (n_layers, n_qubits, 3)
+    assert_never(entangler)
 
 
 def validate_circuit_options(

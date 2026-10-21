@@ -211,8 +211,9 @@ other places to update:
 2. Add a value to the `Entangler` literal and a branch for it in `apply_variational_layers` that
    calls the primitive once per layer. mypy flags a value the dispatch doesn't handle, through
    the `typing.assert_never` at its end.
-3. Add a branch to `variational_weight_shape` if its weights aren't `(n_layers, n_qubits, 3)`.
-   Nothing checks this now: an unhandled value silently gets that default shape.
+3. Add a branch to `variational_weight_shape` for its weight shape (e.g. `(n_layers, n_qubits, 3)`
+   for `Rot` blocks or `(n_layers, n_qubits)` for single-angle blocks). mypy flags a missing
+   shape branch too, through the `typing.assert_never` at its end.
 
 ### Interface and conventions
 
@@ -222,11 +223,10 @@ other places to update:
 - **Weight shape.** `variational_weight_shape(entangler, n_qubits, n_layers)`, next to
   `apply_variational_layers`, is the one definition of the `weights` shape: every encoder
   registers its `weights` from it, and `extra_repr` counts `n_params` from the layer's
-  parameters. The `Rot` blocks take `(n_layers, n_qubits, 3)` and `"hardware_efficient"`
-  takes `(n_layers, n_qubits)`; a block with another shape adds a branch there and nowhere
-  else. Within the shape, dim 0 must stay
-  the layer index, which is what `block_local_init_` and the diagnostics' `n_layers` fallback
-  read.
+  parameters. The `Rot` blocks take `(n_layers, n_qubits, 3)` and `"hardware_efficient"` takes
+  `(n_layers, n_qubits)`; every block has its own branch there, which mypy checks (step 3), and
+  its shape is defined nowhere else. Within the shape, dim 0 must stay the layer index, which is
+  what `block_local_init_` and the diagnostics' `n_layers` fallback read.
 - **`layer_offset`.** `DataReuploadingLayer` applies the blocks one at a time, with an embedding
   in between. A block whose gates depend on the layer index (as the strongly-entangling ranges
   do) must use `layer_offset + ℓ`, so that one-at-a-time and all-at-once give the same circuit.
@@ -253,8 +253,8 @@ other places to update:
 ### Also update
 
 - The `Entangler` `Literal` and a branch in `apply_variational_layers` (with its docstring
-  entry), both in `_common.py`, and a branch in `variational_weight_shape` if the
-  block's shape differs. `validate_circuit_options` and its error message read
+  entry), both in `_common.py`, and a branch in `variational_weight_shape` (mypy flags
+  a missing branch there too). `validate_circuit_options` and its error message read
   the choices from the `Literal`, so they need no change.
 - The `entangler` parameter docstrings: the angle, IQP and re-uploading builders and layers, and
   `hqnn_forge/models/` (`HybridBinaryClassifier`, `ParallelHybridClassifier`).

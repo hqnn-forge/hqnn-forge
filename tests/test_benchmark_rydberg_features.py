@@ -111,9 +111,10 @@ def _fold_by_hand(X: np.ndarray, y: np.ndarray, settings: Any, dataset_index: in
     tr, va = stratified_kfold(y[train_part], settings.validation_folds, random_state=inner_seed)[0]
     train_idx, val_idx = train_part[tr], train_part[va]
 
-    mean, std = X[train_part].mean(0), X[train_part].std(0)
-    std[std == 0] = 1.0
-    scaled = (X - mean) / std
+    # Step 2's constant rule is that of ``standardise_features`` (#580),
+    # tested on its own; the run's inputs are compared exactly, so the same
+    # rounding is needed here.
+    scaled = bench.standardise_features(X, train_part)
     pca = PCANormalizer(n_components=settings.n_atoms, scale_to_pi=True).fit(scaled[train_part])
     inputs = pca.transform(scaled).double().numpy()
     oversampled = smote(inputs[train_idx], y[train_idx], random_state=smote_seed)
@@ -1718,11 +1719,13 @@ class TestInputs:
 
     def test_inputs_are_standardised_components_squashed_to_pi(self) -> None:
         """By hand: standardise, project on the leading eigenvectors, ``π tanh(· / std)``."""
+        from sklearn.preprocessing import StandardScaler
+
         X, _ = self._data()
         rows = np.arange(0, 90)
-        mean, std = X[rows].mean(0), X[rows].std(0)
-        std[std == 0] = 1.0
-        scaled = (X - mean) / std
+        # ``StandardScaler`` has the constant rule of ``standardise_features``
+        # (#580): a variance within its rounding bound is only centred.
+        scaled = StandardScaler().fit(X[rows]).transform(X)
         centred = scaled[rows] - scaled[rows].mean(0)
         values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
         leading = vectors[:, np.argsort(values)[::-1][:4]]
@@ -1730,6 +1733,75 @@ class TestInputs:
         projected = (scaled - scaled[rows].mean(0)) @ leading
         by_hand = math.pi * np.tanh(projected / projected[rows].std(0, ddof=1))
         np.testing.assert_allclose(bench.preprocess(X, rows, 4), by_hand, rtol=0, atol=2e-6)
+
+    def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
+        """
+        A raw column constant on the fitting rows up to rounding enters no component (#580).
+
+        Column 3 holds ``1.5`` and its float64 neighbour ``1.5 + 2⁻⁵²``, the
+        values a sum that is 1.5 in exact arithmetic leaves after rounding,
+        written out so they depend on no random stream or summation order:
+        a σ of about ``1e-16``, not 0, and a variance (about ``1e-32``) below
+        the rounding bound of :func:`standardise_features`
+        (``(n ε μ)² ≈ 2.5e-27`` for 150 rows).
+        The other three columns, standardised, span a plane plus a direction
+        of variance ``2.4e-5``, so with three components the third is that
+        small direction.  The rounding noise, scaled to unit variance by the
+        ``σ == 0`` rule, would take that slot instead: an independent column
+        of variance 1 against ``2.4e-5``.
+
+        Expected value by hand: the columns scaled by scikit-learn's
+        ``StandardScaler`` (which centres the rounding column only), then the
+        principal components with ``numpy.linalg.eigh``.  It must also equal
+        :func:`preprocess` on the three other columns alone.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X = np.column_stack([a, b, a + b + 0.01 * rng.standard_normal(200), rounding])
+        rows = np.arange(150)
+        # The premise: σ is not 0 (so ``σ == 0`` scales it), but the column is
+        # constant to scikit-learn as well.
+        assert 0 < X[rows, 3].std() < 1e-15
+        assert StandardScaler().fit(X[rows]).scale_[3] == 1.0
+
+        scaled = StandardScaler().fit(X[rows]).transform(X)
+        centred = scaled[rows] - scaled[rows].mean(0)
+        values, vectors = np.linalg.eigh(np.cov(centred, rowvar=False))
+        leading = vectors[:, np.argsort(values)[::-1][:3]]
+        leading = leading * np.sign(leading[np.abs(leading).argmax(0), np.arange(3)])
+        assert np.abs(leading[3]).max() < 1e-12  # the column loads on no component
+        projected = (scaled - scaled[rows].mean(0)) @ leading
+        # ``PCANormalizer`` adds 1e-8 to each component's σ; on the third,
+        # σ ≈ 4.9e-3, that is a relative 2e-6, above the float32 tolerance.
+        by_hand = math.pi * np.tanh(projected / (projected[rows].std(0, ddof=1) + 1e-8))
+
+        inputs = bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(inputs, by_hand, rtol=0, atol=2e-6)
+        np.testing.assert_allclose(inputs, bench.preprocess(X[:, :3], rows, 3), rtol=0, atol=2e-6)
+
+    def test_a_column_constant_up_to_rounding_adds_no_rank(self) -> None:
+        """
+        Only centred, such a column adds nothing to the centred rank (#580).
+
+        Two independent columns and one of ``1.5`` and ``1.5 + 2⁻⁵²`` have
+        centred rank 2, so three components are refused rather than filled
+        with the rounding noise, which the ``σ == 0`` rule scaled to unit
+        variance and took as the third input.  Two components still work.
+        """
+        rng = np.random.default_rng(7)
+        a, b = rng.standard_normal((2, 200))
+        rounding = np.where(np.arange(200) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X = np.column_stack([a, b, rounding])
+        rows = np.arange(150)
+        assert 0 < X[rows, 2].std() < 1e-15
+        with pytest.raises(ValueError, match=r"rank 2 < n_components=3"):
+            bench.preprocess(X, rows, 3)
+        np.testing.assert_allclose(
+            bench.preprocess(X, rows, 2), bench.preprocess(X[:, :2], rows, 2), rtol=0, atol=2e-6
+        )
 
     def test_split_blocks_and_synthetic_rows(self) -> None:
         X, y = self._data()
@@ -2882,20 +2954,38 @@ class TestStandardisationInARun:
         Each call fits on the first rows of its split's training block, as
         many as the split has real training rows (counted here from the
         folds rebuilt by hand): no synthetic, validation or test row.  Arm C
-        is standardised too; ``D-hybrid`` never is.
+        is standardised too; ``D-hybrid`` never is.  :func:`preprocess`
+        standardises the raw columns with the same function (step 2, #580):
+        its calls are told apart by a flag it sets, and fit on the outer
+        fold's training part and on each tuning fold's fitting rows.
         """
         calls: list[tuple[int, np.ndarray]] = []
+        raw_calls: list[np.ndarray] = []
+        in_preprocess = False
         original = bench.standardise_features
+        original_preprocess = bench.preprocess
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
-            calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
+            if in_preprocess:
+                raw_calls.append(np.asarray(fit_rows))
+            else:
+                calls.append((np.asarray(features).shape[0], np.asarray(fit_rows)))
             return original(features, fit_rows)
 
-        monkeypatch.setattr(bench, "standardise_features", spy)
+        def preprocess_spy(X: Any, fit_rows: np.ndarray, n_components: int) -> Any:
+            nonlocal in_preprocess
+            in_preprocess = True
+            try:
+                return original_preprocess(X, fit_rows, n_components)
+            finally:
+                in_preprocess = False
+
         settings = _replace(QUICK, arms=("A", "C"))
         X, y, _ = bench.load_dataset("positive-control", settings)
+        fold = _fold_by_hand(X, y, settings, 0)  # before the spies: it standardises too
+        monkeypatch.setattr(bench, "standardise_features", spy)
+        monkeypatch.setattr(bench, "preprocess", preprocess_spy)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
-        fold = _fold_by_hand(X, y, settings, 0)
         n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
         inner = stratified_kfold(
             y[fold.train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
@@ -2907,11 +2997,18 @@ class TestStandardisationInARun:
         assert [(n, rows.size) for n, rows in calls] == expected * 2  # arm A, then arm C
         for _, rows in calls:
             np.testing.assert_array_equal(rows, np.arange(rows.size))
+        expected_raw = [fold.train_part] + [fold.train_part[fit] for fit, _ in inner]
+        assert len(raw_calls) == len(expected_raw)
+        for rows, want in zip(raw_calls, expected_raw, strict=True):
+            np.testing.assert_array_equal(rows, want)
 
         calls.clear()
+        raw_calls.clear()
         settings = _replace(QUICK, arms=("D",), n_trials=0, max_epochs=1)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
         assert [(n, rows.size) for n, rows in calls] == [(n_outer, fold.train_idx.size)]
+        assert len(raw_calls) == 1
+        np.testing.assert_array_equal(raw_calls[0], fold.train_part)
 
     def test_the_cache_holds_the_features_as_returned_and_serves_either_setting(
         self, tmp_path: Path
@@ -3879,6 +3976,95 @@ class TestArmBReuse:
             assert r1["separation"] == r2["separation"]
             assert r1["hyperparameters"] == r2["hyperparameters"]
 
+    def test_a_reused_line_records_the_cache_hit_of_its_source_line(self, tmp_path: Path) -> None:
+        """
+        A reused arm B line fetches nothing itself: its ``feature_cache_hit``,
+        like its ``feature_environment`` and the hits of its tuning folds, is
+        that of the line it was taken from, as the module docstring states
+        (#541).  Cold cache: ``False`` on both; warm: ``True`` on both.
+        """
+        rng = np.random.RandomState(7)
+        data = {"positive-control": (rng.randn(40, 2), np.array([0, 1] * 20), 0)}
+        settings = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=2,
+            n_splits=2,
+            n_steps=10,
+            v_over_omega=(0.5, 1.0),
+            gamma_over_omega=(0.1,),
+        )
+        cache = tmp_path / "cache"
+        for name, hit in (("cold", False), ("warm", True)):
+            records = bench.run(data, settings, tmp_path / f"{name}.jsonl", cache_dir=cache)
+            source = [r for r in records if r["reused_from_v_over_omega"] is None]
+            reused = [r for r in records if r["reused_from_v_over_omega"] == 0.5]
+            assert len(source) == len(reused) == 2  # two heads, one fold
+            for first, again in zip(source, reused, strict=True):
+                assert first["v_over_omega"] == 0.5 and again["v_over_omega"] == 1.0
+                assert first["feature_cache_hit"] is again["feature_cache_hit"] is hit
+                assert again["feature_environment"] == first["feature_environment"]
+                assert again["tuning"]["feature_cache_hits"] == [hit] * settings.inner_folds
+        # entries for the 0.5 register only: the fold and its tuning folds
+        assert len(list(cache.iterdir())) == 1 + settings.inner_folds
+
+
+class TestSummary:
+    @staticmethod
+    def _line(v: float | None, arm: str, feature: float, train: float, **extra: Any) -> dict:
+        return {
+            "dataset": "positive-control",
+            "v_over_omega": v,
+            "gamma_over_omega": None if v is None else 0.1,
+            "arm": arm,
+            "head": "linear",
+            "mcc": 0.5,
+            "pr_auc": 0.6,
+            "feature_dim": 2,
+            "n_parameters": 3,
+            "feature_seconds": feature,
+            "train_seconds": train,
+            **extra,
+        }
+
+    def _row(self, table: str, v: str, arm: str) -> list[str]:
+        (row,) = [
+            line.split()
+            for line in table.splitlines()[1:]
+            if line.split()[1] == v and line.split()[3] == arm
+        ]
+        return row
+
+    def test_reused_lines_show_no_time_and_are_left_out_of_the_mean(self) -> None:
+        """
+        ``feat s`` and ``fit s`` are means over the lines that were computed:
+        a group of reused arm B lines only prints ``-`` (#541), and the zero
+        timings of reused lines do not lower the mean of a group that also
+        has computed ones.  Lines without the field (an older file) count as
+        computed.
+        """
+        records = [
+            self._line(0.5, "B", 2.0, 0.5, reused_from_v_over_omega=None),
+            self._line(0.5, "B", 4.0, 1.5, reused_from_v_over_omega=None),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(1.0, "A", 3.0, 0.25, reused_from_v_over_omega=None),
+            # a group with one computed and one reused line
+            self._line(2.0, "B", 6.0, 1.0, reused_from_v_over_omega=None),
+            self._line(2.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5),
+            self._line(None, "C", 0.0, 0.75),
+        ]
+        table = bench.summarise(records)
+        # columns: ..., dim, params, feat s, fit s, n
+        assert self._row(table, "0.5", "B")[-3:] == ["3.00", "1.00", "2"]
+        assert self._row(table, "1", "B")[-3:] == ["-", "-", "2"]
+        assert self._row(table, "1", "A")[-3:] == ["3.00", "0.25", "1"]
+        assert self._row(table, "2", "B")[-3:] == ["6.00", "1.00", "2"]
+        assert self._row(table, "-", "C")[-3:] == ["0.00", "0.75", "1"]
+        widths = {len(line) for line in table.splitlines()[1:]}
+        assert len(widths) == 1  # a "-" keeps the columns aligned
+
 
 class TestSeparationSubsamplingIntegration:
     def test_parser_options(self) -> None:
@@ -3891,13 +4077,67 @@ class TestSeparationSubsamplingIntegration:
         args_zero = parser.parse_args(["--max-separation-rows", "0"])
         assert args_zero.max_separation_rows == 0
 
-    def test_settings_validates_max_separation_rows(self) -> None:
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 2"):
-            bench.Settings(max_separation_rows=2)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 0"):
-            bench.Settings(max_separation_rows=0)
-        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got -10"):
-            bench.Settings(max_separation_rows=-10)
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [
+            (2, "2"),
+            (0, "0"),
+            (-10, "-10"),
+            (30.0, "30.0"),
+            (30.5, "30.5"),
+            (True, "True"),
+            ("2000", "'2000'"),
+        ],
+    )
+    def test_settings_validates_max_separation_rows(self, value: Any, shown: str) -> None:
+        """An integer ``>= 3`` or ``None``; a float, a bool or a string is refused (#541)."""
+        message = rf"^max_separation_rows must be an integer >= 3 or None; got {shown}\.$"
+        with pytest.raises(ValueError, match=message):
+            bench.Settings(max_separation_rows=value)
+
+    def test_settings_accepts_an_integer_max_separation_rows(self) -> None:
+        assert bench.Settings(max_separation_rows=3).max_separation_rows == 3
+        assert bench.Settings(max_separation_rows=np.int64(500)).max_separation_rows == 500
+        assert bench.Settings(max_separation_rows=None).max_separation_rows is None
+
+    @pytest.mark.parametrize("value", ["1", "2", "-1", "-2000"])
+    def test_the_command_line_refuses_a_limit_below_three_other_than_zero(
+        self,
+        value: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """
+        ``0`` is the one spelling of "no limit"; 1, 2 and a negative value end
+        in an argparse error naming the option, before anything runs (#541).
+        """
+
+        def run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("the run must not start")
+
+        monkeypatch.setattr(bench, "run", run)
+        for quick in ([], ["--quick"]):
+            with pytest.raises(SystemExit) as raised:
+                bench.main(
+                    [*quick, "--max-separation-rows", value, "--out", str(tmp_path / "o.jsonl")]
+                )
+            assert raised.value.code == 2
+            error = capsys.readouterr().err.splitlines()[-1]
+            assert error.endswith(
+                "error: argument --max-separation-rows: must be 0 (no limit) or an integer "
+                f">= 3; got {value}"
+            )
+
+    def test_the_help_text_names_the_spelling_of_no_limit(self) -> None:
+        parser = bench._parser()
+        (action,) = [a for a in parser._actions if "--max-separation-rows" in a.option_strings]
+        assert action.help == (
+            "rows of a training or test part above which its separation measures are computed "
+            "on a class-stratified subsample of that many rows: an integer >= 3, or 0 for no "
+            "limit"
+        )
+        assert action.default == 2000
 
     def test_quick_respects_separation_flags(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
