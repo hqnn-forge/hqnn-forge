@@ -28,6 +28,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 
+from hqnn_forge.models._trunk import validate_dropout_p
 from hqnn_forge.models.base import BinaryClassifierBase
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
@@ -96,8 +97,7 @@ class ClassicalBaseline(BinaryClassifierBase):
                 raise ValueError(
                     f"activation must be one of {sorted(_ACTIVATIONS)}; got {activation!r}."
                 )
-            if not 0.0 <= dropout_p < 1.0:
-                raise ValueError(f"dropout_p must lie in [0, 1); got {dropout_p}.")
+            validate_dropout_p(dropout_p)
 
             self.n_input_features = n_input_features
             layers: list[nn.Module] = []

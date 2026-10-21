@@ -128,7 +128,8 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         Prepend ``Linear(n_input_features → n_qubits) + Tanh``.  Default: True.
         If ``False``, input must already lie in (-π, π); it is not rescaled.
     dropout_p:
-        Dropout probability applied after the quantum layer.  Default: 0.0.
+        Dropout probability applied after the quantum layer, in ``[0, 1)``;
+        raises ``ValueError`` otherwise.  Default: 0.0.
     device_name:
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see

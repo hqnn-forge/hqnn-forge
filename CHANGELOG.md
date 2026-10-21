@@ -382,6 +382,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched (#575, #618)
 
 ### Changed
+- Devices whose registered constructor does not explicitly declare `seed` do not receive it;
+  passing a non-`None` seed warns and directs users to the device's own seeding option (#659)
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
   allocating a dense diagonal state tensor; shot estimates are the correctly rounded value of
   `count / S`, guaranteeing bit-for-bit identical results across chunk sizes for the same drawn bitstrings (#617)
@@ -525,6 +527,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 - `kernel_target_alignment` accepts array-like labels such as a NumPy array or pandas Series
   (#539)
+- `HybridBinaryClassifier` and `ParallelHybridClassifier` reject `dropout_p` outside `[0, 1)`
+  with the same message as `MulticlassHybridClassifier`, before any layer is built. A
+  checkpoint saved with such a value no longer loads as is; `load_checkpoint` names the fix,
+  `load_checkpoint(path, dropout_p=0.0)`. `ClassicalBaseline` now words its `dropout_p` error
+  the same way (#651)
 
 ### Fixed
 - `examples/benchmark_rydberg_features.py`: `check_writable()` applies Windows' limit of 255
