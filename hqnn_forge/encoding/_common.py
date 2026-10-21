@@ -41,11 +41,6 @@ KnownDevice = Literal["lightning.gpu", "lightning.kokkos", "lightning.qubit", "d
 #: backend is unavailable (``default.qubit``, the chain's end, has nowhere to
 #: fall back to).  Every other name is constructed as given.
 KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
-#: Devices :func:`resolve_device` passes an explicit ``seed=None`` when
-#: unseeded.  Omitting ``seed`` leaves PennyLane's ``"global"`` default, which
-#: draws a seed from ``np.random`` even for analytic circuits (#417); these
-#: devices accept ``None`` and create a private, entropy-seeded generator.
-_SEED_NONE_DEVICES: frozenset[str] = frozenset({*KNOWN_DEVICES, "default.mixed"})
 #: A PennyLane device name: one of :data:`KNOWN_DEVICES`, or any other.
 DeviceName = str
 Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient"]
@@ -504,6 +499,18 @@ def validate_seed(seed: int | None) -> int | None:
     return seed
 
 
+def _device_takes_seed(device_name: DeviceName) -> bool:
+    """Whether the registered device constructor explicitly declares ``seed``."""
+    entry = qml.plugin_devices.get(device_name)
+    if entry is None:
+        return False
+    try:
+        device_class = entry.load()
+    except DEVICE_FAILURES:
+        return False
+    return "seed" in inspect.signature(device_class.__init__).parameters
+
+
 def backend_repr(qlayer: qml.qnn.TorchLayer) -> str:
     """
     The ``extra_repr`` fragment naming the device and method the QNode runs on.
@@ -549,13 +556,14 @@ def resolve_device(
         Number of qubits to allocate.
     seed:
         Seed of the device's own random generator, which draws the shot
-        samples.  ``None`` creates an unseeded private generator, without
-        drawing from NumPy's global RNG.  Neither ``torch.manual_seed`` nor
-        ``numpy.random.seed`` controls it: pass ``seed`` for repeatable
-        shot-based results.  ``default.qubit``,
-        ``default.mixed`` and the lightning devices honour it.  Other plugins
-        receive an explicit seed as given, while ``None`` leaves their default
-        unchanged (they need not accept a ``seed`` keyword).  See ``validate_seed``.
+        samples.  The seed, including ``None``, is passed only when the
+        registered device constructor explicitly declares a ``seed``
+        parameter.  ``None`` lets supported devices create an unseeded private
+        generator, without drawing from NumPy's global RNG.  Neither
+        ``torch.manual_seed`` nor ``numpy.random.seed`` controls it: pass
+        ``seed`` for repeatable shot-based results.  Devices without an
+        explicit ``seed`` parameter do not receive it; use their own seeding
+        option instead.  See ``validate_seed``.
 
     Returns
     -------
@@ -580,14 +588,26 @@ def resolve_device(
         at that step, and the last backend's own error if every step fails;
         ``default.qubit`` has no dependencies, so the latter means PennyLane
         itself is broken.
+
+    Warns
+    -----
+    UserWarning
+        After successful construction, if a non-``None`` seed is not forwarded
+        because the device constructor does not explicitly declare a ``seed``
+        parameter.
     """
     seed = validate_seed(seed)
-    kwargs: dict[str, object] = {"seed": seed}
-    if seed is None and device_name not in _SEED_NONE_DEVICES:
-        # A plugin need not accept a seed keyword: leave its default alone.
-        kwargs = {}
     if device_name not in KNOWN_DEVICES:
+        takes_seed = _device_takes_seed(device_name)
+        kwargs: dict[str, object] = {"seed": seed} if takes_seed else {}
         dev = qml.device(device_name, wires=n_qubits, **kwargs)
+        if seed is not None and not takes_seed:
+            warnings.warn(
+                f"The seed was not forwarded to device '{device_name}'; "
+                "use its own seeding option instead.",
+                UserWarning,
+                stacklevel=_stacklevel_outside_package(),
+            )
         logger.debug("Quantum device initialised: %s (%d qubits)", device_name, n_qubits)
         return dev
     start = FALLBACK_CHAIN.index(device_name) + 1 if device_name in FALLBACK_CHAIN else 0
@@ -598,6 +618,8 @@ def resolve_device(
             # Already failed and warned about in this process: go straight on.
             logger.debug("Skipping %s, which failed before: %r", name, _FAILED_BACKENDS[name])
             continue
+        takes_seed = _device_takes_seed(name)
+        kwargs = {"seed": seed} if takes_seed else {}
         try:
             dev = qml.device(name, wires=n_qubits, **kwargs)
         except DEVICE_FAILURES as exc:
@@ -623,6 +645,13 @@ def resolve_device(
             continue
         if attempt:
             logger.info("Quantum device fell back from %s to %s", device_name, name)
+        if seed is not None and not takes_seed:
+            warnings.warn(
+                f"The seed was not forwarded to device '{name}'; "
+                "use its own seeding option instead.",
+                UserWarning,
+                stacklevel=_stacklevel_outside_package(),
+            )
         logger.debug("Quantum device initialised: %s (%d qubits)", name, n_qubits)
         return dev
     raise AssertionError("unreachable: the fallback chain always ends in a raise or a return")

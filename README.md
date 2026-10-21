@@ -205,8 +205,9 @@ device_arn = "arn:aws:braket:::device/qpu/..."
 
 An option that must be a Python object rather than a string cannot be passed this way, so a
 device that needs one, such as `"qiskit.remote"` (its `backend`), does not work here. The
-library passes `seed` to a plugin device as given, so the example seeds only the simulators in
-`KNOWN_DEVICES`.
+library passes `seed` only to devices whose registered constructor explicitly declares it;
+otherwise it warns that the device's own seeding option should be used. The example passes the
+seed directly.
 
 ---
 
