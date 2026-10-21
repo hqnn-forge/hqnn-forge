@@ -805,8 +805,11 @@ class TestChoosingTheStepCount:
         ``n = ceil(2t · (W + Nγ/2))``, so ``dt · (W + Nγ/2) <= 1/2``, ``W`` the
         spread of the energies of ``H``: the largest error of the ``2n``-step
         features against the exponential of the full generator is a third of
-        the largest ``|F_n − F_2n|`` within 10 % at these five points (0.91
-        to 1.17 over the sweep of #627).
+        the largest ``|F_n − F_2n|`` within 10 % at these five points.  The
+        first point is the one that needs the factor 2: with
+        ``dt · (W + Nγ/2) <= 1`` its ratio is 1.37, while the other four stay
+        near 1 either way.  The range over the whole parameter domain is the
+        sweep's to check (#627).
         """
         omega = self.OMEGA
         gamma = gamma_over_omega * omega
@@ -827,7 +830,9 @@ class TestChoosingTheStepCount:
         fine = readout(checked_evolve(h, t, gamma=gamma, n_steps=2 * n), pairs=pairs)
         error = (fine - exact).abs().max().item()
         estimate = (coarse - fine).abs().max().item() / 3
-        assert error > 1e-8  # far above the rounding of either run: the ratio is not noise
+        # 10x above the rounding floor of about 1e-10, so the ratio is not noise;
+        # the smallest error at these points is 1.7e-8
+        assert error > 1e-9
         assert error / estimate == pytest.approx(1.0, rel=0.1)
 
 
