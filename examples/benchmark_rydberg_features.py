@@ -2400,6 +2400,12 @@ def check_writable(out: str | os.PathLike[str]) -> None:
             mode = os.stat(path).st_mode
         except FileNotFoundError:
             mode = None
+        if mode is not None and stat.S_ISDIR(mode):
+            raise IsADirectoryError(
+                errno.EISDIR,
+                os.strerror(errno.EISDIR),
+                str(path),
+            )
         if mode is not None and (stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
             if not os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids):
                 raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))

@@ -1364,8 +1364,7 @@ class TestCommandLine:
         if case == "missing directory":
             out, reason = tmp_path / "missing" / "x.jsonl", "No such file or directory"
         elif case == "a directory":
-            out = tmp_path / "results"
-            reason = "Permission denied" if os.name == "nt" else "Is a directory"
+            out, reason = tmp_path / "results", "Is a directory"
             out.mkdir()
             (out / "earlier.jsonl").write_text("an earlier run\n", encoding="utf-8")
         else:
@@ -1417,14 +1416,20 @@ class TestCommandLine:
         assert earlier.stat().st_mtime_ns == stat.st_mtime_ns
         assert sorted(p.name for p in tmp_path.iterdir()) == ["earlier.jsonl"]
 
+    # Skips only when Windows requires a symlink privilege the user lacks.
     @pytest.mark.may_skip
     def test_a_broken_symlink_out_is_refused(self, tmp_path: Path) -> None:
         """Its target's missing directory is checked, not the symlink's own one."""
         out = tmp_path / "results.jsonl"
         try:
             out.symlink_to(tmp_path / "gone" / "results.jsonl")
-        except (OSError, NotImplementedError) as exc:
-            pytest.skip(f"symlink creation is unavailable: {exc}")
+        except NotImplementedError as error:
+            pytest.skip(f"symlink creation is unavailable: {error}")
+        except OSError as error:
+            if getattr(error, "winerror", None) != 1314:
+                raise
+            pytest.skip("creating a symlink needs Developer Mode or SeCreateSymbolicLinkPrivilege")
+
         message = f"out {str(out)!r} cannot be written: No such file or directory."
         with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             bench.check_writable(out)
