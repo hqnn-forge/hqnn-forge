@@ -2293,6 +2293,30 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_WINDOWS = os.name == "nt"
+
+
+def _filename_limit(directory: Path) -> int:
+    """
+    Return the longest filename ``directory``'s filesystem allows, or ``-1`` if unknown.
+
+    The unit is that of :func:`_filename_length`.
+    """
+    try:
+        return os.pathconf(directory, "PC_NAME_MAX")
+    except (AttributeError, OSError, ValueError):
+        # Windows has no pathconf; its filesystems allow 255 UTF-16 code units.
+        return 255 if _WINDOWS else -1
+
+
+def _filename_length(name: str) -> int:
+    """Measure ``name`` in the filesystem's own unit: UTF-16 code units on Windows, else bytes."""
+    if _WINDOWS:
+        # "surrogatepass" keeps the unpaired surrogates that Windows filenames may hold.
+        return len(name.encode("utf-16-le", "surrogatepass")) // 2
+    return len(os.fsencode(name))
+
+
 def check_writable(out: str | os.PathLike[str]) -> None:
     """
     Refuse an ``out`` that cannot be written, and change nothing.
@@ -2304,11 +2328,13 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     Other existing targets are probed by opening them for appending too.
     For a new file a temporary file is created in its directory and removed,
     keeping the output basename in the probe's prefix unless it would exceed
-    ``PC_NAME_MAX`` with the eight random characters appended.  The output
-    basename's byte length is checked against that limit where available;
-    an unavailable filesystem limit is ignored.  Errors become a ``ValueError``
-    naming ``out``: a missing directory, a directory in its place, no write
-    permission, or a name that is too long.
+    the filename limit with the eight random characters appended.  The limit
+    is ``PC_NAME_MAX`` where the platform provides it, and 255 UTF-16 code
+    units on Windows, which has no ``os.pathconf``; names are measured in
+    bytes, or in UTF-16 code units on Windows.  The output basename is checked
+    against that limit; where no limit is available it is ignored.  Errors
+    become a ``ValueError`` naming ``out``: a missing directory, a directory in
+    its place, no write permission, or a name that is too long.
 
     Checked up front rather than by writing to a temporary file renamed over
     ``out`` at the end: :func:`run` writes each record as it comes, so that
@@ -2331,18 +2357,11 @@ def check_writable(out: str | os.PathLike[str]) -> None:
             with open(path, "a", encoding="utf-8"):
                 pass
         else:
-            try:
-                name_max = os.pathconf(path.parent, "PC_NAME_MAX")
-            except (AttributeError, OSError, ValueError):
-                name_max = -1
-            if name_max > 0 and len(os.fsencode(path.name)) > name_max:
+            name_max = _filename_limit(path.parent)
+            if name_max > 0 and _filename_length(path.name) > name_max:
                 raise OSError(errno.ENAMETOOLONG, os.strerror(errno.ENAMETOOLONG), str(path))
             prefix = f".{path.name}."
-            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max or (
-                name_max <= 0
-                and os.name == "nt"
-                and len(prefix.encode("utf-16-le")) // 2 + 8 > 255
-            ):
+            if name_max > 0 and _filename_length(prefix) + 8 > name_max:
                 prefix = ".out."
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=prefix):
                 pass
