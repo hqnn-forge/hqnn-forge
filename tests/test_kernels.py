@@ -24,11 +24,13 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
 
+import numpy as np
 import pennylane as qml
 import pytest
 import torch
 
 from hqnn_forge import kernels
+from hqnn_forge.diagnostics import fisher_discriminant_ratio
 from hqnn_forge.encoding import (
     AmplitudeEncodingLayer,
     DataReuploadingLayer,
@@ -36,6 +38,7 @@ from hqnn_forge.encoding import (
 )
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.kernels import (
+    _binary_labels,
     encoded_states,
     kernel_from_states,
     kernel_target_alignment,
@@ -620,6 +623,63 @@ class TestKernelTargetAlignment:
     def test_rejected(self, K: torch.Tensor, y: torch.Tensor, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             kernel_target_alignment(K, y)
+
+    @pytest.mark.filterwarnings("ignore:Converting a tensor with requires_grad=True:UserWarning")
+    @pytest.mark.parametrize("kind", ["list", "tuple", "ndarray", "zero_dim_tensors"])
+    def test_array_like_labels_match_tensor_labels(self, kind: str) -> None:
+        A = _angles(M)
+        K = A @ A.T
+        labels = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+        y: Any
+        if kind == "list":
+            y = labels
+        elif kind == "tuple":
+            y = tuple(labels)
+        elif kind == "ndarray":
+            y = np.array(labels)
+        else:
+            # A list of 0-d tensors is read by torch.as_tensor, not by np.asarray, which
+            # refuses a tensor that requires grad.
+            y = [torch.tensor(v, requires_grad=(i == 1)) for i, v in enumerate(labels)]
+        expected = kernel_target_alignment(K, torch.tensor(labels))
+        assert float(kernel_target_alignment(K, y)) == pytest.approx(float(expected))
+
+
+class TestBinaryLabels:
+    def test_maps_both_encodings_to_plus_minus_one(self) -> None:
+        for y in (
+            [0, 1, 1, 0],
+            [-1, 1, 1, -1],
+            torch.tensor([0, 1, 1, 0]),
+            np.array([0, 1, 1, 0]),
+        ):
+            out = _binary_labels(y, 4)
+            assert out.dtype == torch.float64
+            assert out.tolist() == [-1.0, 1.0, 1.0, -1.0]
+
+    @pytest.mark.parametrize("values", [[-1.0, 1.0], [0.0, 1.0]])
+    def test_keeps_the_graph_for_both_encodings(self, values: list[float]) -> None:
+        y = torch.tensor(values, requires_grad=True)
+        assert _binary_labels(y, 2).requires_grad
+
+    @pytest.mark.parametrize(
+        ("y", "n_samples", "match"),
+        [
+            ([0, 1], 3, "3 labels"),
+            ([1, 1], 2, "both classes"),
+            ([0, 2], 2, "both classes"),
+        ],
+    )
+    def test_rejected(self, y: list[int], n_samples: int, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            _binary_labels(y, n_samples)
+
+    def test_separation_accepts_labels_that_require_grad(self) -> None:
+        torch.manual_seed(0)
+        F = torch.randn(8, 3, dtype=torch.float64)
+        y = torch.tensor([0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+        expected = fisher_discriminant_ratio(F, y)
+        assert fisher_discriminant_ratio(F, y.clone().requires_grad_()) == expected
 
 
 class TestDifferentiableKernel:

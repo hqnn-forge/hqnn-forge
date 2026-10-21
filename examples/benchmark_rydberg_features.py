@@ -199,8 +199,20 @@ imports, though, so an edit saved while they run (the script is read before
 ``torch`` is imported, the package while PennyLane is) still files the old
 code's features under the new code's key (#574).  A package without source
 files, or with a module that is not source, cannot be fingerprinted and is
-refused; ``--no-cache`` runs there.  Entries of other versions stay in the
-directory under their own names and are not removed (#575).
+refused; ``--no-cache`` runs there.  Entries of other versions or code stay
+in the directory under their own names until pruned.  ``--prune-cache``
+(:meth:`FeatureCache.prune`) removes stale entries whose stored ``code_sha256``
+or key environment differs from the running process, reports the files and
+bytes removed, and exits without running the benchmark; files it cannot read as
+an entry (such as ``*.part`` files or entries from before #543) are listed and
+left untouched (#575).
+
+A power loss shortly after ``os.replace`` can still leave the final ``.npz`` entry empty or
+partially written.  On the next request, ``fetch`` treats an unreadable entry as a cache
+miss, warns, and recomputes the features, replacing the damaged entry.  This costs
+recomputation but does not return a false cache hit.  Calling ``fsync`` on every
+temporary file and the cache directory would add overhead to every write to guard
+against this rare failure, so the cache does not do so.
 
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
@@ -245,6 +257,10 @@ Data
     shown an effect.  That holds for the ``linear`` head.  An ``mlp`` head
     can form products of its inputs itself, on arm B's features as on the
     inputs, so its ``A − B`` on this task is no check of the pipeline.
+    It has ``2^N − 1`` raw columns, so ``N`` is at most
+    :data:`POSITIVE_CONTROL_MAX_ATOMS` (12) on it with any arms: each PCA
+    fit of a fold takes their covariance, about 0.7 GiB at 12 atoms and
+    2.6 GiB at 13.
 ``iranian-churn``, ``taiwanese-bankruptcy``, ``cervical-cancer-risk``
     The UCI loaders of :mod:`hqnn_forge.data`, read from ``--data-path``
     (``--download`` fetches a missing file).
@@ -324,12 +340,18 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
 import math
+import numbers
 import os
+import stat
+import tempfile
 import time
+import warnings
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -348,7 +370,7 @@ from hqnn_forge.data import (
     load_taiwanese_bankruptcy,
 )
 from hqnn_forge.diagnostics import separation_measures
-from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding import AUTO_BACKPROP_MAX_QUBITS, QuantumEncodingLayer
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
 from hqnn_forge.experiment import COMPARED_VERSIONS, _plain, environment
 from hqnn_forge.models import (
@@ -385,8 +407,35 @@ DATASETS: tuple[str, ...] = (
 )
 #: Losses by name.  ``bce`` makes the linear head on the inputs a logistic regression.
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
+
+
+def _positive_integer(value: Any) -> bool:
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and not value < 1
+
+
+def _positive_real(value: Any) -> bool:
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and not value <= 0
+    )
+
+
+#: Validation predicate and shared bound wording for each tunable training setting.
+TRAINING_SETTING_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "lr": (_positive_real, "finite and > 0"),
+    "max_epochs": (_positive_integer, ">= 1"),
+    "batch_size": (_positive_integer, ">= 1"),
+    "patience": (
+        lambda value: value is None or _positive_integer(value),
+        ">= 1 or None",
+    ),
+}
+
 #: Training settings the shared search space may vary, as in ``hqnn_forge.benchmark``.
-TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
+TUNABLE: frozenset[str] = frozenset(TRAINING_SETTING_RULES)
+
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
 #: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
@@ -404,7 +453,19 @@ class Settings:
     ----------
     n_atoms:
         Atoms ``N`` of the chain: the number of PCA components, of inputs
-        and of qubits of arm D.
+        and of qubits of arm D.  At most :data:`~hqnn_forge.rydberg.MAX_ATOMS`
+        (10) with arm A or B, the Rydberg maps' limit, and at most
+        :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS` (12) with arm
+        D: both of its circuits run on ``default.qubit`` with backprop, and
+        12 qubits is where the library stops choosing that pair for memory.
+        The frozen circuit evaluates ``1024`` rows at a time, each a state of
+        ``2^N`` ``complex128`` amplitudes, so ``1024 · 16 · 2^N`` bytes per
+        copy of the batch: 64 MiB at 12 qubits, doubling with each further
+        one (1 GiB at 16); ``D-hybrid`` trains through backprop, measured at
+        more than 1 GB for a batch of 64 at 14 qubits.  The positive control
+        has a bound of its own, :data:`POSITIVE_CONTROL_MAX_ATOMS` (12) with
+        every arm, checked by :func:`positive_control` when it is loaded:
+        each PCA fit takes the covariance of its ``2^N − 1`` columns.
     omega:
         Rabi frequency Ω in rad/µs.  Default: the reference ``4π``.
     omega_t:
@@ -434,9 +495,15 @@ class Settings:
     loss:
         A key of :data:`LOSSES`.
     lr, max_epochs, batch_size, patience:
-        Adam learning rate and the ``train_model`` settings, unless tuned.
+        Adam learning rate (finite and ``> 0``) and the ``train_model`` settings
+        (``max_epochs``, ``batch_size`` and ``patience`` ``>= 1``, ``patience``
+        also ``None``), unless tuned.  ``patience=None`` is no early
+        stopping: every model trains for ``max_epochs`` epochs
+        (``--patience 0``, recorded as ``null``; a negative ``--patience`` is a
+        command-line error).
     n_trials, inner_folds, search_space:
-        The tuning budget (0 trials: no tuning) and its search space.
+        The tuning budget (0 trials: no tuning) and its search space; its
+        values are held to the bounds above.
     n_samples:
         Samples of the positive control.
     random_state:
@@ -480,11 +547,15 @@ class Settings:
     separation_seed: int = 0
 
     def __post_init__(self) -> None:
-        # The limit of the Rydberg maps and arm D's depth bind only where those arms run.
-        most = MAX_ATOMS if {"A", "B"} & set(self.arms) else None
-        if self.n_atoms < 1 or (most is not None and self.n_atoms > most):
+        # The limit of the Rydberg maps, arm D's register and arm D's depth bind only where
+        # those arms run.
+        bounds = [MAX_ATOMS] if {"A", "B"} & set(self.arms) else []
+        if "D" in self.arms:
+            bounds.append(AUTO_BACKPROP_MAX_QUBITS)
+        if self.n_atoms < 1 or (bounds and self.n_atoms > min(bounds)):
             raise ValueError(
-                f"n_atoms must be >= 1, and <= {MAX_ATOMS} with arm A or B; got {self.n_atoms}."
+                f"n_atoms must be >= 1, <= {MAX_ATOMS} with arm A or B and "
+                f"<= {AUTO_BACKPROP_MAX_QUBITS} with arm D; got {self.n_atoms}."
             )
         if self.shots is not None and self.shots < 1:
             raise ValueError(f"shots must be None or >= 1; got {self.shots}.")
@@ -492,10 +563,12 @@ class Settings:
             raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
         if "D" in self.arms and self.circuit_layers < 1:
             raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
-        if self.max_epochs < 1:
-            raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
-        if self.patience is not None and self.patience < 1:
-            raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
+        # Also where tuning overrides them: a refused default should not depend on --trials.
+        defaults = self.defaults
+        for key, (predicate, bound) in TRAINING_SETTING_RULES.items():
+            value = defaults[key]
+            if not predicate(value):
+                raise ValueError(f"{key} must be {bound}; got {value!r}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -519,6 +592,14 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
+
+        for key, values in self.search_space.items():
+            predicate, bound = TRAINING_SETTING_RULES[key]
+            if not all(predicate(value) for value in values):
+                raise ValueError(
+                    f"search_space['{key}'] values must be {bound}; got {list(values)!r}."
+                )
+
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
@@ -569,6 +650,23 @@ QUICK = Settings(
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
+
+#: Largest ``n_atoms`` of :func:`positive_control`, whatever the arms (#540).  The control
+#: has ``2^N − 1`` raw columns, and every :func:`preprocess` fits a :class:`PCANormalizer`
+#: on them: an ``np.cov`` of ``8 · (2^N − 1)²`` bytes (128 MiB at ``N = 12``, 512 MiB at
+#: 13), then its ``eigh`` and a sorted copy of the eigenvectors, the same size again each,
+#: plus LAPACK's workspace, whatever the number of samples.  Measured per fit (peak resident
+#: memory above the import, wall time; the training rows of one default fold of 600
+#: samples, and of ``--quick``'s 160): 0.05 to 0.07 GiB and at most 0.4 s at ``N = 10``,
+#: 0.7 GiB and 10 to 13 s at 12, 2.6 to 2.7 GiB and about 75 s at 13; a run fits
+#: ``n_splits · (1 + inner_folds)`` times with tuning (40 at the defaults).  12 is therefore
+#: the largest ``N`` whose fit stays under 1 GiB at these sample counts, the scale at which
+#: :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS` switches away from backprop to
+#: bound memory, and it is arm D's own limit, so arms C and D run on the control at their
+#: largest register.  The raw matrix, ``8 · n_samples · (2^N − 1)`` bytes, is the smaller
+#: term (19 MiB at ``N = 12`` and 600 samples); ``--samples`` scales it and the rank check's
+#: SVD, not the covariance.
+POSITIVE_CONTROL_MAX_ATOMS: Final = 12
 
 
 class PositiveControl(NamedTuple):
@@ -674,7 +772,8 @@ def positive_control(
     Parameters
     ----------
     n_atoms:
-        ``N >= 2``.
+        ``2 <= N <=`` :data:`POSITIVE_CONTROL_MAX_ATOMS` (12), whatever the
+        arms: the covariance of the ``2^N − 1`` columns is the bound.
     n_samples:
         Number of samples.
     seed:
@@ -686,8 +785,7 @@ def positive_control(
     -------
     PositiveControl
     """
-    if n_atoms < 2:
-        raise ValueError(f"n_atoms must be >= 2 for a chain with a bond; got {n_atoms}.")
+    check_positive_control_atoms(n_atoms)
     if noise <= 0:
         raise ValueError(f"noise must be > 0; got {noise}.")
     rng = np.random.default_rng(seed)
@@ -696,6 +794,23 @@ def positive_control(
     owner = np.repeat(np.arange(n_atoms), copies)
     X = latent[:, owner] + noise * rng.standard_normal((n_samples, owner.size))
     return PositiveControl(np.ascontiguousarray(X), product_labels(latent), latent)
+
+
+def check_positive_control_atoms(n_atoms: int) -> None:
+    """
+    Refuse an ``n_atoms`` :func:`positive_control` cannot be drawn with.
+
+    Called by :func:`positive_control`, and by :func:`main` before any
+    dataset is loaded, so that a UCI dataset listed before the control is
+    not read, or downloaded, for a run that is refused anyway.
+    """
+    if n_atoms < 2:
+        raise ValueError(f"n_atoms must be >= 2 for a chain with a bond; got {n_atoms}.")
+    if n_atoms > POSITIVE_CONTROL_MAX_ATOMS:
+        raise ValueError(
+            f"n_atoms must be <= {POSITIVE_CONTROL_MAX_ATOMS} with the positive control "
+            f"(2^N - 1 raw columns); got {n_atoms}."
+        )
 
 
 def load_dataset(
@@ -752,8 +867,10 @@ def fold_seeds(random_state: int, dataset: str, n_splits: int) -> tuple[int, lis
     seed and the dataset's position in :data:`DATASETS`; its first child
     seeds the outer split, and each further child one fold's validation
     split (``inner_seed``), SMOTE draw, initialisation, batch order and
-    tuning.
+    tuning.  A name outside :data:`DATASETS` has no position and is refused.
     """
+    if dataset not in DATASETS:
+        raise ValueError(f"unknown dataset {dataset!r}; choose from {list(DATASETS)}.")
     root = np.random.SeedSequence([random_state, DATASETS.index(dataset)])
     split_root, *fold_roots = root.spawn(n_splits + 1)
     names = ("inner_seed", "smote_seed", "init_seed", "batch_seed", "tune_seed")
@@ -1300,6 +1417,44 @@ class CachedFeatures(NamedTuple):
     environment: dict[str, Any] | None = None
 
 
+class PruneReport(NamedTuple):
+    """
+    The outcome of pruning a :class:`FeatureCache`.
+
+    Parameters
+    ----------
+    files:
+        Number of stale cache entries removed.
+    bytes:
+        Total bytes of the removed entries.
+    unreadable:
+        Files in the cache directory that could not be read as a valid
+        entry (leftover ``*.part`` files, legacy entries from before #543,
+        or corrupt files), left untouched.
+    """
+
+    files: int
+    bytes: int
+    unreadable: tuple[Path, ...]
+
+
+_ENTRY_ERRORS = (
+    OSError,
+    EOFError,
+    ValueError,
+    KeyError,
+    TypeError,
+    zipfile.BadZipFile,
+)
+
+
+def _stored_environment(stored: Mapping[str, Any]) -> dict[str, Any]:
+    environment = json.loads(str(stored["environment"]))
+    if not isinstance(environment, dict):
+        raise TypeError("the stored environment is not a JSON object")
+    return environment
+
+
 class FeatureCache:
     """
     Features on disk, one ``.npz`` file per input matrix, feature-map
@@ -1312,7 +1467,8 @@ class FeatureCache:
     they were computed in (JSON) and the code digest; it is written to a
     temporary name and renamed, so an interrupted run leaves no partial
     entry.  With ``directory=None`` nothing is stored and every request
-    computes.
+    computes.  With ``--prune-cache``, stale entries are removed, the outcome
+    is reported, and the process exits without running the benchmark.
 
     Parameters
     ----------
@@ -1389,14 +1545,24 @@ class FeatureCache:
         ``compute(inputs)``, timed and stored with this cache's environment.
         """
         path = self.path(inputs, labels, config)
-        if path is not None and path.exists():
-            with np.load(path, allow_pickle=False) as stored:
-                return CachedFeatures(
-                    np.asarray(stored["features"], dtype=np.float64),
-                    float(stored["seconds"]),
-                    True,
-                    json.loads(str(stored["environment"])),
+        if path is not None:
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    return CachedFeatures(
+                        np.asarray(stored["features"], dtype=np.float64),
+                        float(stored["seconds"]),
+                        True,
+                        _stored_environment(stored),
+                    )
+            except FileNotFoundError:
+                pass
+            except _ENTRY_ERRORS as error:
+                warnings.warn(
+                    f"feature cache entry {path} is unreadable ({error!r}); recomputing",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
+
         start = time.perf_counter()
         features = np.ascontiguousarray(compute(inputs), dtype=np.float64)
         seconds = time.perf_counter() - start
@@ -1412,6 +1578,69 @@ class FeatureCache:
                 )
             os.replace(partial, path)
         return CachedFeatures(features, seconds, False, self.environment)
+
+    def prune(self) -> PruneReport:
+        """
+        Remove entries of other code or versions from this cache directory.
+
+        Inspects every file in :attr:`directory`.  An entry is removed if its
+        stored ``code_sha256`` or :func:`key_environment` differs from this
+        cache.  Entries with matching code and key environment are kept.
+        Files that cannot be read as a valid entry (leftover ``*.part``
+        files, entries from before #543, or corrupt files) are not removed
+        and are listed in :attr:`PruneReport.unreadable`.
+
+        Returns
+        -------
+        PruneReport
+            Number of removed files, total bytes removed, and unreadable files.
+        """
+        if self.directory is None or not self.directory.exists():
+            return PruneReport(files=0, bytes=0, unreadable=())
+        assert self.code_sha256 is not None, "cache directory exists but code_sha256 is None"
+        removed_files = 0
+        removed_bytes = 0
+        unreadable: list[Path] = []
+        current_key_env = key_environment(self.environment)
+
+        for path in sorted(self.directory.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix != ".npz":
+                unreadable.append(path)
+                continue
+
+            is_stale = False
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    if "code_sha256" not in stored:
+                        unreadable.append(path)
+                        continue
+                    entry_code = str(stored["code_sha256"])
+                    if entry_code != self.code_sha256:
+                        is_stale = True
+                    else:
+                        raw_env = _stored_environment(stored)
+                        entry_key_env = key_environment(raw_env)
+                        is_stale = entry_key_env != current_key_env
+            except _ENTRY_ERRORS:
+                unreadable.append(path)
+                continue
+
+            if is_stale:
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+                except OSError:
+                    unreadable.append(path)
+
+        return PruneReport(
+            files=removed_files,
+            bytes=removed_bytes,
+            unreadable=tuple(unreadable),
+        )
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
@@ -1850,7 +2079,8 @@ def run_dataset(
     Parameters
     ----------
     name:
-        A name in :data:`DATASETS`; it selects the dataset's seeds.
+        A name in :data:`DATASETS`; it selects the dataset's seeds.  Another
+        name raises ``ValueError`` (:func:`fold_seeds`).
     X, y:
         Raw features ``(n_samples, n_features)`` and binary labels.
     settings, cache:
@@ -2076,6 +2306,60 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def check_writable(out: str | os.PathLike[str]) -> None:
+    """
+    Refuse an ``out`` that cannot be written, and change nothing.
+
+    An existing regular file is opened for appending and closed without a
+    write, so its content stays as it is.  FIFOs and character or block
+    devices are checked with ``os.access`` without opening them, using effective
+    IDs where supported: opening a FIFO would interfere with its reader.
+    Other existing targets are probed by opening them for appending too.
+    For a new file a temporary file is created in its directory and removed,
+    keeping the output basename in the probe's prefix unless it would exceed
+    ``PC_NAME_MAX`` with the eight random characters appended.  The output
+    basename's byte length is checked against that limit where available;
+    an unavailable filesystem limit is ignored.  Errors become a ``ValueError``
+    naming ``out``: a missing directory, a directory in its place, no write
+    permission, or a name that is too long.
+
+    Checked up front rather than by writing to a temporary file renamed over
+    ``out`` at the end: :func:`run` writes each record as it comes, so that
+    a run which fails late keeps the records written until then in ``out``,
+    and a rename would move them elsewhere.  The check holds for the moment
+    it is made; a directory removed during the run still fails at the first
+    record.
+    """
+    path = Path(out)
+    try:
+        try:
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and (stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+            if not os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+        # A broken symlink counts as existing: opening it fails here, not at the first record.
+        elif mode is not None or path.is_symlink():
+            with open(path, "a", encoding="utf-8"):
+                pass
+        else:
+            try:
+                name_max = os.pathconf(path.parent, "PC_NAME_MAX")
+            except (AttributeError, OSError, ValueError):
+                name_max = -1
+            if name_max > 0 and len(os.fsencode(path.name)) > name_max:
+                raise OSError(errno.ENAMETOOLONG, os.strerror(errno.ENAMETOOLONG), str(path))
+            prefix = f".{path.name}."
+            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max:
+                prefix = ".out."
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=prefix):
+                pass
+    except OSError as error:
+        reason = error.strerror or str(error)
+        raise ValueError(f"out {str(path)!r} cannot be written: {reason}.") from error
+
+
 def run(
     datasets: Mapping[str, tuple[FloatArray, IntArray, int | None]],
     settings: Settings,
@@ -2093,10 +2377,11 @@ def run(
     settings:
         The run's settings.
     out:
-        The JSON-lines file; overwritten.  It is opened with the first
-        record, so a run that fails before one (a setting or a dataset that
-        a map, the splits or the training refuse) leaves an earlier file as
-        it is.
+        The JSON-lines file; overwritten.  It is checked before the first
+        dataset (:func:`check_writable`) and opened with the first record,
+        so a run that fails before one (an ``out`` that cannot be written,
+        a setting or a dataset that a map, the splits or the training
+        refuse) leaves an earlier file as it is.
     cache_dir:
         Directory of the feature cache; ``None`` computes without storing.
 
@@ -2105,6 +2390,7 @@ def run(
     list of dict
         The records as written, before the JSON mapping.
     """
+    check_writable(out)
     cache = FeatureCache(cache_dir)
     records: list[dict[str, Any]] = []
     with contextlib.ExitStack() as stack:
@@ -2130,7 +2416,10 @@ def _parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=Path("rydberg_features_benchmark.jsonl"),
-        help="JSON-lines output file; replaced once the first record is written",
+        help=(
+            "JSON-lines output file; refused before any data is loaded if it cannot be "
+            "written, replaced once the first record is written"
+        ),
     )
     parser.add_argument(
         "--quick",
@@ -2159,12 +2448,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-cache", action="store_true", help="do not store features")
     parser.add_argument(
+        "--prune-cache",
+        action="store_true",
+        help=(
+            "remove stale feature cache entries, report the outcome, and exit "
+            "without running the benchmark"
+        ),
+    )
+    parser.add_argument(
         "--n-atoms",
         type=int,
         default=default.n_atoms,
         help=(
             "atoms N: PCA components, inputs, and arm-D qubits; "
-            "also shapes the positive-control dataset"
+            "also shapes the positive-control dataset; "
+            f"at most {MAX_ATOMS} with arm A or B, {AUTO_BACKPROP_MAX_QUBITS} with arm D "
+            f"and {POSITIVE_CONTROL_MAX_ATOMS} on positive-control"
         ),
     )
     parser.add_argument(
@@ -2256,7 +2555,7 @@ def _parser() -> argparse.ArgumentParser:
         "--lr",
         type=float,
         default=default.lr,
-        help="Adam learning rate (overridden by tuning when --trials > 0)",
+        help="Adam learning rate, finite and > 0 (overridden by tuning when --trials > 0)",
     )
     parser.add_argument(
         "--epochs",
@@ -2268,13 +2567,16 @@ def _parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=default.batch_size,
-        help="mini-batch size (overridden by tuning when --trials > 0)",
+        help="mini-batch size, an integer >= 1 (overridden by tuning when --trials > 0)",
     )
     parser.add_argument(
         "--patience",
         type=int,
         default=default.patience,
-        help="early-stopping patience in epochs",
+        help=(
+            "early-stopping patience in epochs: an integer >= 1, or 0 for no early stopping "
+            "(recorded as null)"
+        ),
     )
     parser.add_argument(
         "--samples",
@@ -2317,7 +2619,28 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, and ``--separation-seed`` still apply.
     """
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
+    if args.patience < 0:
+        parser.error(
+            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
+            f"got {args.patience}"
+        )
+    if args.prune_cache:
+        if args.no_cache:
+            parser.error("--prune-cache cannot be used with --no-cache")
+        cache = FeatureCache(args.cache_dir)
+        report = cache.prune()
+        print(
+            f"pruned cache ({args.cache_dir}): removed {report.files} file"
+            f"{'' if report.files == 1 else 's'} ({report.bytes} bytes)"
+        )
+        if report.unreadable:
+            print(
+                f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
+            )
+        return []
     max_sep = (
         None
         if args.max_separation_rows is not None and args.max_separation_rows <= 0
@@ -2350,7 +2673,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             lr=args.lr,
             max_epochs=args.epochs,
             batch_size=args.batch_size,
-            patience=args.patience,
+            patience=args.patience or None,
             n_trials=args.trials,
             inner_folds=args.inner_folds,
             n_samples=args.samples,
@@ -2359,6 +2682,9 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             separation_seed=args.separation_seed,
         )
         names = list(dict.fromkeys(args.dataset))
+    if "positive-control" in names:
+        check_positive_control_atoms(settings.n_atoms)
+    check_writable(args.out)
     datasets = {
         name: load_dataset(name, settings, path=args.data_path, download=args.download)
         for name in names

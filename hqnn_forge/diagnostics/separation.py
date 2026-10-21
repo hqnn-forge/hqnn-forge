@@ -254,7 +254,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from hqnn_forge.kernels import kernel_target_alignment
+from hqnn_forge.kernels import _binary_labels, kernel_target_alignment
 
 __all__ = [
     "PairwiseDistances",
@@ -295,15 +295,10 @@ def _features(F: Any) -> torch.Tensor:
 
 
 def _classes(y: Any, n_samples: int) -> torch.Tensor:
-    """Boolean mask of class 1, from labels checked as ``kernel_target_alignment`` checks them."""
-    labels = y if isinstance(y, torch.Tensor) else torch.as_tensor(np.asarray(y))
-    labels = labels.detach().reshape(-1).to(device="cpu", dtype=torch.float64)
-    if labels.numel() != n_samples:
-        raise ValueError(f"y must have {n_samples} labels; got {labels.numel()}.")
-    values = set(labels.unique().tolist())
-    if values not in ({0.0, 1.0}, {-1.0, 1.0}):
-        raise ValueError(f"y must hold both classes as 0/1 or -1/+1; got values {sorted(values)}.")
-    return labels > 0
+    """Boolean CPU mask of class 1, from labels checked as ``kernel_target_alignment`` checks them."""
+    if isinstance(y, torch.Tensor):
+        y = y.detach().to("cpu")
+    return _binary_labels(y, n_samples) > 0
 
 
 def _ratio(numerator: float, denominator: float) -> float:
