@@ -125,6 +125,11 @@ class TestRankBiserial:
         b = [0.0, 0.25 + 1e-16]
         assert rank_biserial_correlation(a, b) == pytest.approx(0.0)
 
+    def test_custom_atol_reaches_the_effect_size(self) -> None:
+        a, b = [0.0, 1.0], [1e-14, 0.0]
+        assert rank_biserial_correlation(a, b) == pytest.approx(1.0)  # 1e-14 dropped as zero
+        assert rank_biserial_correlation(a, b, atol=0.0) == pytest.approx(1 / 3)
+
 
 class TestWilcoxon:
     def test_returns_named_result(self) -> None:
@@ -377,6 +382,14 @@ class TestFriedmanAgainstDemsar:
 
 
 class TestFriedmanFromScores:
+    def test_ranks_tie_only_exactly_equal_scores(self) -> None:
+        # Round-off between scores is not a tie in the Friedman ranks (#687).
+        v1, v2 = np.mean([0.1, 0.2, 0.3]), np.mean([0.3, 0.2, 0.1])
+        assert v1 != v2
+        scores = [[v1, v2, 0.1], [0.5, 0.4, 0.3], [0.2, 0.6, 0.4]]
+        np.testing.assert_allclose(average_ranks(scores), [5 / 3, 5 / 3, 8 / 3])
+        assert friedman_test(scores).statistic == pytest.approx(2.0)
+
     def test_ranks_best_first_with_ties_averaged(self) -> None:
         scores = [[0.9, 0.8, 0.8], [0.5, 0.7, 0.6]]
         np.testing.assert_allclose(
