@@ -655,6 +655,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dataset where it was what lifted the rank to `n_atoms`, `PCANormalizer.fit` now raises
   `centred data has rank r < n_components` and the run stops, where it used to take the
   rounding noise as an input (#580, #600)
+- `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
+  `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
+  no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
