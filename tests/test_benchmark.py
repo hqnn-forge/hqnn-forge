@@ -880,3 +880,22 @@ class TestNoiseSweep:
     def test_rejected(self, kwargs: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             _run({"a": _data()}, **kwargs)
+@pytest.mark.parametrize("noise", ["2", "-0.1"])
+def test_invalid_noise_fails_before_data_loading(
+    monkeypatch: pytest.MonkeyPatch, noise: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Synthetic dataset should not be built")
+
+    monkeypatch.setattr("examples.benchmark.synthetic", fail_if_called)
+
+    with pytest.raises(SystemExit) as exc:
+        from examples import benchmark as example_benchmark
+
+        example_benchmark.main(["--credit-card", f"--noise={noise}"])
+
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "usage:" in error
+    assert "noise level must lie in [0, 0.75]" in error
+    assert "--noise" in error
