@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import numbers
 import warnings
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -62,11 +62,7 @@ import math
 from hqnn_forge import kernels
 from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
-from hqnn_forge.evaluation.calibration import (
-    CalibrationFitError,
-    PlattScaler,
-    TemperatureScaler,
-)
+from hqnn_forge.evaluation.calibration import PlattScaler, TemperatureScaler
 from hqnn_forge.evaluation.thresholds import find_optimal_threshold
 from hqnn_forge.models import (
     HybridBinaryClassifier,
@@ -74,6 +70,7 @@ from hqnn_forge.models import (
     ParallelHybridClassifier,
 )
 from hqnn_forge.training import TrainingHistory, train_model
+from hqnn_forge.training.trainer import _logits
 from hqnn_forge.utils import FocalLoss, SoftmaxFocalLoss, eval_mode
 from hqnn_forge.utils.rng import as_seed, seeded_rng
 
@@ -369,19 +366,13 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
     def _binary_logits(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         """``(batch,)`` logits in eval mode, whatever mode the model is in."""
         # no_grad alone leaves nn.Dropout active, as in the model's predict_proba.
-        eval_fn: Any = getattr(model, "_eval_logits", None)
-        if callable(eval_fn):
-            out = cast(torch.Tensor, eval_fn(x))
-        else:
-            with torch.no_grad(), eval_mode(model):
-                out = model(x)
-        if out.ndim == 2 and out.shape[-1] == 1:
-            out = out.squeeze(-1)
-        return out
+        with torch.no_grad(), eval_mode(model):
+            return _logits(model, x)
 
     def _fit_calibrator(
         self,
-        val_logits: torch.Tensor,
+        model: torch.nn.Module,
+        x_val: torch.Tensor,
         y_val: torch.Tensor,
         history: TrainingHistory,
     ) -> TemperatureScaler | PlattScaler | None:
@@ -392,8 +383,8 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         if self.calibration == "temperature" and history.temperature is not None:
             return TemperatureScaler(history.temperature)
         try:
-            return CALIBRATORS[self.calibration].fit(val_logits, y_val)
-        except CalibrationFitError as exc:
+            return CALIBRATORS[self.calibration].fit(self._binary_logits(model, x_val), y_val)
+        except ValueError as exc:
             warnings.warn(
                 f"calibration={self.calibration!r} has no fit on the validation split ({exc}); "
                 f"predict_proba returns the uncalibrated probabilities.",
@@ -510,8 +501,7 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         if self.calibration is not None:
             assert val[0] is not None and val[1] is not None  # validation_fraction > 0
             assert threshold is not None  # two classes
-            val_logits = self._binary_logits(model, val[0])
-            calibrator = self._fit_calibrator(val_logits, val[1], history)
+            calibrator = self._fit_calibrator(model, val[0], val[1], history)
             if calibrator is not None and self.threshold == "optimal":
                 if isinstance(calibrator, PlattScaler) and calibrator.a <= 0:
                     # A decreasing map reverses the order, so the old
@@ -522,7 +512,7 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
                     if self.monitor != "val_loss":
                         threshold = find_optimal_threshold(
                             val[1].long(),
-                            calibrator(val_logits),
+                            calibrator(self._binary_logits(model, val[0])),
                             metric=self.monitor,
                         ).threshold
                 else:

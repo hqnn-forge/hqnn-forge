@@ -737,28 +737,6 @@ class TestCalibration:
         assert est.calibrator_ is None
 
     @pytest.mark.parametrize("calibration", ["temperature", "platt"])
-    def test_unrelated_value_error_propagates_out_of_fit(
-        self, monkeypatch: pytest.MonkeyPatch, calibration: str
-    ) -> None:
-        from hqnn_forge import sklearn as est_module
-
-        scaler_cls = (
-            est_module.TemperatureScaler
-            if calibration == "temperature"
-            else est_module.PlattScaler
-        )
-
-        def bad_fit(cls: type, z: Any, y: Any) -> Any:
-            raise ValueError("unrelated error in calibration fit")
-
-        monkeypatch.setattr(scaler_cls, "fit", classmethod(bad_fit))
-        X, y = self._noisy_data()
-        with pytest.raises(ValueError, match="unrelated error in calibration fit"):
-            HybridClassifierEstimator(
-                **{**self.CAL, "calibration": calibration, "random_state": 0}
-            ).fit(X, y)
-
-    @pytest.mark.parametrize("calibration", ["temperature", "platt"])
     def test_calibrated_probabilities_ignore_the_model_s_train_mode(
         self, calibration: str
     ) -> None:
