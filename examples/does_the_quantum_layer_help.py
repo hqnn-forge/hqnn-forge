@@ -190,7 +190,8 @@ def main() -> None:
     # hard fold is hard for both, and pairing removes that shared variation.
     diff = np.array(scores["hybrid"]) - np.array(scores["control"])
     print(f"\nmean MCC difference, hybrid − control: {diff.mean():+.3f}")
-    if np.all(diff == 0):
+    # Same tolerance as wilcoxon_signed_rank's default atol, so round-off is not a difference.
+    if np.all(np.abs(diff) <= 1e-12):
         print("Verdict: identical scores on every fold; the data cannot tell the models apart.")
         return
     wilcoxon = wilcoxon_signed_rank(scores["hybrid"], scores["control"])
