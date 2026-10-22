@@ -380,7 +380,9 @@ def average_ranks(
     """
     matrix = _score_matrix(scores)
     signed = -matrix if higher_is_better else matrix
-    return np.mean([_average_ranks(row) for row in signed], axis=0)
+    # Exact ties only: the round-off tolerance of the signed-rank test is not
+    # applied to the Friedman ranks, whose scores can be of any scale (#687).
+    return np.mean([_average_ranks(row, atol=0.0) for row in signed], axis=0)
 
 
 def _check_ranks(ranks: npt.ArrayLike, n_datasets: int) -> npt.NDArray[np.float64]:
