@@ -254,10 +254,11 @@ class BenchmarkResult:
     control's per-dataset ``mcc_mean``, each dataset weighted equally.
     ``datasets`` gives their order, ``models`` the subtraction order
     (hybrid minus control), ``n_datasets`` the total, and ``n_pairs`` the
-    count of non-zero differences (differences within round-off tolerance
-    are ties). ``wilcoxon_statistic`` is W+; ``wilcoxon_p``,
-    ``wilcoxon_min_p`` and ``rank_biserial`` describe this cross-dataset
-    test, separate from the within-dataset record columns.
+    count of non-zero differences (differences of at most 1e-12, the
+    default ``atol`` of ``wilcoxon_signed_rank``, count as zero).
+    ``wilcoxon_statistic`` is W+; ``wilcoxon_p``, ``wilcoxon_min_p`` and
+    ``rank_biserial`` describe this cross-dataset test, separate from the
+    within-dataset record columns.
     All mean MCCs tied: statistic and p-values are NaN, effect is 0.
     One dataset: ``None``.
     """
@@ -289,13 +290,14 @@ def _cross_dataset(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     Row d contributes dimensionless MCC mean M[d,m] =
     sum_f sum_s MCC[d,f,m,s] / (n_folds * n_seeds), already in mcc_mean.
     Larger datasets get no extra weight. For differences M[d,hybrid] -
-    M[d,control], discard zeros (differences within round-off tolerance)
-    and rank absolute values, ties averaged. W+ and W- sum the positive
-    and negative ranks; the two-sided Wilcoxon test gives the p-value and
-    its attainable floor for these ranks, and r = (W+ - W-) / (W+ + W-) is
-    positive in favour of the hybrid. With n non-zero pairs in the exact
-    regime, the floor is 2 / 2**n. No non-zero pairs means an undefined
-    test (NaN) and effect 0, as for fold tests.
+    M[d,control], discard zeros (differences of at most 1e-12, the default
+    ``atol`` of ``wilcoxon_signed_rank``) and rank absolute values, ties
+    averaged. W+ and W- sum the positive and negative ranks; the two-sided
+    Wilcoxon test gives the p-value and its attainable floor for these
+    ranks, and r = (W+ - W-) / (W+ + W-) is positive in favour of the
+    hybrid. With n non-zero pairs in the exact regime, the floor is
+    2 / 2**n. No non-zero pairs means an undefined test (NaN) and effect 0,
+    as for fold tests.
     """
     hybrids = [row for row in records if row["model"] == "hybrid"]
     controls = [row for row in records if row["model"] == "control"]
