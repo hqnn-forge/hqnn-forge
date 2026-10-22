@@ -9,11 +9,15 @@ parameters the layer really has.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any, get_args
 
+import pennylane as qml
 import pytest
+import torch
 
 from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding._common import apply_variational_layers
 from hqnn_forge.encoding.angle_embedding import Entangler, variational_weight_shape
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 
@@ -78,3 +82,31 @@ def test_expected_shapes_cover_every_entangler() -> None:
 @pytest.mark.parametrize(("entangler", "expected_shape"), EXPECTED_SHAPES.items())
 def test_shapes_for_each_entangler(entangler: Entangler, expected_shape: tuple[int, ...]) -> None:
     assert variational_weight_shape(entangler, 4, 2) == expected_shape
+
+
+def _gates(tape: qml.tape.QuantumScript) -> Iterator[qml.operation.Operator]:
+    """The tape's gates, with the one template (``StronglyEntanglingLayers``) unpacked."""
+    for op in tape.operations:
+        if isinstance(op, qml.StronglyEntanglingLayers):
+            yield from op.decomposition()
+        else:
+            yield op
+
+
+# At least two qubits: the library refuses fewer, and the ring's CNOT needs a partner.
+@pytest.mark.parametrize("entangler", ENTANGLERS)
+@pytest.mark.parametrize(("n_qubits", "n_layers"), [(2, 1), (2, 3), (3, 2), (4, 3), (5, 1)])
+def test_every_weight_reaches_exactly_one_gate_angle(
+    entangler: Entangler, n_qubits: int, n_layers: int
+) -> None:
+    # Distinct values, so a weight that no gate reads, or that two gates read, shows up in the
+    # list of angles; a block that reads the wrong shape broadcasts instead of raising.
+    shape = variational_weight_shape(entangler, n_qubits, n_layers)
+    weights = torch.arange(torch.Size(shape).numel(), dtype=torch.float64).reshape(shape)
+    with qml.tape.QuantumTape() as tape:
+        apply_variational_layers(weights, n_qubits, n_layers, entangler)
+
+    assert tape.batch_size is None
+    angles = [angle for gate in _gates(tape) for angle in gate.data]
+    assert all(getattr(angle, "ndim", 0) == 0 for angle in angles)
+    assert sorted(float(angle) for angle in angles) == weights.flatten().tolist()

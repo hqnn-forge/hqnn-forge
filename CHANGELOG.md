@@ -311,11 +311,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hqnn_forge.rydberg.evolve(hamiltonian, t, *, gamma=0.0, n_steps=None)`: the density matrix
   `ρ(t)` of a batch of time-independent Hamiltonians, starting with every atom in `|g⟩`, under
   Markovian dephasing with the local collapse operators `√γ n_i` (a single-atom coherence
-  decays at `γ/2`). `gamma=0` is exact from one eigendecomposition; `gamma>0` uses a
+  decays at `γ/2`). `gamma=0` needs no time stepping; `gamma>0` uses a
   symmetric (Strang) splitting with the exact elementwise dissipator, second order in the step,
   and requires `n_steps`. `readout(rho, *, pairs=False)` returns `⟨n_i⟩` for every atom and
-  optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ. Gradients through `evolve`
-  are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
+  optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ (#497, #506)
 - `hqnn_forge.rydberg.RydbergFeatureMap(register, encoding, *, c6, gamma, n_steps=None,
   interactions=True, correlations=False)`: a fixed map from a batch of inputs to the excitation
   probabilities `⟨n_i⟩` of a Rydberg array (optionally followed by the pair correlations
@@ -655,6 +654,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dataset where it was what lifted the rank to `n_atoms`, `PCANormalizer.fit` now raises
   `centred data has rank r < n_components` and the run stops, where it used to take the
   rounding noise as an input (#580, #600)
+- `evolve`: gradients through it were silently wrong where the Hamiltonian has
+  degenerate eigenvalues. When the Hamiltonian requires grad, the propagator
+  now comes from `torch.linalg.matrix_exp` instead of `eigh`; forward-mode AD
+  is still affected (#674) (#505, #668)
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
