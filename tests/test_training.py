@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -358,9 +359,18 @@ class TestValidation:
         "kwargs, match",
         [
             (dict(monitor="auc"), "unknown monitor"),
-            (dict(max_epochs=0), "max_epochs must be"),
-            (dict(batch_size=0), "batch_size must be"),
-            (dict(patience=0), "patience must be"),
+            (dict(max_epochs=0), r"max_epochs must be >= 1.*0"),
+            (dict(batch_size=0), r"batch_size must be >= 1.*0"),
+            (dict(patience=0), r"patience must be >= 1.*0"),
+            (dict(max_epochs=float("nan")), r"max_epochs must be.*nan"),
+            (dict(max_epochs=10.0), r"max_epochs must be.*10\.0"),
+            (dict(max_epochs=True), r"max_epochs must be.*True"),
+            (dict(batch_size=float("nan")), r"batch_size must be.*nan"),
+            (dict(batch_size=8.0), r"batch_size must be.*8\.0"),
+            (dict(batch_size=True), r"batch_size must be.*True"),
+            (dict(patience=float("nan")), r"patience must be.*nan"),
+            (dict(patience=2.5), r"patience must be.*2\.5"),
+            (dict(patience=True), r"patience must be.*True"),
         ],
     )
     def test_bad_arguments(self, kwargs: dict, match: str, data: tuple[torch.Tensor, ...]) -> None:
@@ -376,6 +386,45 @@ class TestValidation:
                 Xv,
                 yv,
                 **kwargs,
+            )
+
+    def test_numpy_integer_arguments_are_accepted(self, data: tuple[torch.Tensor, ...]) -> None:
+        X, y, Xv, yv = data
+        model = _logreg()
+        history = train_model(
+            model,
+            nn.BCEWithLogitsLoss(),
+            torch.optim.SGD(model.parameters(), lr=0.1),
+            X,
+            y,
+            Xv,
+            yv,
+            max_epochs=np.int64(50),  # type: ignore[arg-type]
+            batch_size=np.int64(4),  # type: ignore[arg-type]
+            patience=np.int64(1),  # type: ignore[arg-type]
+        )
+
+        assert history.stopped_early is True
+
+    @pytest.mark.parametrize("name", ["max_epochs", "batch_size", "patience"])
+    def test_tensor_count_arguments_are_rejected(
+        self,
+        name: str,
+        data: tuple[torch.Tensor, ...],
+    ) -> None:
+        X, y, Xv, yv = data
+        model = _logreg()
+
+        with pytest.raises(ValueError, match=name):
+            train_model(
+                model,
+                nn.BCEWithLogitsLoss(),
+                torch.optim.SGD(model.parameters(), lr=0.1),
+                X,
+                y,
+                Xv,
+                yv,
+                **{name: torch.tensor(3)},  # type: ignore[arg-type]
             )
 
     def test_val_pair_must_be_complete(self, data: tuple[torch.Tensor, ...]) -> None:

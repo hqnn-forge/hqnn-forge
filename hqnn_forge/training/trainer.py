@@ -35,9 +35,10 @@ import copy
 import functools
 import itertools
 import math
+import numbers
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Literal, cast, overload
 
 import torch
 import torch.nn as nn
@@ -167,6 +168,41 @@ def _check_pair(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
         raise ValueError(f"X_{name} is empty.")
 
 
+@overload
+def _check_count(name: str, value: object, *, none_ok: Literal[False] = ...) -> int: ...
+
+
+@overload
+def _check_count(name: str, value: object, *, none_ok: Literal[True]) -> int | None: ...
+
+
+def _check_count(name: str, value: object, *, none_ok: bool = False) -> int | None:
+    """Validate a positive integer, optionally allowing None.
+
+    NumPy integers are accepted.  Booleans, floats (including integer-valued
+    floats), tensors, and other non-integer values raise ValueError.
+    """
+    if value is None and none_ok:
+        return None
+
+    suffix = " or None" if none_ok else ""
+
+    if isinstance(value, bool):
+        raise ValueError(  # noqa: TRY004
+            f"{name} must be an int >= 1{suffix}, not a bool; got {value!r}."
+        )
+
+    if not isinstance(value, numbers.Integral):
+        raise ValueError(  # noqa: TRY004
+            f"{name} must be an int >= 1{suffix}; got {value!r}."
+        )
+
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1{suffix}; got {value!r}.")
+
+    return int(value)
+
+
 def train_model(
     model: nn.Module,
     loss_fn: LossFn,
@@ -220,9 +256,14 @@ def train_model(
         Validation split.  Without it the loop runs ``max_epochs`` epochs and
         ``monitor``, ``patience`` and ``restore_best`` have no effect.
     max_epochs:
-        Upper bound on the number of epochs.  Default: 100.
+        Upper bound on the number of epochs.  Must be an integer >= 1;
+        booleans and floats, including whole-valued floats, are rejected
+        with ``ValueError``. NumPy integers are accepted.
+        Default: 100.
     batch_size:
-        Mini-batch size.  The last batch may be smaller, but for
+        Mini-batch size: an integer >= 1.  Booleans and floats, including
+        whole-valued floats such as ``8.0``, are rejected with ``ValueError``;
+        NumPy integers are accepted.  The last batch may be smaller, but for
         ``batch_size > 1`` never a single sample unless the training set is
         one: a remainder of one is merged into the batch before it, which then
         holds ``batch_size + 1``, because batch norm in train mode fails on one
@@ -232,7 +273,10 @@ def train_model(
         ``"mcc"`` (default), ``"f1"``, ``"balanced_accuracy"`` or ``"val_loss"``.
     patience:
         Stop after this many consecutive epochs without an improvement larger
-        than ``min_delta``.  ``None`` disables early stopping.  Default: 10.
+        than ``min_delta``.  Must be an integer >= 1 or ``None`` to disable
+        early stopping.  Booleans and floats, including whole-valued floats
+        such as ``5.0``, are rejected with ``ValueError``; NumPy integers
+        are accepted.  Default: 10.
     min_delta:
         Minimum change that counts as an improvement.  Default: 0.0.
     restore_best:
@@ -261,12 +305,9 @@ def train_model(
         raise ValueError(
             f"unknown monitor {monitor!r}; choose 'val_loss' or one of {sorted(METRICS)}."
         )
-    if max_epochs < 1:
-        raise ValueError(f"max_epochs must be >= 1; got {max_epochs}.")
-    if batch_size < 1:
-        raise ValueError(f"batch_size must be >= 1; got {batch_size}.")
-    if patience is not None and patience < 1:
-        raise ValueError(f"patience must be >= 1 or None; got {patience}.")
+    max_epochs = _check_count("max_epochs", max_epochs)
+    batch_size = _check_count("batch_size", batch_size)
+    patience = _check_count("patience", patience, none_ok=True)
     if (X_val is None) != (y_val is None):
         raise ValueError("pass both X_val and y_val, or neither.")
 
