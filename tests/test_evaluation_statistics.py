@@ -298,6 +298,11 @@ class TestWilcoxon:
         res_zero_tol = wilcoxon_signed_rank(a, b, atol=0.0)
         assert res_zero_tol.n == 2
 
+    def test_custom_atol_reaches_the_tie_grouping(self) -> None:
+        a, b = [0.125, -(0.125 + 1e-14)], [0.0, 0.0]
+        assert wilcoxon_signed_rank(a, b).statistic == 1.5  # |d| tied, ranks 1.5 and 1.5
+        assert wilcoxon_signed_rank(a, b, atol=0.0).statistic == 1.0  # ranks 1 and 2
+
     def test_invalid_atol_raises(self) -> None:
         with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
             wilcoxon_signed_rank([1.0], [0.0], atol=-1.0)
