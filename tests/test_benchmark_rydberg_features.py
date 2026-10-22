@@ -32,12 +32,16 @@ import errno
 import hashlib
 import importlib.util
 import json
+import lzma
 import math
 import os
 import re
 import socket
+import struct
 import sys
 import warnings
+import zipfile
+import zlib
 from concurrent.futures import Future
 from pathlib import Path
 from threading import Thread
@@ -2694,10 +2698,245 @@ class TestCache:
         assert f"pruned cache ({cache_dir}): removed 1 file ({stale_size} bytes)" in captured
         assert "wrote" not in captured
 
-    def test_prune_cli_conflicts_with_no_cache(self, tmp_path: Path) -> None:
-        """--prune-cache cannot be combined with --no-cache (#575)."""
+    def test_prune_cli_conflicts_with_no_cache(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--prune-cache cannot be combined with --no-cache (#575, #634)."""
         with pytest.raises(SystemExit):
             bench.main(["--no-cache", "--prune-cache", "--out", str(tmp_path / "out.jsonl")])
+        assert "--prune-cache cannot be used with --no-cache" in capsys.readouterr().err
+
+    def test_prune_cli_refuses_a_missing_cache_dir_and_creates_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A mistyped --cache-dir is an error, not an already-clean cache (#634)."""
+        missing = tmp_path / "x" / "typo"
+        with pytest.raises(SystemExit):
+            bench.main(["--prune-cache", "--cache-dir", str(missing)])
+        assert f"{missing} is not an existing directory" in capsys.readouterr().err
+        assert not missing.exists()
+        assert not missing.parent.exists()
+
+    def test_prune_cli_refuses_without_a_code_digest(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without CODE_SHA256 the prune says why, instead of advising --no-cache (#634)."""
+        monkeypatch.setattr(bench, "CODE_SHA256", None)
+        with pytest.raises(SystemExit):
+            bench.main(["--prune-cache", "--cache-dir", str(tmp_path)])
+        error_line = capsys.readouterr().err.strip().splitlines()[-1]
+        assert "--prune-cache cannot tell stale entries from current ones" in error_line
+        assert "run it again" in error_line
+        assert "--no-cache" not in error_line
+
+    def test_prune_cli_names_unfingerprintable_code(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Code that can never be fingerprinted is not told to run again (#634)."""
+
+        def compiled(*args: object, **kwargs: object) -> dict[str, Path]:
+            raise RuntimeError("hqnn_forge holds a module that is not Python source")
+
+        monkeypatch.setattr(bench, "CODE_SHA256", None)
+        monkeypatch.setattr(bench, "code_files", compiled)
+        with pytest.raises(SystemExit):
+            bench.main(["--prune-cache", "--cache-dir", str(tmp_path)])
+        error_line = capsys.readouterr().err.strip().splitlines()[-1]
+        assert "hqnn_forge is not imported from Python source files" in error_line
+        assert "run it again" not in error_line
+
+    def test_prune_cli_ignores_the_run_options(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--prune-cache prunes even when a run option such as --patience is invalid (#634)."""
+        assert (
+            bench.main(["--prune-cache", "--cache-dir", str(tmp_path), "--patience", "-1"]) == []
+        )
+        assert f"pruned cache ({tmp_path}): removed 0 files" in capsys.readouterr().out
+
+    def test_prune_cli_lists_unreadable_files(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The CLI prints the unreadable files it left in place (#634)."""
+        (tmp_path / "corrupt.npz").write_bytes(b"not a valid zip file")
+        assert bench.main(["--prune-cache", "--cache-dir", str(tmp_path)]) == []
+        out = capsys.readouterr().out
+        assert "unreadable cache files (not removed): corrupt.npz" in out
+        assert (tmp_path / "corrupt.npz").exists()
+
+    def test_prune_reports_a_stale_entry_whose_unlink_fails(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale entry that cannot be removed is reported as such, not as unreadable (#634)."""
+        stale = tmp_path / "stale.npz"
+        np.savez(
+            stale,
+            features=np.full((12, 4), 1.0),
+            seconds=np.float64(0.5),
+            code_sha256=np.array("0" * 64),
+            environment=np.array(json.dumps({})),
+        )
+        real_unlink = Path.unlink
+
+        def refuse(path: Path, missing_ok: bool = False) -> None:
+            if path == stale:
+                raise PermissionError(13, "Permission denied", str(path))
+            real_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", refuse)
+        report = bench.FeatureCache(tmp_path).prune()
+        assert report.files == 0
+        assert report.bytes == 0
+        assert report.unreadable == ()
+        assert len(report.not_removed) == 1
+        path, error = report.not_removed[0]
+        assert path == stale
+        assert "Permission denied" in error
+        assert stale.exists()
+
+        assert bench.main(["--prune-cache", "--cache-dir", str(tmp_path)]) == []
+        out = capsys.readouterr().out
+        assert (
+            "stale cache files that could not be removed: stale.npz (Permission denied)\n" in out
+        )
+        assert "unreadable cache files" not in out
+
+    def test_prune_skips_a_stale_entry_removed_meanwhile(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An entry removed by someone else before the unlink is neither removed nor failed (#634)."""
+        stale = tmp_path / "stale.npz"
+        np.savez(
+            stale,
+            features=np.full((12, 4), 1.0),
+            seconds=np.float64(0.5),
+            code_sha256=np.array("0" * 64),
+            environment=np.array(json.dumps({})),
+        )
+        real_unlink = Path.unlink
+
+        def vanish(path: Path, missing_ok: bool = False) -> None:
+            real_unlink(path, missing_ok=missing_ok)
+            if path == stale:
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+
+        monkeypatch.setattr(Path, "unlink", vanish)
+        report = bench.FeatureCache(tmp_path).prune()
+        assert report == bench.PruneReport(0, 0, (), ())
+        assert not stale.exists()
+
+    def test_prune_skips_an_entry_removed_before_it_is_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An entry removed by someone else before it is read is not listed as unreadable."""
+        stale = tmp_path / "stale.npz"
+        np.savez(stale, code_sha256=np.array("0" * 64))
+        real_load = np.load
+
+        def vanish(path: Path, *args: Any, **kwargs: Any) -> Any:
+            Path(path).unlink()
+            return real_load(path, *args, **kwargs)
+
+        monkeypatch.setattr(bench.np, "load", vanish)
+        assert bench.FeatureCache(tmp_path).prune() == bench.PruneReport(0, 0, (), ())
+
+    def test_prune_cli_names_the_unreadable_source_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source file that cannot be read is named in the no-digest message (#634)."""
+        missing = tmp_path / "gone.py"
+        monkeypatch.setattr(bench, "CODE_SHA256", None)
+        monkeypatch.setattr(bench, "code_files", lambda *a, **k: {"gone.py": missing})
+        with pytest.raises(SystemExit):
+            bench.main(["--prune-cache", "--cache-dir", str(tmp_path)])
+        error_line = capsys.readouterr().err.strip().splitlines()[-1]
+        assert "its source files cannot be read" in error_line
+        assert str(missing) in error_line
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="ZIP_ZSTANDARD needs Python 3.14+")
+    def test_prune_lists_a_corrupt_zstd_entry_as_unreadable(self, tmp_path: Path) -> None:
+        """A Zstandard member that fails to decode does not abort the prune (#634)."""
+        path = tmp_path / "zstd.npz"
+        members = {
+            "features": np.full((12, 4), 1.0),
+            "seconds": np.float64(0.5),
+            "code_sha256": np.array("0" * 64),
+            "environment": np.array(json.dumps({})),
+        }
+        # getattr: ZIP_ZSTANDARD only exists on 3.14+, which mypy and vermin -t=3.10- check against.
+        zstd = getattr(zipfile, "ZIP_ZSTANDARD")  # noqa: B009
+        with zipfile.ZipFile(path, "w", zstd) as zf:
+            for name, array in members.items():
+                with zf.open(f"{name}.npy", "w") as member:
+                    np.lib.format.write_array(member, np.asanyarray(array), allow_pickle=False)
+        # The first four bytes of a Zstandard frame are its magic number.
+        with zipfile.ZipFile(path) as zf:
+            offset = zf.getinfo("code_sha256.npy").header_offset
+        raw = bytearray(path.read_bytes())
+        name_len, extra_len = struct.unpack("<HH", raw[offset + 26 : offset + 30])
+        start = offset + 30 + name_len + extra_len
+        raw[start : start + 4] = b"\xff\xff\xff\xff"
+        path.write_bytes(bytes(raw))
+
+        report = bench.FeatureCache(tmp_path).prune()
+        assert report.unreadable == (path,)
+        assert report.files == 0
+        assert path.exists()
+
+    def test_prune_lists_a_corrupt_lzma_entry_as_unreadable(self, tmp_path: Path) -> None:
+        """An LZMA member that fails to decode does not abort the prune (#634)."""
+        path = tmp_path / "lzma.npz"
+        members = {
+            "features": np.full((12, 4), 1.0),
+            "seconds": np.float64(0.5),
+            "code_sha256": np.array("0" * 64),
+            "environment": np.array(json.dumps({})),
+        }
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_LZMA) as zf:
+            for name, array in members.items():
+                with zf.open(f"{name}.npy", "w") as member:
+                    np.lib.format.write_array(member, np.asanyarray(array), allow_pickle=False)
+        # Byte 4 of a zip LZMA stream is the lc/lp/pb properties byte; 0xFF is invalid.
+        with zipfile.ZipFile(path) as zf:
+            offset = zf.getinfo("code_sha256.npy").header_offset
+        raw = bytearray(path.read_bytes())
+        name_len, extra_len = struct.unpack("<HH", raw[offset + 26 : offset + 30])
+        raw[offset + 30 + name_len + extra_len + 4] = 0xFF
+        path.write_bytes(bytes(raw))
+        with pytest.raises(lzma.LZMAError), np.load(path, allow_pickle=False) as stored:
+            stored["code_sha256"]
+
+        report = bench.FeatureCache(tmp_path).prune()
+        assert report.unreadable == (path,)
+        assert report.files == 0
+        assert path.exists()
+
+    def test_prune_lists_a_corrupt_compressed_entry_as_unreadable(self, tmp_path: Path) -> None:
+        """A compressed member that fails to inflate does not abort the prune (#634)."""
+        path = tmp_path / "compressed.npz"
+        np.savez_compressed(
+            path,
+            features=np.full((12, 4), 1.0),
+            seconds=np.float64(0.5),
+            code_sha256=np.array("0" * 64),
+            environment=np.array(json.dumps({})),
+        )
+        # Overwrite the first byte of the code_sha256 member's deflate stream with
+        # the reserved block type, so reading it raises zlib.error.
+        with zipfile.ZipFile(path) as zf:
+            offset = zf.getinfo("code_sha256.npy").header_offset
+        raw = bytearray(path.read_bytes())
+        name_len, extra_len = struct.unpack("<HH", raw[offset + 26 : offset + 30])
+        raw[offset + 30 + name_len + extra_len] = 0xFF
+        path.write_bytes(bytes(raw))
+        with pytest.raises(zlib.error), np.load(path, allow_pickle=False) as stored:
+            stored["code_sha256"]
+
+        report = bench.FeatureCache(tmp_path).prune()
+        assert report.unreadable == (path,)
+        assert report.files == 0
+        assert path.exists()
 
 
 # ---------------------------------------------------------------------------
