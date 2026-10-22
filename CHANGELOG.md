@@ -533,6 +533,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same way (#651)
 
 ### Fixed
+- `examples/benchmark_rydberg_features.py --prune-cache` refuses a `--cache-dir` that is not an
+  existing directory instead of creating it and reporting an empty prune, says why when the
+  code digest is unavailable, and ignores every other option (an invalid `--patience` no longer
+  stops it). A stale entry it cannot remove is reported in the new `PruneReport.not_removed` and
+  printed as such rather than listed as unreadable, one removed meanwhile by another process is
+  skipped, and a corrupt compressed entry is listed as unreadable instead of stopping the
+  prune (#634, #667)
 - `examples/benchmark_rydberg_features.py`: `check_writable()` applies Windows' limit of 255
   UTF-16 code units per filename when `os.pathconf` is unavailable, so a long output
   filename is refused, or probed with a short prefix, instead of failing (#650, #657)

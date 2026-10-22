@@ -205,7 +205,9 @@ in the directory under their own names until pruned.  ``--prune-cache``
 or key environment differs from the running process, reports the files and
 bytes removed, and exits without running the benchmark; files it cannot read as
 an entry (such as ``*.part`` files or entries from before #543) are listed and
-left untouched (#575).
+left untouched (#575).  A ``--cache-dir`` that is not an existing directory is
+refused, and stale entries that cannot be removed are listed separately
+(:attr:`PruneReport.not_removed`) and left in place (#634).
 
 A power loss shortly after ``os.replace`` can still leave the final ``.npz`` entry empty or
 partially written.  On the next request, ``fetch`` treats an unreadable entry as a cache
@@ -355,8 +357,10 @@ import contextlib
 import dataclasses
 import errno
 import hashlib
+import importlib
 import itertools
 import json
+import lzma
 import math
 import numbers
 import os
@@ -365,6 +369,7 @@ import tempfile
 import time
 import warnings
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1452,11 +1457,15 @@ class PruneReport(NamedTuple):
         Files in the cache directory that could not be read as a valid
         entry (leftover ``*.part`` files, legacy entries from before #543,
         or corrupt files), left untouched.
+    not_removed:
+        Stale entries whose removal failed (a read-only mount, another
+        owner), each with the error, left in place.
     """
 
     files: int
     bytes: int
     unreadable: tuple[Path, ...]
+    not_removed: tuple[tuple[Path, str], ...] = ()
 
 
 _ENTRY_ERRORS = (
@@ -1467,6 +1476,24 @@ _ENTRY_ERRORS = (
     TypeError,
     zipfile.BadZipFile,
 )
+
+#: What reading a damaged compressed, encrypted or unsupported ``.npz`` member
+#: raises beyond :data:`_ENTRY_ERRORS`: a corrupt deflate, LZMA or (3.14+)
+#: Zstandard stream, an encrypted member, an unknown compression method.  bz2
+#: raises ``OSError``, already in :data:`_ENTRY_ERRORS`.
+_MEMBER_DECODE_ERRORS: tuple[type[Exception], ...] = (
+    zlib.error,
+    lzma.LZMAError,
+    RuntimeError,
+    NotImplementedError,
+)
+try:
+    _MEMBER_DECODE_ERRORS += (importlib.import_module("compression.zstd").ZstdError,)
+except ImportError:  # compression.zstd is new in Python 3.14
+    pass
+
+#: What :meth:`FeatureCache.prune` treats as an unreadable entry.
+_PRUNE_READ_ERRORS: tuple[type[Exception], ...] = (*_ENTRY_ERRORS, *_MEMBER_DECODE_ERRORS)
 
 
 def _stored_environment(stored: Mapping[str, Any]) -> dict[str, Any]:
@@ -1488,8 +1515,7 @@ class FeatureCache:
     they were computed in (JSON) and the code digest; it is written to a
     temporary name and renamed, so an interrupted run leaves no partial
     entry.  With ``directory=None`` nothing is stored and every request
-    computes.  With ``--prune-cache``, stale entries are removed, the outcome
-    is reported, and the process exits without running the benchmark.
+    computes.  :meth:`prune` removes the entries of other code or versions.
 
     Parameters
     ----------
@@ -1609,12 +1635,14 @@ class FeatureCache:
         cache.  Entries with matching code and key environment are kept.
         Files that cannot be read as a valid entry (leftover ``*.part``
         files, entries from before #543, or corrupt files) are not removed
-        and are listed in :attr:`PruneReport.unreadable`.
+        and are listed in :attr:`PruneReport.unreadable`; stale entries that
+        cannot be removed are listed in :attr:`PruneReport.not_removed`.
 
         Returns
         -------
         PruneReport
-            Number of removed files, total bytes removed, and unreadable files.
+            Number of removed files, total bytes removed, unreadable files and
+            stale entries that could not be removed.
         """
         if self.directory is None or not self.directory.exists():
             return PruneReport(files=0, bytes=0, unreadable=())
@@ -1622,6 +1650,7 @@ class FeatureCache:
         removed_files = 0
         removed_bytes = 0
         unreadable: list[Path] = []
+        not_removed: list[tuple[Path, str]] = []
         current_key_env = key_environment(self.environment)
 
         for path in sorted(self.directory.iterdir()):
@@ -1644,7 +1673,13 @@ class FeatureCache:
                         raw_env = _stored_environment(stored)
                         entry_key_env = key_environment(raw_env)
                         is_stale = entry_key_env != current_key_env
-            except _ENTRY_ERRORS:
+            except FileNotFoundError:
+                # Removed meanwhile by another prune, or by hand: there is
+                # nothing to report.
+                continue
+            # One damaged member, in a file placed by something else, must not
+            # abort the whole prune.
+            except _PRUNE_READ_ERRORS:
                 unreadable.append(path)
                 continue
 
@@ -1654,13 +1689,19 @@ class FeatureCache:
                     path.unlink()
                     removed_files += 1
                     removed_bytes += size
-                except OSError:
-                    unreadable.append(path)
+                except FileNotFoundError:
+                    # Removed meanwhile by another prune, or by hand: nothing is
+                    # left to report, and this process removed nothing.
+                    continue
+                except OSError as exc:
+                    # strerror only: str(exc) repeats the full path.
+                    not_removed.append((path, exc.strerror or str(exc)))
 
         return PruneReport(
             files=removed_files,
             bytes=removed_bytes,
             unreadable=tuple(unreadable),
+            not_removed=tuple(not_removed),
         )
 
 
@@ -2689,18 +2730,39 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, and ``--separation-seed`` still apply.
+
+    ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
+    other option, ``--quick`` and ``--out`` included, is ignored.
     """
     parser = _parser()
     args = parser.parse_args(argv)
-    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
-    if args.patience < 0:
-        parser.error(
-            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
-            f"got {args.patience}"
-        )
     if args.prune_cache:
         if args.no_cache:
             parser.error("--prune-cache cannot be used with --no-cache")
+        # Checked before FeatureCache, which creates a missing directory: a
+        # mistyped path must not look like an already-clean cache.
+        if not args.cache_dir.is_dir():
+            parser.error(
+                f"argument --cache-dir: {args.cache_dir} is not an existing directory, "
+                "so there is no cache to prune"
+            )
+        if CODE_SHA256 is None:
+            # Read again only to say why; a digest of the files as they are now is not used.
+            try:
+                code_fingerprint()
+            except RuntimeError:
+                reason = (
+                    "hqnn_forge is not imported from Python source files, or holds "
+                    "modules that are not Python source"
+                )
+            except OSError as exc:
+                reason = f"its source files cannot be read ({exc})"
+            else:
+                reason = (
+                    "its source files could not be read when this script was imported; "
+                    "run it again"
+                )
+            parser.error(f"--prune-cache cannot tell stale entries from current ones: {reason}")
         cache = FeatureCache(args.cache_dir)
         report = cache.prune()
         print(
@@ -2711,7 +2773,16 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             print(
                 f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
             )
+        if report.not_removed:
+            failed = ", ".join(f"{p.name} ({err})" for p, err in report.not_removed)
+            print(f"stale cache files that could not be removed: {failed}")
         return []
+    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
+    if args.patience < 0:
+        parser.error(
+            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
+            f"got {args.patience}"
+        )
     # 0 is the one spelling of "no limit": a negative value is a typo, not a second one.
     if args.max_separation_rows < 0 or 0 < args.max_separation_rows < MIN_SEPARATION_ROWS:
         parser.error(
