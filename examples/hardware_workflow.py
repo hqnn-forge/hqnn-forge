@@ -41,11 +41,11 @@ from its name alone, so options go in PennyLane's configuration file, which
 An option that has to be a Python object rather than a string cannot be
 given this way, so a device that needs one, such as ``pennylane-qiskit``'s
 ``"qiskit.remote"`` (its ``backend``), cannot be used here as it stands.
-The library passes ``seed`` to any device it does not know as given, so
-``build`` seeds only the simulators in ``KNOWN_DEVICES``.  The execution
-counts printed in step 2, counted on a simulator, are what a run costs
-there, and they are the reason to prefer SPSA: its cost per step does not
-grow with the number of parameters.
+The library passes ``seed`` only to devices whose registered constructor
+explicitly declares it, and warns when the device should be seeded through its
+own option.  The execution counts printed in step 2, counted on a simulator,
+are what a run costs there, and they are the reason to prefer SPSA: its cost
+per step does not grow with the number of parameters.
 
 Usage::
 
@@ -63,7 +63,6 @@ import pennylane as qml
 import torch
 
 from hqnn_forge.encoding import DiffMethod
-from hqnn_forge.encoding.angle_embedding import KNOWN_DEVICES
 from hqnn_forge.evaluation import find_optimal_threshold, matthews_corrcoef
 from hqnn_forge.models import HybridBinaryClassifier
 from hqnn_forge.noise import noise_sweep, shot_sweep
@@ -113,8 +112,7 @@ def build(
         device_name=device,
         diff_method=diff_method,
         shots=shots,
-        # A plugin device is passed seed as given, and may reject it.
-        seed=SEED if device in KNOWN_DEVICES else None,
+        seed=SEED,
     )
 
 

@@ -3,8 +3,15 @@ hqnn_forge.evaluation
 =====================
 Post-hoc evaluation helpers for binary classifiers on imbalanced data.
 
+The plotting helpers live in the submodule ``hqnn_forge.evaluation.plots``.
+They include confusion matrices, fold boxplots, and efficiency frontiers
+(needs matplotlib; import it explicitly with
+``from hqnn_forge.evaluation import plots``).
+
 Exported symbols
 ----------------
+METRICS                  The binary metrics by name, each mapped to its function.
+MULTICLASS_METRICS       The multiclass metrics by name, each mapped to its function.
 find_optimal_threshold   Decision threshold that maximises a metric on held-out probabilities.
 ThresholdSearchResult    (threshold, score) pair returned by find_optimal_threshold.
 matthews_corrcoef        MCC from labels, pure torch/NumPy.
@@ -34,9 +41,6 @@ TemperatureScaler, PlattScaler
                          Post-hoc calibration fitted on a validation split.
 multiclass_brier_score, top_label_ece, classwise_ece, MulticlassTemperatureScaler
                          The same for (n, K) probabilities and logits (#360).
-plots                    Submodule: confusion matrix, fold boxplot, efficiency
-                         frontier (needs matplotlib; import it explicitly:
-                         ``from hqnn_forge.evaluation import plots``).
 """
 
 from hqnn_forge.evaluation.bootstrap import (

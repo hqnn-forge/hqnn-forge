@@ -311,11 +311,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hqnn_forge.rydberg.evolve(hamiltonian, t, *, gamma=0.0, n_steps=None)`: the density matrix
   `ρ(t)` of a batch of time-independent Hamiltonians, starting with every atom in `|g⟩`, under
   Markovian dephasing with the local collapse operators `√γ n_i` (a single-atom coherence
-  decays at `γ/2`). `gamma=0` is exact from one eigendecomposition; `gamma>0` uses a
+  decays at `γ/2`). `gamma=0` needs no time stepping; `gamma>0` uses a
   symmetric (Strang) splitting with the exact elementwise dissipator, second order in the step,
   and requires `n_steps`. `readout(rho, *, pairs=False)` returns `⟨n_i⟩` for every atom and
-  optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ. Gradients through `evolve`
-  are wrong where the Hamiltonian has degenerate eigenvalues (#505) (#497, #506)
+  optionally `⟨n_i n_j⟩` for every pair, from the diagonal of ρ (#497, #506)
 - `hqnn_forge.rydberg.RydbergFeatureMap(register, encoding, *, c6, gamma, n_steps=None,
   interactions=True, correlations=False)`: a fixed map from a batch of inputs to the excitation
   probabilities `⟨n_i⟩` of a Rydberg array (optionally followed by the pair correlations
@@ -358,7 +357,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stratified subsampling, exported as `stratified_subsample_indices` from
   `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
   `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
-  dephasing rate and fold (#519, #520)
+  dephasing rate and fold. The limit is on by default at 2000 rows: a training or test part
+  above 2000 rows records its `separation` from a subsample, a smaller part is measured in
+  full (#519, #520)
 - `examples/benchmark_rydberg_features.py` standardises each head's features per fold, with the
   mean and standard deviation of the fold's real training rows (never synthetic, validation or
   test rows), for arms A, B, C and D alike (not `D-hybrid`), so that a score under strong
@@ -380,6 +381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched (#575, #618)
 
 ### Changed
+- Devices whose registered constructor does not explicitly declare `seed` do not receive it;
+  passing a non-`None` seed warns and directs users to the device's own seeding option (#659)
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
   allocating a dense diagonal state tensor; shot estimates are the correctly rounded value of
   `count / S`, guaranteeing bit-for-bit identical results across chunk sizes for the same drawn bitstrings (#617)
@@ -521,14 +524,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
   smoke-test configuration on the positive control and ignores conflicting grid, model,
   dataset-selection, and training options (#563)
+- `kernel_target_alignment` accepts array-like labels such as a NumPy array or pandas Series
+  (#539)
+- `HybridBinaryClassifier` and `ParallelHybridClassifier` reject `dropout_p` outside `[0, 1)`
+  with the same message as `MulticlassHybridClassifier`, before any layer is built. A
+  checkpoint saved with such a value no longer loads as is; `load_checkpoint` names the fix,
+  `load_checkpoint(path, dropout_p=0.0)`. `ClassicalBaseline` now words its `dropout_p` error
+  the same way (#651)
 
 ### Fixed
+- `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same
+  `ValueError` as layer construction on a sampling-only device, before any QNode is swapped
+  or any prediction runs, instead of PennyLane's `DeviceError` at the first forward pass (#684)
+- `examples/benchmark_rydberg_features.py` uses a pairwise-summation bound for every
+  standardised column in steps 2 and 4: at 150 fitting rows, a `½ + 2⁻⁵²g` column is only
+  centred up to about 16 units in the last place, rather than the old bound's 150, so raw
+  inputs and strong-dephasing results can differ from earlier runs; result lines also list
+  columns only centred despite nonzero computed variance (#682)
+- `examples/benchmark.py` refuses `--max-rows` below 2, `--folds` below 2, `--qubits` below 2,
+  and `--epochs`, `--layers` or `--seeds` below 1 with a usage error before any data is loaded,
+  instead of failing later with a traceback (#661, #669)
+- `examples/benchmark_rydberg_features.py --prune-cache` refuses a `--cache-dir` that is not an
+  existing directory instead of creating it and reporting an empty prune, says why when the
+  code digest is unavailable, and ignores every other option (an invalid `--patience` no longer
+  stops it). A stale entry it cannot remove is reported in the new `PruneReport.not_removed` and
+  printed as such rather than listed as unreadable, one removed meanwhile by another process is
+  skipped, and a corrupt compressed entry is listed as unreadable instead of stopping the
+  prune (#634, #667)
+- `examples/benchmark_rydberg_features.py`: `check_writable()` applies Windows' limit of 255
+  UTF-16 code units per filename when `os.pathconf` is unavailable, so a long output
+  filename is refused, or probed with a short prefix, instead of failing (#650, #657)
+- `examples/benchmark_rydberg_features.py` treats a feature cache entry it cannot read (empty, truncated, missing a field, or removed while being read) as a miss: it warns, recomputes the features and replaces the entry, instead of stopping the run (#621, #631)
 - Circuit diagnostics (`circuit_summary`, `draw_circuit`, `count_inert_parameters`) no
   longer fail on PennyLane 0.46 development builds, where `qml.transforms.decompose` stopped
   accepting a tape (#623)
 - `examples/does_the_quantum_layer_help.py` now reuses the rounding-aware
   feature standardisation so near-constant columns are centred rather than
   incorrectly scaled to unit variance (#604)
+- `examples/benchmark_rydberg_features.py`: the summary's `feat s` and `fit s` columns average
+  only the lines that were computed, so a row of reused arm B lines shows `-` instead of
+  `0.00`; `--max-separation-rows` 1, 2 or a negative value ends in a command-line error
+  instead of a traceback or no limit, and `0` is the one spelling of no limit; the docstring
+  states that a reused line's `feature_cache_hit` is that of its source line (#541, #607)
+- `separation_measures` and `stratified_subsample_indices` refuse a `max_rows` that is a
+  float, a bool or a string with a `ValueError` naming it, where they failed late or took
+  `True` for one row, and so does `max_separation_rows` of the Rydberg benchmark's
+  `Settings`; with fewer rows than classes, ties between equally large classes go to the
+  lower label on every NumPy; both docstrings state that a small class can be left with one
+  row and what that does to the measures. `stratified_subset` of `examples/benchmark.py`
+  uses `stratified_subsample_indices`, so it keeps exactly `--max-rows` rows and every class
+  (the rows of the credit-card data at the default are unchanged) (#541, #607)
 - A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
   each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
   output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
@@ -616,6 +661,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--patience` ends in a command-line error), and a dataset name outside `DATASETS` raises a
   `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
   (#540, #605, #606)
+- `examples/benchmark_rydberg_features.py`: checking `--out` no longer opens FIFOs or
+  devices, and valid long output filenames are accepted without making the temporary
+  probe name too long (#628)
+- `examples/benchmark_rydberg_features.py`: `preprocess` standardises the raw columns with
+  `standardise_features`, so a column constant on the fitting rows up to rounding (σ of a few
+  ulp, not exactly 0) is only centred instead of scaled to unit variance, where its rounding
+  noise could take a principal component. Inputs, and so every arm's scores, change only on
+  datasets with such a column. Such a column no longer adds to the centred rank either, so on
+  a dataset where it was what lifted the rank to `n_atoms`, `PCANormalizer.fit` now raises
+  `centred data has rank r < n_components` and the run stops, where it used to take the
+  rounding noise as an input (#580, #600)
+- `evolve`: gradients through it were silently wrong where the Hamiltonian has
+  degenerate eigenvalues. When the Hamiltonian requires grad, the propagator
+  now comes from `torch.linalg.matrix_exp` instead of `eigh`; forward-mode AD
+  is still affected (#674) (#505, #668)
+- `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
+  `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
+  no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

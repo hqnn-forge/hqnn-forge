@@ -1324,14 +1324,18 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
     TypeError
         If ``model`` has no quantum layer.
     ValueError
-        If ``shots`` is not ``None`` or a positive ``int``.
+        If ``shots`` is invalid or the device cannot execute without shots.
     RuntimeError
         If the layer is already inside ``apply_shots`` or a ``p > 0``
         :func:`apply_depolarizing_noise` block, whose exact channel shots
         would not apply to.
     """
     # Imported here: hqnn_forge.encoding imports this module.
-    from hqnn_forge.encoding._common import expand_batch_dimension, validate_shots
+    from hqnn_forge.encoding._common import (
+        expand_batch_dimension,
+        validate_device_shots,
+        validate_shots,
+    )
 
     validate_shots(shots, "parameter-shift")
     layer, qlayer, _ = resolve_encoding_layer(model, "apply_shots")
@@ -1343,6 +1347,7 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
             "simulates the exact channel on default.mixed."
         )
     original = qlayer.qnode
+    validate_device_shots(original.device, shots)
     func = original.func
     # A circuit function that checks its own input gradients (amplitude
     # embedding) holds the construction-time diff_method; under backprop its
@@ -1434,12 +1439,13 @@ def shot_sweep(
     Raises
     ------
     ValueError
-        If ``n_repeats < 1``, only one of ``y`` and ``score_fn`` is given, or a
-        shot count is invalid -- checked before the first evaluation.
+        If ``n_repeats < 1``, only one of ``y`` and ``score_fn`` is given, a
+        shot count is invalid, or ``shots`` contains ``None`` and the device
+        cannot execute without shots -- checked before the first evaluation.
     TypeError
-        If ``model`` has no ``predict_proba``.
+        If ``model`` has no ``predict_proba`` or no quantum layer.
     """
-    from hqnn_forge.encoding._common import validate_shots
+    from hqnn_forge.encoding._common import validate_device_shots, validate_shots
 
     if (y is None) != (score_fn is None):
         raise ValueError("pass both y and score_fn, or neither.")
@@ -1453,6 +1459,9 @@ def shot_sweep(
     counts = list(shots)
     for count in counts:
         validate_shots(count, "parameter-shift")
+    if None in counts:
+        _, qlayer, _ = resolve_encoding_layer(model, "shot_sweep")
+        validate_device_shots(qlayer.qnode.device, None)
     points = []
     for count in counts:
         with apply_shots(model, count):

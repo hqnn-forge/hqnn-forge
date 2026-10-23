@@ -120,15 +120,16 @@ Rules that follow from the tests:
   cannot go below `2 / 2^n`: 5 folds cannot reach 0.05 whatever the scores. `run_benchmark`
   reports this floor as `wilcoxon_min_p`; a result above 0.05 at 5 folds is inconclusive by
   construction, and more folds are the remedy, not a looser threshold. Folds where both
-  models score the same drop out.
+  models score the same (to within 1e-12) drop out.
 - **Two models across datasets:** with exactly two models, the Wilcoxon test over per-dataset
   mean MCCs is the appropriate test (Demšar 2006), reported in `cross_dataset` when more than
   one dataset is run, including in the saved experiment record. Each dataset contributes
   one pair, with equal weight regardless of sample count, folds or seeds. Means are over
   seeds within folds, then over folds. Positive rank-biserial effect favours the hybrid.
   `n_datasets` counts all datasets and `n_pairs` counts non-zero mean differences; zeros
-  drop out, so five non-zero datasets cannot reach 0.05. With all means tied, the test is
-  undefined (NaN) and the effect is 0; with one dataset the comparison is `None`.
+  (to within 1e-12) drop out, so five non-zero datasets cannot reach 0.05. With all means
+  tied, the test is undefined (NaN) and the effect is 0; with one dataset the comparison is
+  `None`.
   The runner currently compares exactly two models. For three or more, use
   `friedman_test` with Iman–Davenport, then `nemenyi_critical_difference` for all pairs or
   `compare_to_control` with Holm adjustment against one control.

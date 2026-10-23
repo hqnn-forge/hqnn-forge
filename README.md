@@ -66,9 +66,9 @@ flowchart TD
 `run_benchmark` stops at the scores and the test columns (`wilcoxon_p`, `wilcoxon_min_p`,
 `rank_biserial`); the outcomes at the bottom are how to read those columns at the α you choose.
 Its own `alpha` argument only sets the significance level of the noise sweep's summary. Folds
-where both models score the same MCC drop out of the test, so they do not count towards reaching
-α. When reading the per-dataset tests as a family, use `wilcoxon_p_holm`, which adjusts one
-p-value per dataset (the same on both model rows).
+where both models score the same MCC (to within 1e-12) drop out of the test, so they do not count
+towards reaching α. When reading the per-dataset tests as a family, use `wilcoxon_p_holm`, which
+adjusts one p-value per dataset (the same on both model rows).
 
 With several datasets, `result.cross_dataset` compares the two models over their per-dataset
 mean MCCs using a two-sided Wilcoxon test. It reports `wilcoxon_p`, `wilcoxon_min_p` and
@@ -205,8 +205,9 @@ device_arn = "arn:aws:braket:::device/qpu/..."
 
 An option that must be a Python object rather than a string cannot be passed this way, so a
 device that needs one, such as `"qiskit.remote"` (its `backend`), does not work here. The
-library passes `seed` to a plugin device as given, so the example seeds only the simulators in
-`KNOWN_DEVICES`.
+library passes `seed` only to devices whose registered constructor explicitly declares it;
+otherwise it warns that the device's own seeding option should be used. The example passes the
+seed directly.
 
 ---
 

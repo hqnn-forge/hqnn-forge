@@ -824,20 +824,106 @@ class TestSeparationMeasures:
 
     def test_rejects_invalid_max_rows(self) -> None:
         features, labels = two_blobs(10, 10, [1.0, 0.0], 1.0, seed=34)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 0"):
-            separation_measures(features, labels, max_rows=0)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got -5"):
-            separation_measures(features, labels, max_rows=-5)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 2"):
-            separation_measures(features, labels, max_rows=2)
+        for value, shown in ((0, "0"), (-5, "-5"), (2, "2")):
+            with pytest.raises(
+                ValueError, match=rf"^max_rows must be an integer >= 3 or None; got {shown}\.$"
+            ):
+                separation_measures(features, labels, max_rows=value)
 
     def test_rejects_invalid_max_rows_on_small_inputs_up_front(self) -> None:
         features = [[1.0], [2.0], [3.0], [4.0]]
         labels = [0, 0, 1, 1]
-        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got 2"):
+        with pytest.raises(ValueError, match=r"max_rows must be an integer >= 3 or None; got 2"):
             separation_measures(features, labels, max_rows=2)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 3 or None; got -5"):
+        with pytest.raises(ValueError, match=r"max_rows must be an integer >= 3 or None; got -5"):
             separation_measures(features, labels, max_rows=-5)
+
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [(30.0, "30.0"), (30.5, "30.5"), (True, "True"), ("30", "'30'")],
+    )
+    def test_rejects_a_max_rows_that_is_not_an_integer(self, value: Any, shown: str) -> None:
+        """
+        Checked before anything is computed, also where the input is small
+        enough not to be subsampled: a float, a bool or a string is refused
+        with a message naming ``max_rows`` (#541).
+        """
+        features, labels = two_blobs(25, 25, [1.0, 0.0], 1.0, seed=35)
+        message = rf"^max_rows must be an integer >= 3 or None; got {shown}\.$"
+        with pytest.raises(ValueError, match=message):
+            separation_measures(features, labels, max_rows=value)
+        with pytest.raises(ValueError, match=message):
+            separation_measures(features[:4], labels[23:27], max_rows=value)
+
+    def test_accepts_a_numpy_integer_max_rows(self) -> None:
+        numpy_thirty: Any = np.int64(30)  # an Integral that is not an int
+        features, labels = two_blobs(25, 25, [1.0, 0.0], 1.0, seed=36)
+        assert separation_measures(features, labels, max_rows=numpy_thirty) == (
+            separation_measures(features, labels, max_rows=30)
+        )
+
+    def test_subsample_is_the_one_of_stratified_subsample_indices(self) -> None:
+        """
+        The measures with ``max_rows`` are exactly those of the rows that
+        :func:`stratified_subsample_indices` selects with the same seed (#541).
+
+        On these features an unstratified draw of 30 rows with the same seed,
+        and the first 30 rows, give other measures, so a subsample that
+        ignored the classes, took the leading rows or drew with another seed
+        would fail here.
+        """
+        blob_features, blob_labels = two_blobs(80, 20, [2.0, 1.0], 1.0, seed=37)
+        order = torch.randperm(100, generator=torch.Generator().manual_seed(0))
+        features, labels = blob_features[order], blob_labels[order]
+
+        idx = stratified_subsample_indices(labels, 30, seed=0)
+        # 30 · 80/100 = 24 and 30 · 20/100 = 6 rows: the quotas are whole numbers here
+        assert np.bincount(labels.numpy()[idx]).tolist() == [24, 6]
+        stratified = separation_measures(features, labels, max_rows=30, seed=0)
+        assert stratified == separation_measures(features[idx], labels[idx])
+        assert stratified.n_samples == 30
+
+        unstratified = np.sort(np.random.default_rng(0).choice(100, size=30, replace=False))
+        assert np.bincount(labels.numpy()[unstratified]).tolist() != [24, 6]
+        assert separation_measures(features[unstratified], labels[unstratified]) != stratified
+        assert separation_measures(features[:30], labels[:30]) != stratified
+        other_seed = stratified_subsample_indices(labels, 30, seed=1)
+        assert separation_measures(features[other_seed], labels[other_seed]) != stratified
+
+    def test_a_class_reduced_to_one_row(self) -> None:
+        """
+        5 positives among 1000 rows and ``max_rows=20``: the quotas are
+        ``19.9`` and ``0.1``, largest-remainder rounding gives ``[20, 0]``, and
+        the empty class takes one row from the larger one, ``[19, 1]``.  The
+        positive class then has no pair within it, and its mean is that one
+        row: ``mean_within_distance`` is the mean over the ``19 · 18/2 = 171``
+        pairs of class 0, and the Fisher ratio is ``δᵀ S_w⁻¹ δ`` with
+        ``δ = F[p] − μ0`` and ``S_w`` the scatter of class 0 over ``M − 2 = 18``.
+        """
+        generator = torch.Generator().manual_seed(38)
+        features = torch.randn(1000, 2, generator=generator, dtype=F64)
+        labels = torch.zeros(1000, dtype=torch.int64)
+        labels[[100, 300, 500, 700, 900]] = 1
+        idx = stratified_subsample_indices(labels, 20, seed=0)
+        sub_features, sub_labels = features[idx].numpy(), labels[idx].numpy()
+        assert np.bincount(sub_labels).tolist() == [19, 1]
+
+        measures = separation_measures(features, labels, max_rows=20, seed=0)
+        assert measures == separation_measures(features[idx], labels[idx])
+        negatives, (positive,) = sub_features[sub_labels == 0], sub_features[sub_labels == 1]
+        within = [
+            np.linalg.norm(negatives[i] - negatives[j])
+            for i in range(19)
+            for j in range(i + 1, 19)
+        ]
+        assert len(within) == 171
+        assert measures.mean_within_distance == pytest.approx(np.mean(within), rel=1e-12)
+        between = np.linalg.norm(negatives - positive, axis=1).mean()
+        assert measures.mean_between_distance == pytest.approx(between, rel=1e-12)
+        centred = negatives - negatives.mean(axis=0)
+        delta = positive - negatives.mean(axis=0)
+        fisher = delta @ np.linalg.solve(centred.T @ centred / 18, delta)
+        assert measures.fisher_ratio == pytest.approx(fisher, rel=1e-10)
 
 
 class TestStratifiedSubsampleIndices:
@@ -849,10 +935,58 @@ class TestStratifiedSubsampleIndices:
 
     def test_rejects_invalid_max_rows(self) -> None:
         labels = np.array([0] * 30 + [1] * 20)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 1 or None; got 0"):
+        with pytest.raises(
+            ValueError, match=r"^max_rows must be an integer >= 1 or None; got 0\.$"
+        ):
             stratified_subsample_indices(labels, 0)
-        with pytest.raises(ValueError, match=r"max_rows must be >= 1 or None; got -1"):
+        with pytest.raises(
+            ValueError, match=r"^max_rows must be an integer >= 1 or None; got -1\.$"
+        ):
             stratified_subsample_indices(labels, -1)
+
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [(30.0, "30.0"), (30.5, "30.5"), (True, "True"), (False, "False"), ("30", "'30'")],
+    )
+    def test_rejects_a_max_rows_that_is_not_an_integer(self, value: Any, shown: str) -> None:
+        """A float, a bool or a string is refused up front, also above the row count (#541)."""
+        labels = np.array([0] * 30 + [1] * 20)
+        message = rf"^max_rows must be an integer >= 1 or None; got {shown}\.$"
+        with pytest.raises(ValueError, match=message):
+            stratified_subsample_indices(labels, value)
+        with pytest.raises(ValueError, match=message):
+            stratified_subsample_indices(labels[:3], value)
+
+    def test_accepts_a_numpy_integer_max_rows(self) -> None:
+        numpy_limit: Any = np.int64(17)  # an Integral that is not an int
+        labels = np.array([0] * 30 + [1] * 20)
+        assert np.array_equal(
+            stratified_subsample_indices(labels, numpy_limit, seed=3),
+            stratified_subsample_indices(labels, 17, seed=3),
+        )
+
+    @pytest.mark.parametrize(
+        ("counts", "max_rows", "kept"),
+        [
+            # the example of #541: four classes of 10, two rows
+            ([10, 10, 10, 10], 2, [0, 1]),
+            # interleaved ties, where NumPy's default (unstable) argsort can reorder them
+            ([5, 10, 5, 10, 5, 10, 5, 10], 3, [1, 3, 5]),
+            ([10, 5, 10, 5, 10, 5, 10, 5], 3, [0, 2, 4]),
+        ],
+    )
+    def test_ties_below_one_row_per_class_go_to_the_lower_label(
+        self, counts: list[int], max_rows: int, kept: list[int]
+    ) -> None:
+        """
+        With ``max_rows`` below the number of classes, the ``max_rows``
+        largest classes give one row each, and of equally large classes the
+        one with the lower label comes first (a stable sort, #541).
+        """
+        labels = np.repeat(np.arange(len(counts)), counts)
+        for seed in (0, 1, 2):
+            idx = stratified_subsample_indices(labels, max_rows, seed=seed)
+            assert sorted(labels[idx].tolist()) == kept
 
     def test_returns_exact_count_and_sorted(self) -> None:
         labels = np.array([0] * 60 + [1] * 40)

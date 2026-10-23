@@ -105,6 +105,7 @@ from hqnn_forge.models._trunk import (
     DEFAULT_ENCODER_ACTIVATION,
     DEFAULT_INIT_STD,
     QuantumTrunk,
+    validate_dropout_p,
     validate_encoder_activation,
     validate_init,
 )
@@ -148,7 +149,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         branch.  Default: True.  If ``False``, input must already lie in
         (-π, π); it is not rescaled.
     dropout_p:
-        Dropout probability applied to the fused branch outputs.  Default: 0.0.
+        Dropout probability applied to the fused branch outputs, in ``[0, 1)``;
+        raises ``ValueError`` otherwise.  Default: 0.0.
     device_name:
         PennyLane device name.  Default ``"auto"``: ``default.qubit`` up to
         12 qubits, ``lightning.qubit`` above (see
@@ -376,6 +378,7 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
 
             # Validated before the classical branch is built, as before the shared
             # trunk: a bad option fails without drawing from the RNG.
+            validate_dropout_p(dropout_p)
             validate_encoder_activation(encoder_activation)
             validate_init(init_strategy, init_std)
             self.classical_hidden_dim = classical_hidden_dim

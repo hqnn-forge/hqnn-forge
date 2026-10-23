@@ -24,7 +24,12 @@ from hqnn_forge.evaluation import (
     statistics,
     wilcoxon_signed_rank,
 )
-from hqnn_forge.evaluation.statistics import EXACT_MAX_N, Alternative, _average_ranks
+from hqnn_forge.evaluation.statistics import (
+    DEFAULT_ATOL,
+    EXACT_MAX_N,
+    Alternative,
+    _average_ranks,
+)
 
 
 def _brute_force_p(diffs: np.ndarray, alternative: Alternative) -> float:
@@ -63,6 +68,30 @@ class TestAverageRanks:
         values = rng.integers(1, 5, size=20).astype(float)
         np.testing.assert_allclose(_average_ranks(values), stats.rankdata(values))
 
+    def test_round_off_different_values_are_tied(self) -> None:
+        v1 = float(np.mean([0.1, 0.2, 0.3]))
+        v2 = float(np.mean([0.3, 0.2, 0.1]))
+        assert v1 != v2
+        assert abs(v1 - v2) <= DEFAULT_ATOL
+        values = np.array([0.5, v1, 0.25, v2])
+        np.testing.assert_allclose(_average_ranks(values), [4.0, 1.5, 3.0, 1.5])
+
+    def test_ties_do_not_chain_arbitrarily_far(self) -> None:
+        step = 0.6 * DEFAULT_ATOL
+        values = np.array([1.0, 1.0 + step, 1.0 + 2 * step])
+        np.testing.assert_allclose(_average_ranks(values), [1.5, 1.5, 3.0])
+
+    def test_custom_atol(self) -> None:
+        values = np.array([0.125, 0.125 + 1e-15])
+        np.testing.assert_allclose(_average_ranks(values, atol=0.0), [1.0, 2.0])
+        np.testing.assert_allclose(_average_ranks(values, atol=1e-12), [1.5, 1.5])
+
+    def test_invalid_atol_raises(self) -> None:
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            _average_ranks(np.array([1.0, 2.0]), atol=-1.0)
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            _average_ranks(np.array([1.0, 2.0]), atol=float("nan"))
+
 
 class TestRankBiserial:
     def test_identical_arrays_give_zero(self) -> None:
@@ -85,6 +114,21 @@ class TestRankBiserial:
         rng = np.random.default_rng(0)
         a, b = rng.random(7), rng.random(7)
         assert rank_biserial_correlation(a, b) == pytest.approx(-rank_biserial_correlation(b, a))
+
+    def test_round_off_zero_difference_gives_zero(self) -> None:
+        a = [0.1 + 0.2, 0.5]
+        b = [0.3, 0.5]
+        assert rank_biserial_correlation(a, b) == 0.0
+
+    def test_round_off_ties_balance_out(self) -> None:
+        a = [0.25, 0.0]
+        b = [0.0, 0.25 + 1e-16]
+        assert rank_biserial_correlation(a, b) == pytest.approx(0.0)
+
+    def test_custom_atol_reaches_the_effect_size(self) -> None:
+        a, b = [0.0, 1.0], [1e-14, 0.0]
+        assert rank_biserial_correlation(a, b) == pytest.approx(1.0)  # 1e-14 dropped as zero
+        assert rank_biserial_correlation(a, b, atol=0.0) == pytest.approx(1 / 3)
 
 
 class TestWilcoxon:
@@ -210,6 +254,65 @@ class TestWilcoxon:
         with pytest.raises(ValueError, match="alternative must be"):
             wilcoxon_signed_rank([1], [0], alternative="both")  # type: ignore[arg-type]
 
+    def test_round_off_zero_differences_are_dropped(self) -> None:
+        a = [0.1 + 0.2, 1.0, 2.0]
+        b = [0.3, 0.0, 0.0]
+        res = wilcoxon_signed_rank(a, b)
+        assert res.n == 2
+        assert res.statistic == 3.0
+
+    def test_all_round_off_zero_differences_raise(self) -> None:
+        a = [0.1 + 0.2, float(np.mean([0.1, 0.2, 0.3]))]
+        b = [0.3, float(np.mean([0.3, 0.2, 0.1]))]
+        with pytest.raises(ValueError, match="every paired difference is zero"):
+            wilcoxon_signed_rank(a, b)
+
+    def test_round_off_tied_absolute_differences_get_average_ranks(self) -> None:
+        a = [0.25, 0.0]
+        b = [0.0, 0.25 + 1e-16]
+        res = wilcoxon_signed_rank(a, b)
+        assert res.n == 2
+        assert res.statistic == 1.5
+        assert res.p_value == pytest.approx(1.0)
+
+    def test_combination_of_zeros_ties_positive_and_negative_differences(self) -> None:
+        a = [0.0, 0.1 + 0.2, 0.5, 0.5 + 1e-16, 0.0, 0.0, 0.8, 0.0]
+        b = [0.0, 0.3, 0.0, 0.0, 0.5, 0.5 + 1e-16, 0.0, 0.8 + 1e-16]
+        res = wilcoxon_signed_rank(a, b)
+        assert res.n == 6
+        assert res.statistic == 10.5
+        assert res.p_value == pytest.approx(1.0)
+        assert rank_biserial_correlation(a, b) == pytest.approx(0.0)
+
+    def test_custom_atol_parameter(self) -> None:
+        a = [1e-14, 1.0]
+        b = [0.0, 0.0]
+        res_default = wilcoxon_signed_rank(a, b)
+        assert res_default.n == 1
+        assert res_default.statistic == 1.0
+
+        res_strict = wilcoxon_signed_rank(a, b, atol=1e-15)
+        assert res_strict.n == 2
+        assert res_strict.statistic == 3.0
+
+        res_zero_tol = wilcoxon_signed_rank(a, b, atol=0.0)
+        assert res_zero_tol.n == 2
+
+    def test_custom_atol_reaches_the_tie_grouping(self) -> None:
+        a, b = [0.125, -(0.125 + 1e-14)], [0.0, 0.0]
+        assert wilcoxon_signed_rank(a, b).statistic == 1.5  # |d| tied, ranks 1.5 and 1.5
+        assert wilcoxon_signed_rank(a, b, atol=0.0).statistic == 1.0  # ranks 1 and 2
+
+    def test_invalid_atol_raises(self) -> None:
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            wilcoxon_signed_rank([1.0], [0.0], atol=-1.0)
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            wilcoxon_signed_rank([1.0], [0.0], atol=float("nan"))
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            wilcoxon_signed_rank([1.0], [0.0], atol=float("inf"))
+        with pytest.raises(ValueError, match="atol must be a finite non-negative float"):
+            rank_biserial_correlation([1.0], [0.0], atol=-1.0)
+
 
 # ---------------------------------------------------------------------------
 # Several models over several datasets (#204)
@@ -284,6 +387,14 @@ class TestFriedmanAgainstDemsar:
 
 
 class TestFriedmanFromScores:
+    def test_ranks_tie_only_exactly_equal_scores(self) -> None:
+        # Round-off between scores is not a tie in the Friedman ranks (#687).
+        v1, v2 = np.mean([0.1, 0.2, 0.3]), np.mean([0.3, 0.2, 0.1])
+        assert v1 != v2
+        scores = [[v1, v2, 0.1], [0.5, 0.4, 0.3], [0.2, 0.6, 0.4]]
+        np.testing.assert_allclose(average_ranks(scores), [5 / 3, 5 / 3, 8 / 3])
+        assert friedman_test(scores).statistic == pytest.approx(2.0)
+
     def test_ranks_best_first_with_ties_averaged(self) -> None:
         scores = [[0.9, 0.8, 0.8], [0.5, 0.7, 0.6]]
         np.testing.assert_allclose(

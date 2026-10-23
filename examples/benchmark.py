@@ -28,6 +28,7 @@ import numpy as np
 
 from hqnn_forge.benchmark import run_benchmark, write_csv
 from hqnn_forge.data import load_credit_card_fraud
+from hqnn_forge.diagnostics import stratified_subsample_indices
 from hqnn_forge.models import HybridBinaryClassifier
 
 
@@ -43,21 +44,28 @@ def synthetic(n: int = 1000, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
 def stratified_subset(
     X: np.ndarray, y: np.ndarray, max_rows: int, seed: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
-    """At most ``max_rows`` rows, drawn per class so the positive rate is kept."""
-    if y.size <= max_rows:
+    """
+    At most ``max_rows`` rows, drawn per class so the positive rate is kept.
+
+    The rows of :func:`~hqnn_forge.diagnostics.stratified_subsample_indices`
+    (largest-remainder quotas, exactly ``max_rows`` rows, every class
+    present), in their original order; all rows if there are no more than
+    ``max_rows``.  These are the rows the per-class rounding
+    ``round(max_rows · share)`` it replaces (#541) drew with the same seed
+    whenever that rounding kept ``max_rows`` rows and both classes and the
+    two quotas ``max_rows · share`` did not both end in exactly ½, as on
+    the credit-card data (492 frauds in 284,807 rows) at ``--max-rows``
+    1000, 5000, 20,000 (the default) and 50,000.  On such a tie ``round``
+    went to the even count, the quotas go to the lower label: classes of
+    5 and 3 rows at ``max_rows=4`` kept 2 and 2 and now keep 3 and 1.
+    """
+    keep = stratified_subsample_indices(y, max_rows, seed=seed)
+    if keep.size == y.size:
         return X, y
-    rng = np.random.default_rng(seed)
-    keep = np.concatenate(
-        [
-            rng.choice(np.flatnonzero(y == c), round(max_rows * np.mean(y == c)), replace=False)
-            for c in (0, 1)
-        ]
-    )
-    keep.sort()
     return X[keep], y[keep]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Hybrid model against its matched classical control."
     )
@@ -82,7 +90,20 @@ def main() -> None:
     parser.add_argument(
         "--record", help="write an experiment record (JSON) for reproducing the run here"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.max_rows < 2:
+        parser.error(f"argument --max-rows: must be an integer >= 2; got {args.max_rows}")
+    if args.folds < 2:
+        parser.error(f"argument --folds: must be an integer >= 2; got {args.folds}")
+    if args.epochs < 1:
+        parser.error(f"argument --epochs: must be an integer >= 1; got {args.epochs}")
+    if args.qubits < 2:
+        parser.error(f"argument --qubits: must be an integer >= 2; got {args.qubits}")
+    if args.layers < 1:
+        parser.error(f"argument --layers: must be an integer >= 1; got {args.layers}")
+    if args.seeds < 1:
+        parser.error(f"argument --seeds: must be an integer >= 1; got {args.seeds}")
 
     datasets = {"synthetic": synthetic()}
     if args.credit_card:
