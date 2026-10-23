@@ -436,9 +436,11 @@ LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "foca
 MIN_SEPARATION_ROWS = 3
 
 
-def _positive_integer(value: Any) -> bool:
-    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and not value < 1
-
+def _positive_integer(value: Any) -> int:
+    """Validate and return a positive integer, casting numpy types."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 1:
+        raise ValueError(f"must be an integer >= 1; got {value!r}.")
+    return int(value)
 
 def _positive_real(value: Any) -> bool:
     return (
@@ -629,11 +631,8 @@ class Settings:
                 )
 
         rows = self.max_separation_rows
-        if rows is not None and not (_positive_integer(rows) and rows >= MIN_SEPARATION_ROWS):
-            raise ValueError(
-                f"max_separation_rows must be an integer >= {MIN_SEPARATION_ROWS} or None; "
-                f"got {rows!r}."
-            )
+        if rows is not None:
+            rows = int(check_int(rows, "max_separation_rows", minimum=MIN_SEPARATION_ROWS, allow_none=True))
 
     @property
     def evolution_time(self) -> float:

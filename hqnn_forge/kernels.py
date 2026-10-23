@@ -121,6 +121,8 @@ from torch import nn
 from hqnn_forge._encoding_contract import EncodingLayer
 from hqnn_forge._resolve import require_prepare_inputs, resolve_encoding_layer
 from hqnn_forge.noise import Position, _noisy_qnode, validate_noise
+from hqnn_forge._validation import check_int
+
 
 __all__ = [
     "encoded_density_matrices",
@@ -179,6 +181,7 @@ def _prepare(X: torch.Tensor, encoder: EncodingLayer, name: str) -> torch.Tensor
 
 
 def _check_batch_size(batch_size: int | None) -> None:
+    batch_size = check_int(batch_size, "batch_size", minimum=1)
     if batch_size is not None and (
         isinstance(batch_size, bool)
         or not isinstance(batch_size, numbers.Integral)

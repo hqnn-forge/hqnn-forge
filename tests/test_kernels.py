@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
@@ -882,7 +883,7 @@ class TestOverlapKernel:
     @pytest.mark.parametrize(
         ("kwargs", "match"),
         [
-            ({"shots": 0}, "shots must be a positive integer"),
+            ({"shots": 0}, r"shots must be an integer >= 1; got 0\."),
             ({"project_psd": True, "Y": "same"}, "square matrix only"),
         ],
     )
@@ -892,6 +893,20 @@ class TestOverlapKernel:
             kwargs = {**kwargs, "Y": X}
         with pytest.raises(ValueError, match=match):
             kernels.overlap_kernel_matrix(X, _angle_layer(), **kwargs)
+
+    def test_numpy_integer_shots_are_accepted(self) -> None:
+        """np.int64 is a numbers.Integral, so it is accepted and behaves like an int."""
+        layer = _angle_layer()
+        X = _angles(4)
+        with_numpy = kernels.overlap_kernel_matrix(X, layer, shots=np.int64(100), seed=3)
+        with_int = kernels.overlap_kernel_matrix(X, layer, shots=100, seed=3)
+        assert torch.equal(with_numpy, with_int)
+
+    @pytest.mark.parametrize("shots", [True, False])
+    def test_boolean_shots_are_refused(self, shots: bool) -> None:
+        match = rf"shots must be an integer >= 1; got {shots!r}\."
+        with pytest.raises(ValueError, match=match):
+            kernels.overlap_kernel_matrix(_angles(3), _angle_layer(), shots=shots)
 
     def test_transformed_qnode_is_refused(self) -> None:
         from hqnn_forge.noise import apply_depolarizing_noise
@@ -1002,10 +1017,21 @@ class TestBatchedSimulation:
 
     @pytest.mark.parametrize("batch_size", [0, -3, True, 2.5])
     def test_rejected_batch_size(self, batch_size: int) -> None:
-        with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        match = rf"batch_size must be an integer >= 1; got {re.escape(repr(batch_size))}\."
+        with pytest.raises(ValueError, match=match):
             encoded_states(_angles(3), _angle_layer(), batch_size=batch_size)
-        with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        with pytest.raises(ValueError, match=match):
             quantum_kernel_matrix(_angles(3), _angle_layer(), batch_size=batch_size)
+
+    def test_numpy_integer_batch_size_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """np.int64 is a numbers.Integral: accepted, and it batches like the int 3."""
+        rows = _count_passes(monkeypatch)
+        X = _angles(M)
+        with_numpy = encoded_states(X, _angle_layer(), batch_size=np.int64(3))
+        assert rows == [3, 3, 1]
+        torch.testing.assert_close(
+            with_numpy, encoded_states(X, _angle_layer(), batch_size=3), rtol=0, atol=0
+        )
 
 
 # ---------------------------------------------------------------------------

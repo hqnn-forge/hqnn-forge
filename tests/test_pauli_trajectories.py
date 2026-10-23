@@ -22,6 +22,7 @@ import warnings
 from functools import partial
 from typing import Any
 
+import numpy as np
 import pennylane as qml
 import pytest
 import torch
@@ -316,6 +317,13 @@ class TestBehaviour:
         layer.train()
         assert layer(_x()[0]).shape == (N_QUBITS,)
 
+    def test_numpy_integer_n_trajectories_is_accepted_and_stored_as_int(self) -> None:
+        layer = _layer(noise_level=P, noise_method="trajectories", noise_trajectories=np.int64(3))
+        assert layer.noise_trajectories == 3
+        assert type(layer.noise_trajectories) is int
+        layer.train()
+        assert layer(_x()).shape == (2, N_QUBITS)
+
     def test_post_hoc_wrapper_wins_in_train_mode(self) -> None:
         layer = _layer(noise_level=0.5, noise_method="trajectories")
         layer.train()
@@ -340,9 +348,18 @@ class TestValidation:
         "kwargs, match",
         [
             (dict(noise_method="kraus"), "noise_method must be 'density' or 'trajectories'"),
-            (dict(noise_method="trajectories", noise_trajectories=0), "positive int"),
-            (dict(noise_method="trajectories", noise_trajectories=True), "positive int"),
-            (dict(noise_method="trajectories", noise_trajectories=2.0), "positive int"),
+            (
+                dict(noise_method="trajectories", noise_trajectories=0),
+                r"noise_trajectories must be an integer >= 1; got 0\.",
+            ),
+            (
+                dict(noise_method="trajectories", noise_trajectories=True),
+                r"noise_trajectories must be an integer >= 1; got True\.",
+            ),
+            (
+                dict(noise_method="trajectories", noise_trajectories=2.0),
+                r"noise_trajectories must be an integer >= 1; got 2\.0\.",
+            ),
             (dict(noise_trajectories=2), "needs noise_method='trajectories'"),
         ],
     )

@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from hqnn_forge._validation import check_int
 
 __all__ = ["AtomRegister"]
 
@@ -72,6 +73,7 @@ def _real_tensor(value: Any, name: str) -> torch.Tensor:
 
 
 def _atom_count(n_atoms: Any) -> int:
+    n_atoms = check_int(n_atoms, "n_atoms", minimum=1)
     if isinstance(n_atoms, bool) or not isinstance(n_atoms, numbers.Integral) or n_atoms < 1:
         raise ValueError(f"n_atoms must be an integer >= 1; got {n_atoms!r}.")
     return int(n_atoms)

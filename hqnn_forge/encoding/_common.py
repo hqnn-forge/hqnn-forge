@@ -25,6 +25,10 @@ from pennylane.exceptions import AllocationError, DeviceError
 
 from hqnn_forge.circuits import hardware_efficient_layer, strongly_entangling_layer
 from hqnn_forge.utils.rng import as_seed
+from hqnn_forge._validation import check_int
+
+# Replaces old isinstance(shots, int) logic, now safely accepting numpy integers
+
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +403,7 @@ def validate_shots(shots: int | None, diff_method: str) -> None:
     shifts by π/2 and stays unbiased; it is also the method that runs on
     hardware.
     """
+    shots = check_int(shots, "shots", minimum=1, allow_none=True)
     if shots is None:
         return
     if isinstance(shots, bool) or not isinstance(shots, int) or shots < 1:
