@@ -655,3 +655,9 @@ APA.
 - Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
 - Fisher (1936) — *The use of multiple measurements in taxonomic problems*
 - Roy & Vetterli (2007) — *The effective rank: a measure of effective dimensionality*
+
+---
+
+## Ethical Notice
+
+hqnn-forge is intended to support responsible academic, educational, and civilian research into hybrid quantum-classical machine learning. Please read our [Ethical Notice](ETHICAL_NOTICE.md) for the project's intended uses, contributor principles, and ethical expectations. The software remains licensed under Apache 2.0.
