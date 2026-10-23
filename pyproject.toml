@@ -77,6 +77,11 @@ dev = [
     # hqnn_forge itself stays pure NumPy. 1.13 is the first release that installs
     # alongside numpy>=2.0. pennylane brings scipy too, but only by coincidence.
     "scipy>=1.13",
+    # tests/test_amplitude_embedding.py imports packaging.version.Version to
+    # compare PennyLane versions; hqnn_forge itself never imports it. 20.0 is the
+    # oldest release whose specifiers and version parsing satisfy the test dependencies;
+    # pytest and PennyLane bring packaging too, but only by coincidence.
+    "packaging>=20.0",
     # Independent reference for the Rydberg solver in tests/test_rydberg_reference.py
     # (mesolve); hqnn_forge itself never imports it. The test-lowest job installs
     # these floors next to the newest scipy, which pennylane brings there: 5.1.1 is

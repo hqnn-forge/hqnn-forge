@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -745,6 +745,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "qutip" },
@@ -778,6 +779,7 @@ requires-dist = [
     { name = "numpy", marker = "python_full_version < '3.13'", specifier = ">=2.0" },
     { name = "numpy", marker = "python_full_version == '3.13.*'", specifier = ">=2.1" },
     { name = "numpy", marker = "python_full_version >= '3.14'", specifier = ">=2.3.2" },
+    { name = "packaging", marker = "extra == 'dev'", specifier = ">=20.0" },
     { name = "pennylane", specifier = ">=0.45" },
     { name = "pennylane-lightning", marker = "extra == 'lightning'", specifier = ">=0.45" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
