@@ -49,7 +49,7 @@ Option types, for annotating calls:
 
 AtomRegisterLike        What ``atom_register`` accepts: an AtomRegister or its
                         positions in µm, one ``[x, y]`` row per atom.
-DeviceName            Any PennyLane device name (``str``); see ``KNOWN_DEVICES``.
+DeviceName              Any PennyLane device name (``str``); see ``KNOWN_DEVICES``.
 DiffMethod              Literal of the supported differentiation methods.
 Entangler               Literal of the entangler options.
 Position                Literal of where training noise is inserted (from hqnn_forge.noise).
