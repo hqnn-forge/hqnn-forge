@@ -18,6 +18,7 @@ from typing import Any
 
 import pennylane as qml
 import pytest
+from packaging.version import Version
 
 from hqnn_forge.diagnostics import circuit_summary
 from hqnn_forge.diagnostics.circuit import _logical_tape, _tape_resources
@@ -30,10 +31,12 @@ from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 
 CPU: dict[str, Any] = {"device_name": "default.qubit", "diff_method": "backprop"}
 
+PENNYLANE_046 = Version(qml.__version__) >= Version("0.46.0.dev0")
+
 # Each layer with its number of gates on two or more wires, pinned by hand
-# count: PennyLane 0.46 has no ``gate_sizes`` to compare it with.  None for the
-# amplitude layer, whose state preparation PennyLane decomposes differently
-# from one version to the next (18 CNOTs on 0.45, 12 on the 0.46 nightly).
+# count: PennyLane 0.46 has no ``gate_sizes`` to compare it with.  The amplitude
+# layer's state preparation PennyLane decomposes differently from one version
+# to the next (18 CNOTs on 0.45, 12 on the 0.46 nightly).
 LAYERS = [
     pytest.param(lambda: QuantumEncodingLayer(n_qubits=4, n_layers=2, **CPU), 8, id="angle"),
     pytest.param(
@@ -52,7 +55,9 @@ LAYERS = [
         lambda: IQPEncodingLayer(n_qubits=4, n_layers=2, n_repeats=2, **CPU), 32, id="iqp"
     ),
     pytest.param(
-        lambda: AmplitudeEncodingLayer(n_qubits=3, n_layers=2, **CPU), None, id="amplitude"
+        lambda: AmplitudeEncodingLayer(n_qubits=3, n_layers=2, **CPU),
+        12 if PENNYLANE_046 else 18,
+        id="amplitude",
     ),
     pytest.param(
         lambda: DataReuploadingLayer(n_qubits=3, n_layers=3, trainable_input_scaling=True, **CPU),
@@ -88,25 +93,23 @@ def _pennylane_resources(tape: qml.tape.QuantumScript) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(("build", "n_two_qubit_gates"), LAYERS)
-def test_counts_match_pennylane_resources(build: Any, n_two_qubit_gates: int | None) -> None:
+def test_counts_match_pennylane_resources(build: Any, n_two_qubit_gates: int) -> None:
     tape = _logical_tape(build())
     ours = _tape_resources(tape)
     theirs = _pennylane_resources(tape)
     assert ours.depth == theirs["depth"]
     assert ours.n_gates == theirs["n_gates"]
     assert ours.gate_counts == dict(sorted(theirs["gate_counts"].items()))
-    if n_two_qubit_gates is not None:
-        assert ours.n_two_qubit_gates == n_two_qubit_gates
+    assert ours.n_two_qubit_gates == n_two_qubit_gates
     gate_sizes = theirs["gate_sizes"]
     if gate_sizes is not None:  # dropped in PennyLane 0.46
         assert ours.n_two_qubit_gates == sum(c for size, c in gate_sizes.items() if size >= 2)
 
 
 @pytest.mark.parametrize(("build", "n_two_qubit_gates"), LAYERS)
-def test_the_summary_is_internally_consistent(build: Any, n_two_qubit_gates: int | None) -> None:
+def test_the_summary_is_internally_consistent(build: Any, n_two_qubit_gates: int) -> None:
     summary = circuit_summary(build())
-    if n_two_qubit_gates is not None:
-        assert summary.n_two_qubit_gates == n_two_qubit_gates
+    assert summary.n_two_qubit_gates == n_two_qubit_gates
     assert summary.n_gates == sum(summary.gate_counts.values())
     assert 0 < summary.n_two_qubit_gates <= summary.n_gates
     assert summary.depth <= summary.n_gates

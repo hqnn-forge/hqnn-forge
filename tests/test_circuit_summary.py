@@ -22,6 +22,7 @@ from typing import TypedDict
 import pennylane as qml
 import pytest
 import torch
+from packaging.version import Version
 
 from hqnn_forge.diagnostics import (
     CircuitSummary,
@@ -42,6 +43,8 @@ class _Backend(TypedDict):
 
 
 CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
+
+PENNYLANE_046 = Version(qml.__version__) >= Version("0.46.0.dev0")
 
 
 class TestAngleEncodingCounts:
@@ -429,8 +432,9 @@ class TestAmplitudeEmbedding:
     def test_summary_counts_the_full_state_preparation(self, n_qubits: int) -> None:
         summary = circuit_summary(_amplitude(n_qubits))
         full = 2**n_qubits - 1
-        assert summary.gate_counts["RY"] == full and summary.gate_counts["RZ"] == full
+        assert summary.gate_counts["RY"] == full
         assert summary.gate_counts["Rot"] == n_qubits
+        assert summary.gate_counts.get("RZ", 0) == (0 if PENNYLANE_046 else full)
 
     def test_the_counts_bound_every_real_input(self) -> None:
         # PennyLane drops rotation blocks whose angles are all zero, so a
@@ -438,15 +442,22 @@ class TestAmplitudeEmbedding:
         layer = _amplitude(3)
         bound = circuit_summary(layer).gate_counts
         g = torch.Generator().manual_seed(1)
+        seen_ry = set()
         seen_rz = set()
         for _ in range(20):
             x = torch.randn(8, generator=g, dtype=torch.float64)
             counts = Counter(op.name for op in _logical_tape(layer, x).operations)
             assert all(counts[gate] <= bound[gate] for gate in counts), counts
-            seen_rz.add(counts["RZ"])
-        assert max(seen_rz) == bound["RZ"]
+            seen_ry.add(counts["RY"])
+            if not PENNYLANE_046:
+                seen_rz.add(counts["RZ"])
+        assert max(seen_ry) == bound["RY"]
+        if not PENNYLANE_046:
+            assert max(seen_rz) == bound["RZ"]
         positive = Counter(op.name for op in _logical_tape(layer, torch.ones(8)).operations)
-        assert positive["RZ"] == 0  # why the default sample has a negative entry
+        assert positive["RY"] < bound["RY"]
+        if not PENNYLANE_046:
+            assert positive["RZ"] == 0  # on 0.45, why the default sample has a negative entry
 
     def test_padded_features(self) -> None:
         layer = _amplitude(3, n_features=5)
@@ -496,7 +507,7 @@ class TestAmplitudeEmbedding:
     def test_draw_default_and_width_check(self) -> None:
         layer = _amplitude(3)
         drawing = draw_circuit(layer)
-        assert all(f"{w}: " in drawing for w in range(3)) and "RZ(" in drawing
+        assert all(f"{w}: " in drawing for w in range(3)) and "RY(" in drawing
         with pytest.raises(ValueError, match=r"one sample of shape \(8,\)"):
             draw_circuit(layer, torch.zeros(3))
 

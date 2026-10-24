@@ -226,15 +226,17 @@ def sample_input(layer: CircuitLayer) -> torch.Tensor:
 
     Amplitude embedding has no state for the zero vector, and the gates of
     its Möttönen state preparation *do* depend on the input: PennyLane leaves
-    out a block of rotations when all its angles are zero.  A uniform or
-    all-positive vector has no phases and so shows no ``RZ`` at all, and
-    other sign patterns drop some ``RZ`` blocks.  It gets
-    ``[-1, 2, 3, …, n_features]`` instead: distinct magnitudes and one
-    negative entry make every block non-zero, so the counts are the most any
-    input needs: ``2**n - 1`` ``RY`` and ``2**n - 1`` ``RZ`` rotations when
-    ``n_features == 2**n``.  With fewer features the zero padding leaves out
-    the ``RY`` rotations that act only on padded amplitudes (for ``n = 3``,
-    6 with 4 features, 4 with 2), since no input can make those non-zero.
+    out rotations whose angles are zero.  On PennyLane 0.45, an all-positive
+    vector has no phases and so emits no ``RZ`` rotations, while distinct
+    magnitudes and one negative entry make every rotation block non-zero,
+    yielding ``2**n - 1`` ``RY`` and ``2**n - 1`` ``RZ`` rotations when
+    ``n_features == 2**n``.  On PennyLane 0.46, real-valued state preparation
+    encodes signs directly into the ``RY`` angles, eliminating the ``RZ`` block
+    entirely; the distinct magnitudes still ensure the full ``2**n - 1``
+    ``RY`` rotations are emitted.  In either version, the counts are the most
+    any real input needs.  With fewer features the zero padding leaves out the
+    ``RY`` rotations that act only on padded amplitudes (for ``n = 3``, 6 with 4
+    features, 4 with 2), since no input can make those non-zero.
     """
     width = input_width(layer)
     zeros = torch.zeros(1, width, dtype=torch.float64)
@@ -701,7 +703,8 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
     # weight entries a gate parameter depends on is read off autograd, where
     # an input of 0 could hide a dependence (an input-times-weight angle).
     # Distinct magnitudes and one negative entry, as in sample_input, so the
-    # amplitude encoder's state preparation keeps every rotation block.
+    # amplitude encoder's state preparation keeps every rotation block (on
+    # PennyLane 0.45 this includes the RZ block; on 0.46 it keeps every RY).
     generic = 0.5 + torch.rand(
         input_width(layer), generator=torch.Generator().manual_seed(0), dtype=torch.float64
     )
