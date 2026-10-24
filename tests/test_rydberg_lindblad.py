@@ -826,9 +826,27 @@ class TestBatch:
 class TestGradients:
     """
     Nothing in the solver blocks autograd (#420): no in-place operation on the
-    path.  At a degenerate spectrum ``eigh`` returns a wrong gradient (#505);
-    the case here is not degenerate.
+    path. Tests cover gradient correctness for both degenerate and non-degenerate
+    spectra (#505).
     """
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
+    @pytest.mark.parametrize("pairs", [False, True])
+    def test_gradient_at_a_degenerate_spectrum_matches_finite_differences(
+        self, gamma: float, n_steps: int | None, pairs: bool
+    ) -> None:
+        """Equal detunings without interactions produce a degeneracy (#505)."""
+        register = AtomRegister.chain(2, 1.0)
+
+        def features(delta: torch.Tensor) -> torch.Tensor:
+            h = rydberg_hamiltonian(register, 2.0, delta, c6=1.3, interactions=False)
+            return readout(
+                evolve(h, 0.8, gamma=gamma, n_steps=n_steps),
+                pairs=pairs,
+            )
+
+        delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
+        assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
 
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
     def test_gradient_of_the_features_matches_finite_differences(
@@ -843,6 +861,37 @@ class TestGradients:
 
         delta = torch.tensor([0.4, 1.1], dtype=F64, requires_grad=True)
         assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
+    def test_gradient_and_non_gradient_paths_agree(
+        self, gamma: float, n_steps: int | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both propagation paths produce equivalent forward results."""
+        register = AtomRegister.chain(2, 1.0)
+        delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
+        h = rydberg_hamiltonian(register, 2.0, delta, c6=1.3, interactions=False)
+
+        def fail_eigh(*args: object, **kwargs: object) -> torch.Tensor:
+            raise AssertionError("gradient-enabled evolution must not call torch.linalg.eigh")
+
+        with monkeypatch.context() as m:
+            m.setattr(torch.linalg, "eigh", fail_eigh)
+            rho_with_grad = evolve(h, 0.8, gamma=gamma, n_steps=n_steps)
+
+        features_with_grad = readout(rho_with_grad)
+        with torch.no_grad():
+            rho_without_grad = evolve(h.detach(), 0.8, gamma=gamma, n_steps=n_steps)
+            features_without_grad = readout(rho_without_grad)
+
+        torch.testing.assert_close(
+            rho_with_grad.detach(), rho_without_grad, rtol=1e-10, atol=1e-12
+        )
+        torch.testing.assert_close(
+            features_with_grad.detach(),
+            features_without_grad,
+            rtol=1e-10,
+            atol=1e-12,
+        )
 
 
 class TestValidation:

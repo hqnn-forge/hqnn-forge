@@ -9,6 +9,7 @@ weight draw) and against hand-built tapes with a known answer.
 
 from __future__ import annotations
 
+import inspect
 import math
 from collections.abc import Callable
 from typing import Any, TypedDict
@@ -208,12 +209,29 @@ class TestHandBuiltTapes:
         )
         assert count_inert_parameters(tape) == 0  # X_1 → X_1 through the CNOT: the RZ is live
 
-    def test_global_phase_neither_mixes_nor_counts(self) -> None:
-        # Graph-based decomposition emits GlobalPhase.  It commutes with the
-        # measurement, so the RZ before it stays inert; its own parameter is
-        # not counted, since under state() a global phase is observable.
+    def test_global_phase_parameter_is_not_counted(self) -> None:
+        # Graph-based decomposition emits GlobalPhase; its own parameter is not
+        # counted, since under state() a global phase is observable. Whether it
+        # leaves wire support alone is tested with a wired GlobalPhase below,
+        # which only PennyLane < 0.46 can build.
         tape = _tape(
-            lambda: (qml.RX(_p(0.4), 0), qml.RZ(_p(0.3), 0), qml.GlobalPhase(_p(0.2), wires=0)),
+            lambda: (qml.RX(_p(0.4), 0), qml.RZ(_p(0.3), 0), qml.GlobalPhase(_p(0.2))),
+            [qml.expval(qml.PauliZ(0))],
+        )
+        assert count_inert_parameters(tape) == 1
+
+    @pytest.mark.may_skip  # GlobalPhase takes no wires from PennyLane 0.46 on
+    def test_wired_global_phase_does_not_mix(self) -> None:
+        # The GlobalPhase on wire 0 commutes with the measurement, so the RZ
+        # before it stays inert and is the one parameter counted.
+        if "wires" not in inspect.signature(qml.GlobalPhase.__init__).parameters:
+            pytest.skip("this PennyLane's GlobalPhase takes no wires")
+        tape = _tape(
+            lambda: (
+                qml.RX(_p(0.4), 0),
+                qml.RZ(_p(0.3), 0),
+                qml.GlobalPhase(_p(0.2), wires=0),
+            ),
             [qml.expval(qml.PauliZ(0))],
         )
         assert count_inert_parameters(tape) == 1
@@ -608,7 +626,7 @@ class TestPerWeightEntry:
 
         def circuit() -> None:
             qml.RX(w[0], wires=0)
-            qml.GlobalPhase(w[1], wires=0)
+            qml.GlobalPhase(w[1])
 
         tape = _tape(circuit, [qml.state()])
         assert count_inert_parameters(tape) == 0

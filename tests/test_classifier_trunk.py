@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from hqnn_forge.models import (
     BinaryClassifierBase,
+    ClassicalBaseline,
     ClassifierBase,
     HybridBinaryClassifier,
     MulticlassHybridClassifier,
@@ -135,6 +136,10 @@ class TestMulticlassTrainingNoise:
         ({"encoding_type": "iqp", "embedding_rotation": "Y"}, "IQP embedding has no rotation"),
         ({"encoding_type": "kernel"}, "Unsupported encoding_type"),
         ({"noise_method": "kraus"}, "noise_method must be"),
+        ({"dropout_p": 1.0}, r"dropout_p must be in \[0, 1\); got 1\.0"),
+        ({"dropout_p": -0.1}, r"dropout_p must be in \[0, 1\); got -0\.1"),
+        ({"dropout_p": 1.5}, r"dropout_p must be in \[0, 1\); got 1\.5"),
+        ({"dropout_p": float("nan")}, r"dropout_p must be in \[0, 1\); got nan"),
     ],
 )
 def test_every_model_rejects_the_same_trunk_options(
@@ -144,21 +149,19 @@ def test_every_model_rejects_the_same_trunk_options(
         _build(cls, **options)
 
 
-@pytest.mark.parametrize("cls", [HybridBinaryClassifier, ParallelHybridClassifier])
-def test_binary_models_keep_their_unvalidated_dropout_p(cls: type) -> None:
-    # The refactor leaves dropout_p exactly as the binary models took it
-    # before: handed to nn.Dropout unchecked, so 1.0 and negative values
-    # build (and such checkpoints load).  Tightening this is #404.
-    assert isinstance(_build(cls, dropout_p=1.0).dropout, nn.Dropout)
-    assert isinstance(_build(cls, dropout_p=-0.1).dropout, nn.Identity)
-    with pytest.raises(ValueError, match="dropout probability has to be between 0 and 1"):
-        _build(cls, dropout_p=1.5)
-
-
-@pytest.mark.parametrize("dropout_p", [1.0, -0.1])
-def test_multiclass_keeps_its_dropout_range(dropout_p: float) -> None:
-    with pytest.raises(ValueError, match=r"dropout_p must be in \[0, 1\)"):
-        _build(MulticlassHybridClassifier, dropout_p=dropout_p)
+@pytest.mark.parametrize("cls", [*MODELS, ClassicalBaseline])
+def test_dropout_p_is_refused_before_any_layer_is_built(cls: type) -> None:
+    # Building a layer with init_seed=None draws from the global torch RNG, so an
+    # unchanged RNG state after the error means nothing was built first.
+    if cls is ClassicalBaseline:
+        options: dict[str, Any] = {"n_input_features": 4, "hidden_dims": [3]}
+    else:
+        options = {"n_input_features": 5, "n_qubits": 3, "n_layers": 2, **CPU}
+    torch.manual_seed(0)
+    state = torch.get_rng_state()
+    with pytest.raises(ValueError, match=r"dropout_p must be in \[0, 1\); got 1\.0"):
+        cls(**options, dropout_p=1.0)
+    assert torch.equal(torch.get_rng_state(), state)
 
 
 class TestOneImplementation:

@@ -230,8 +230,6 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 raise ValueError(f"n_classes must be ≥ 2; got {n_classes}.")
             if strategy not in ("softmax", "one_vs_rest"):
                 raise ValueError(f"strategy must be 'softmax' or 'one_vs_rest'; got {strategy!r}.")
-            if not 0.0 <= dropout_p < 1.0:
-                raise ValueError(f"dropout_p must be in [0, 1); got {dropout_p}.")
             self.n_classes = n_classes
             self.strategy = strategy
 
