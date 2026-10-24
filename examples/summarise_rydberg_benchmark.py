@@ -24,8 +24,9 @@ Markdown:
   floor and the rank-biserial effect.  **All comparisons of one dataset form
   one Holm family**; an undefined test (every pair tied) counts as ``p = 1``
   in it, as ``docs/methodology.md`` prescribes.
-* **Mechanism**: the separation measures of arms A and B on the real
-  training rows, averaged over folds per grid point, and for each measure
+* **Mechanism**: the separation measures of arms A and B on the real rows
+  of the training part (as the runner records them under ``"train"``),
+  averaged over folds per grid point, and for each measure
   the Spearman rank correlation across the grid points between its A − B
   difference and the A − B difference of mean MCC, with the number of grid
   points and a two-sided permutation p-value (``--permutations`` draws,
@@ -474,7 +475,7 @@ def summarise(
                 "",
             ]
         sections += [
-            "### Separation measures (real training rows, mean over folds)",
+            "### Separation measures (real rows of the training part, mean over folds)",
             "",
             mechanism_tables(rows, part="train", permutations=permutations, seed=seed, heads=heads)
             if heads

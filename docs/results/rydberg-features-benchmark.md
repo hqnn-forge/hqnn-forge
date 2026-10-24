@@ -124,7 +124,8 @@ all. It also checks that the model (#495), the solver (#496–#498, #507), the f
   uncertainty and are a guide to the fold spread, not a test.
 - **Tracking:** whether the separation measures track the scores is measured by Spearman's
   rank correlation, across the 28 grid points, between a measure's A − B difference (mean over
-  folds, on the real training rows) and the A − B difference of mean MCC, with a two-sided
+  folds, on the real rows of the training part; see *Mechanism*) and the A − B difference of mean
+  MCC, with a two-sided
   permutation p-value (10,000 draws, seed 0). The 28 grid points are not independent either
   (they share folds, and B is shared across `V/Ω`).
 
@@ -524,7 +525,10 @@ budget and these two datasets only.
 ## Mechanism
 
 The separation measures of #500 on the features as the map returns them (before standardisation),
-on the real training rows of each fold, averaged over the 13 folds; for arm B one value per
+on the real rows of each fold's training part (training and validation rows, no SMOTE rows),
+averaged over the 13 folds. On Iranian Churn, whose training parts hold 2,906 to 2,908 such rows,
+they are computed on a class-stratified subsample of 2,000 (the runner's `max_separation_rows`,
+seed 0); on the positive control on all 553 to 555. For arm B one value per
 `γ/Ω`, repeated beside every `V/Ω`. `docs/rydberg-model.md` (*Separation measures*) says what each
 supports: they describe what this readout distinguishes, and none predicts a particular head's
 score.
@@ -662,8 +666,11 @@ no check of the pipeline (#501).
 - **The effect is detected.** At `V/Ω = 1`, `γ/Ω = 0`, arm A with the linear head scores MCC
   0.511 [0.452, 0.570] against arm B's 0.135 [0.032, 0.239]: a difference of +0.376 that A wins in
   all 13 folds (exact p = 2.44e-04, the design's floor; Holm p = 0.0464 over 190 comparisons, the
-  only Holm-significant A − B gain of the linear head). It is also the only A row that beats the
-  linear baseline C/linear significantly (at `γ/Ω = 0.1`: +0.273, Holm p = 0.0464).
+  only Holm-significant A − B gain of the linear head). Against the linear baseline C/linear the
+  same cell gains +0.296 (Holm p = 0.0542), and its neighbour at `γ/Ω = 0.1` (+0.273, Holm
+  p = 0.0464) is the only row of A with the linear head that beats C/linear significantly. (Rows
+  of A with the MLP head beat C/linear at most grid points, but so does B with the MLP head: that
+  is the head, not the interactions.)
 - **It depends on the interaction strength, not monotonically.** The linear head gains +0.287 at
   `V/Ω = 30` and +0.202 at 10 (not significant after Holm: 0.0754 and 0.8503), and nothing at
   `V/Ω` = 3 (−0.023) or 100 (−0.041), nor at 0.1 (+0.052), where the atoms barely interact. The
@@ -706,8 +713,10 @@ pipeline to detect anything.
 - **Statistics.** The fold intervals understate the uncertainty (*Statistics*), and the rank
   correlations of *Mechanism* are 16 uncorrected tests over 28 dependent grid points. Holm over
   190 comparisons controls the family-wise error, so a true but small interaction effect can go
-  undetected: at 13 folds a comparison is significant only if A wins (or loses) in nearly every
-  fold.
+  undetected: in this run every Holm-significant comparison (79 on the positive control, 30 on
+  Iranian Churn) is one side winning all 13 folds, and the next possible p-value, `4.88e-4`
+  (12 of 13 folds, the lost one smallest), was not significant after Holm anywhere (adjusted
+  0.0542 at best).
 - **Not tried:** pair correlations as features, a second geometry, time-dependent pulses,
   differentiable pulse training (#420), device constraints, shots, more than four atoms, a
   tuned architecture, more than 4 tuning trials.
