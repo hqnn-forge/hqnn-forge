@@ -61,9 +61,8 @@ The unitary part
 
     U(τ) = e^(−iHτ) = V e^(−iEτ) V†,        e^(𝓛_H τ) ρ = U(τ) ρ U(τ)†
 
-When the Hamiltonian requires grad, ``evolve`` computes the same
-``e^(−iHτ)`` with ``torch.linalg.matrix_exp`` instead, whose backward
-pass has no ``1/(E_m − E_k)`` term (#505).
+``evolve`` computes ``U`` this way in every autograd mode, so its result does
+not depend on whether, or how, it is being differentiated (#674).
 
 The sign is that of the Schrödinger equation ``i dψ/dt = Hψ``.  For one
 resonant atom it gives ``ψ(t) = (cos(Ωt/2), −i sin(Ωt/2))`` in the basis
@@ -74,6 +73,55 @@ Without dephasing the state stays pure, ``ρ(t) = ψ(t) ψ(t)†`` with::
     ψ(t) = U(t) e_0,        ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m)
 
 ``e_0`` being the basis vector of ``|g…g⟩``.  This is exact at any ``t``.
+
+Derivatives of the propagator
+-----------------------------
+Differentiating ``V`` and ``E`` (the backward pass of ``eigh``) needs
+``1/(E_m − E_k)``, which is not defined where two energies coincide: autograd
+then returns a finite, wrong gradient (#505).  ``U`` itself is a smooth
+function of ``H``, and its derivative is taken in the eigenbasis of ``H``
+without that term (the Daleckii–Krein formula; Higham, *Functions of
+Matrices*, SIAM 2008, chapter 3).  For ``f(x) = e^(−ixτ)``, ``U = f(H)``, the derivative in a
+direction ``Ḣ`` (any complex matrix, not only a Hermitian one) is::
+
+    L(H, Ḣ) = d/dε f(H + εḢ) |_(ε=0) = V ( F ∘ (V† Ḣ V) ) V†
+
+    F_mk = (f(E_m) − f(E_k)) / (E_m − E_k),        F_mm = f′(E_m) = −iτ f(E_m)
+
+with ``∘`` the elementwise product.  Rewritten around the mean energy, with
+``sinc(x) = sin(x)/x`` and ``sinc(0) = 1``::
+
+    f(E_m) − f(E_k) = e^(−iτ(E_m + E_k)/2) · (e^(−iτδ/2) − e^(iτδ/2))
+                    = e^(−iτ(E_m + E_k)/2) · (−2i) sin(τδ/2),        δ = E_m − E_k
+
+    F_mk = −iτ · e^(−iτ(E_m + E_k)/2) · sinc(τδ/2)
+
+which holds at ``δ = 0`` as well, where it is ``f′(E_m)``.  No difference is
+divided, so ``F`` is accurate to rounding at any gap, ``0``, ``1e-9`` or
+large: a degenerate or nearly degenerate spectrum needs no tolerance.  Units:
+``E`` and ``δ`` in rad/µs, ``τ`` in µs, ``F`` in µs.  This gives forward mode
+(``jvp``) directly.  For reverse mode, autograd's gradient of a real loss is
+the adjoint of ``L(H, ·)`` under ``⟨A, B⟩ = Re Tr(A† B)``; with ``V`` unitary
+it replaces ``F`` by ``conj(F)``, the ``F`` of ``e^(+ixτ)``::
+
+    grad_H = V ( conj(F) ∘ (V† G V) ) V† = L(H, G) at −τ,        G = grad_U
+
+Both reuse the ``V`` and ``E`` of the forward pass: four ``2^N × 2^N`` matrix
+products, and no second eigendecomposition.
+
+``L`` is itself differentiated, for second derivatives, through the
+block-triangular form ``f([[M, X], [0, M]]) = [[f(M), L(M, X)], [0, f(M)]]``
+(Higham 2008, chapter 3), which holds for any square ``M``.  With
+``M = [[H, X], [0, H]]``, ``L(H, X)`` is the upper right ``2^N × 2^N`` block
+of ``f(M)``.  Its derivative in ``H`` is the upper right block of
+``L(M, [[Ḣ, 0], [0, Ḣ]])`` (forward mode).  In reverse mode the cotangent of
+``f(M)`` is ``[[0, G], [0, 0]]``, the gradient of ``f`` at ``M``, which is not
+Hermitian, is the adjoint ``L(M†, ·)`` at ``−τ``, and ``H`` sits in both
+diagonal blocks of ``M``, so ``grad_H`` is the sum of those two blocks of
+it.  Each ``L(M, ·)`` is the upper right block of a
+``torch.linalg.matrix_exp`` of twice the size of ``M``.
+Only second derivatives take this path, which costs what
+``torch.linalg.matrix_exp`` costs; first derivatives never do.
 
 Splitting
 ---------
@@ -128,6 +176,13 @@ from typing import Any
 import torch
 
 from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _bits
+
+# torch 2.3 imports torch._dynamo the first time an autograd.Function runs
+# under a torch.func transform, and that import fails there (a circular
+# import, then a random operation inside vmap).  Imported here, outside any
+# transform, it does not; torch 2.4 needs no help.
+if tuple(int(part) for part in torch.__version__.split(".")[:2]) < (2, 4):
+    import torch._dynamo
 
 __all__ = ["evolve", "readout"]
 
@@ -193,6 +248,179 @@ def _atom_count(matrix: Any, name: str) -> int:
     return n
 
 
+def _divided_differences(energies: torch.Tensor, tau: float) -> torch.Tensor:
+    """
+    ``F_mk = −iτ · e^(−iτ(E_m + E_k)/2) · sinc(τ(E_m − E_k)/2)`` for real ``energies``.
+
+    The divided differences of ``f(x) = e^(−ixτ)`` at the energies, with
+    ``f′(E_m)`` on the diagonal (module docstring, *Derivatives of the
+    propagator*).  ``torch.sinc(x)`` is ``sin(πx)/(πx)``, hence the ``/ π``.
+    Shape ``(..., 2^N)`` in, ``(..., 2^N, 2^N)`` out, ``m`` on the rows.
+    """
+    mean = (energies[..., :, None] + energies[..., None, :]) / 2
+    half_gap = (energies[..., :, None] - energies[..., None, :]) * (tau / 2)
+    return -1j * tau * torch.exp(-1j * tau * mean) * torch.sinc(half_gap / math.pi)
+
+
+def _block_frechet(matrix: torch.Tensor, direction: torch.Tensor, tau: float) -> torch.Tensor:
+    """
+    ``L(M, X)``, the derivative of ``e^(−iMτ)`` at any square ``M`` in direction ``X``.
+
+    The upper right block of ``e^(−iτ [[M, X], [0, M]])`` (module docstring).
+    Used for second derivatives only: ``torch.linalg.matrix_exp`` of twice the
+    size of ``M``.
+    """
+    matrix, direction = torch.broadcast_tensors(matrix, direction)
+    dim = matrix.shape[-1]
+    top = torch.cat([matrix, direction], dim=-1)
+    bottom = torch.cat([torch.zeros_like(matrix), matrix], dim=-1)
+    block = torch.cat([top, bottom], dim=-2)
+    return torch.linalg.matrix_exp(-1j * tau * block)[..., :dim, dim:]
+
+
+class _Frechet(torch.autograd.Function):
+    """
+    ``L(H, X) = V (F ∘ (V† X V)) V†``, the derivative of ``e^(−iHτ)`` in direction ``X``.
+
+    ``H`` is Hermitian with eigendecomposition ``H = V E V†``; ``energies`` and
+    ``vectors`` are that decomposition and carry no gradient.  The first
+    derivative of ``U`` evaluates this function; its own derivatives (second
+    derivatives of ``U``) are those of the module docstring: in ``X`` it is
+    linear, in ``H`` it goes through the block-triangular form.
+    """
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        h: torch.Tensor,
+        direction: torch.Tensor,
+        energies: torch.Tensor,
+        vectors: torch.Tensor,
+        tau: float,
+    ) -> torch.Tensor:
+        rotated = vectors.mH @ direction @ vectors  # X in the eigenbasis of H
+        return vectors @ (_divided_differences(energies, tau) * rotated) @ vectors.mH
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple[Any, ...], output: Any) -> None:
+        h, direction, energies, vectors, tau = inputs
+        ctx.save_for_backward(h, direction, energies, vectors)
+        ctx.save_for_forward(h, direction, energies, vectors)
+        ctx.tau = tau
+
+    @staticmethod
+    def backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor | None, ...]:  # type: ignore[override]
+        h, direction, energies, vectors = ctx.saved_tensors
+        tau = ctx.tau
+        grad_h = grad_direction = None
+        if ctx.needs_input_grad[1]:
+            # adjoint of X ↦ L(H, X): L(H, ·) at −τ, H being Hermitian
+            grad_direction = _Frechet.apply(h, grad, energies, vectors, -tau)
+        if ctx.needs_input_grad[0]:
+            # L(H, X) is the upper right block of f(M), M = [[H, X], [0, H]].  The
+            # gradient of f at M for the cotangent [[0, G], [0, 0]] is L(M†, ·) at
+            # −τ; H sits in both diagonal blocks of M, so their gradients add.
+            dim = h.shape[-1]
+            zero = torch.zeros_like(h)
+            matrix = torch.cat(
+                [torch.cat([h, direction], dim=-1), torch.cat([zero, h], dim=-1)], dim=-2
+            )
+            cotangent = torch.cat(
+                [torch.cat([zero, grad], dim=-1), torch.cat([zero, zero], dim=-1)], dim=-2
+            )
+            grad_matrix = _block_frechet(matrix.mH, cotangent, -tau)
+            grad_h = grad_matrix[..., :dim, :dim] + grad_matrix[..., dim:, dim:]
+        return grad_h, grad_direction, None, None, None
+
+    @staticmethod
+    def jvp(  # type: ignore[override]
+        ctx: Any,
+        h_tangent: torch.Tensor | None,
+        direction_tangent: torch.Tensor | None,
+        *_: Any,
+    ) -> torch.Tensor:
+        h, direction, energies, vectors = ctx.saved_tensors
+        tau = ctx.tau
+        dim = h.shape[-1]
+        tangent = torch.zeros_like(direction)
+        if direction_tangent is not None:  # linear in X
+            tangent = tangent + _Frechet.apply(h, direction_tangent, energies, vectors, tau)
+        if h_tangent is not None:
+            # upper right block of L(M, [[Ḣ, 0], [0, Ḣ]]), M = [[H, X], [0, H]]
+            zero = torch.zeros_like(h)
+            matrix = torch.cat(
+                [torch.cat([h, direction], dim=-1), torch.cat([zero, h], dim=-1)], dim=-2
+            )
+            h_tangent = h_tangent.expand_as(h)
+            diagonal = torch.cat(
+                [
+                    torch.cat([h_tangent, torch.zeros_like(h_tangent)], dim=-1),
+                    torch.cat([torch.zeros_like(h_tangent), h_tangent], dim=-1),
+                ],
+                dim=-2,
+            )
+            tangent = tangent + _block_frechet(matrix, diagonal, tau)[..., :dim, dim:]
+        return tangent
+
+
+class _Propagator(torch.autograd.Function):
+    """
+    ``U(τ) = V e^(−iEτ) V†`` from ``eigh``, or its first column only.
+
+    Differentiated by ``_Frechet`` in both modes, never through ``eigh``.  Returns ``(U, E, V)``; ``E`` and ``V`` are not differentiable.  With
+    ``first_column``, ``U e_0`` of shape ``(..., 2^N, 1)``: the state that
+    ``|g…g⟩`` evolves to, ``ψ_k = Σ_m V_km e^(−i E_m τ) conj(V_0m)``.
+    """
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        h: torch.Tensor, tau: float, first_column: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # H = V E V†: the columns of V are the energy eigenvectors.
+        energies, vectors = torch.linalg.eigh(h)
+        phases = torch.exp(-1j * energies * tau)
+        if first_column:
+            # ψ_k(τ) = Σ_m V_km e^(−i E_m τ) conj(V_0m); evolve |g…g⟩.
+            propagator = vectors @ (phases * vectors[..., 0, :].conj())[..., :, None]
+        else:
+            # U(τ) = V e^(−i E τ) V†: the exact unitary step from the eigendecomposition.
+            propagator = (vectors * phases[..., None, :]) @ vectors.mH
+        return propagator, energies, vectors
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple[Any, ...], output: Any) -> None:
+        h, tau, first_column = inputs
+        _, energies, vectors = output
+        ctx.mark_non_differentiable(energies, vectors)
+        ctx.save_for_backward(h, energies, vectors)
+        ctx.save_for_forward(h, energies, vectors)
+        ctx.tau = tau
+        ctx.first_column = first_column
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: Any, grad: torch.Tensor, *_: Any
+    ) -> tuple[torch.Tensor | None, None, None]:
+        h, energies, vectors = ctx.saved_tensors
+        if ctx.first_column:  # U e_0 = U[:, :1]: the other columns get no gradient
+            grad = torch.nn.functional.pad(grad, (0, h.shape[-1] - 1))
+        # grad_H = L(H, grad_U) at −τ, the adjoint of L(H, ·) (module docstring)
+        return _Frechet.apply(h, grad, energies, vectors, -ctx.tau), None, None
+
+    @staticmethod
+    def jvp(  # type: ignore[override]
+        ctx: Any, h_tangent: torch.Tensor, *_: Any
+    ) -> tuple[torch.Tensor, None, None]:
+        h, energies, vectors = ctx.saved_tensors
+        tangent = _Frechet.apply(h, h_tangent, energies, vectors, ctx.tau)
+        if ctx.first_column:
+            tangent = tangent[..., :, :1]
+        return tangent, None, None
+
+
 def evolve(
     hamiltonian: torch.Tensor,
     t: float,
@@ -211,22 +439,21 @@ def evolve(
     collapse operators ``L_i = √γ n_i``.  The module docstring derives every
     formula used here, with the sign and ordering conventions.
 
-    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, with
-      no time stepping. Without gradients, this uses one eigendecomposition
-      per sample and is exact up to floating-point rounding. With reverse-mode
-      gradients, it uses ``torch.linalg.matrix_exp``; its rounding error can
-      grow with ``‖H·t‖`` (#674).
+    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, exact up to
+      floating-point rounding, from one eigendecomposition per sample and
+      without time stepping.
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
-      ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``. The unitary step is
-      ``ρ → U ρ U†`` with ``U = e^(−iH dt)``; without gradients, ``U`` is
-      computed from an eigendecomposition, while with reverse-mode gradients
-      it uses ``torch.linalg.matrix_exp``. The dissipative step multiplies
-      ``ρ_ab`` by ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of
-      the basis states ``a`` and ``b``. The dissipative step is exact up to
-      floating-point rounding; the splitting has a **global error of second
-      order in ``dt``**. On the ``matrix_exp`` path, the unitary step's
-      rounding error can grow with ``‖H·dt‖`` (#674).
+      ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``.  The unitary step is
+      ``ρ → U ρ U†`` with ``U = e^(−iH dt)`` from the same
+      eigendecomposition; the dissipative step multiplies ``ρ_ab`` by
+      ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of the basis
+      states ``a`` and ``b``.  Both are exact up to floating-point rounding;
+      the splitting has a **global error of second order in ``dt``**.
+
+    The result is the same in every autograd mode: with or without
+    gradients, under ``torch.no_grad``, ``torch.func`` or forward-mode dual
+    tensors, ``evolve`` runs the same eigendecomposition (#674).
 
     Parameters
     ----------
@@ -249,21 +476,17 @@ def evolve(
         depends on γ and on the spread ``W = E_max − E_min`` of the energies
         of ``H`` (set by the interaction, in the blockade), which this
         function does not guess (see "Choosing ``n_steps``" below).  Not
-        used when ``gamma = 0``, where no time stepping is needed.  Without
-        gradients, the result is exact up to floating-point rounding; with gradients,
-        ``matrix_exp`` introduces rounding error that can grow with ``‖H·t‖``
-        (#674).
+        used when ``gamma = 0``, where the result is exact up to
+        floating-point rounding.
 
     Returns
     -------
     torch.Tensor
         ``ρ(t)``, ``complex128``, with the shape and device of
         ``hamiltonian``.  Entry ``[..., a, b]`` is ``⟨a|ρ|b⟩``.  Trace 1,
-        Hermitian and positive semidefinite up to floating-point rounding.
-        Trace preservation is subject to rounding: on the ``eigh`` path, the
-        trace error is typically a few ``1e-16`` per step; on the
-        gradient-enabled ``matrix_exp`` path, it can be larger and grow with
-        ``‖H·t‖`` (#674).
+        Hermitian and positive semidefinite up to rounding, at any step size;
+        the rounding error of the trace grows by a few ``1e-16`` per step
+        (``1.4e-15`` for 6 atoms 0.6 µm apart, ``‖H‖₂ ≈ 6e8`` rad/µs).
 
     Raises
     ------
@@ -314,21 +537,30 @@ def evolve(
       rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
       of those steps is a whole number of π pulses, so between steps the
       atom is in ``|g⟩`` or ``|r⟩`` and leaves no coherence to dephase.
-    * **Cost.** Without gradients, one eigendecomposition per sample, then two
-        ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
-        gradients are required, one ``matrix_exp`` per sample replaces the
-        eigendecomposition, and its backward pass exponentiates a matrix of
-        twice the size. A forward and backward pass then takes about 4× as long
-        as on the ``eigh`` path at 6 atoms, and about 20× as long, with about
-        4.5× the memory, at ``MAX_ATOMS`` (#674).
-    * **Gradients.** Operations are differentiable and none is in place on a
-      tensor carrying a gradient, so gradients reach the tensors
-      ``hamiltonian`` was built from. When gradient tracking is enabled and
-      ``hamiltonian`` requires gradients, ``evolve`` uses
-      ``torch.linalg.matrix_exp`` to avoid incorrect eigenvector gradients at
-      degenerate eigenvalues (#505). Otherwise it uses ``torch.linalg.eigh``.
-      Forward-mode AD via ``torch.func.jacfwd`` or ``torch.func.jvp`` still
-      takes the ``eigh`` path and has the known degeneracy limitation (#674).
+    * **Cost.**  One eigendecomposition per sample, then two
+      ``2^N × 2^N`` matrix products per step and sample.  A backward pass, or
+      a forward-mode derivative, reuses the eigendecomposition and adds four
+      matrix products per sample: at ``MAX_ATOMS``, forward and backward
+      together take about twice as long as the forward pass alone.
+    * **Gradients.**  Every operation is differentiable and none is in
+      place on a tensor that carries a gradient, so gradients reach the
+      tensors ``hamiltonian`` was built from, in reverse mode
+      (``backward``, ``torch.func.grad``, ``jacrev``) and in forward mode
+      (``torch.func.jvp``, ``jacfwd``, ``torch.autograd.forward_ad``).  The
+      propagator is differentiated in the eigenbasis by the Daleckii–Krein
+      formula of the module docstring, not through the backward pass of
+      ``eigh``, so the derivative is right where eigenvalues coincide
+      (#505, #674): two atoms with equal detunings and no interaction are
+      enough for that.  It comes from the same eigendecomposition as ``ρ``,
+      whose energies are accurate to about ``ε ‖H‖₂``, and is about as
+      accurate as ``ρ``: that error only shows when ``‖H‖₂`` is many orders
+      above the drive, as for 6 atoms 0.6 µm apart (``‖H‖₂ ≈ 6e8`` rad/µs,
+      ``t = 4`` µs), where the populations were ``8e-9`` and the derivative
+      ``1.5e-8`` off (#674).  Second derivatives (``gradgradcheck``,
+      ``torch.func.hessian``) are correct too, but their extra pass goes
+      through ``torch.linalg.matrix_exp`` of four times the size of ``H``.
+      ``torch.func.vmap`` over ``evolve`` is not supported: its argument
+      checks read values.
     * **Time-dependent pulses** are out of scope.  A piecewise-constant one
       would repeat the loop below per segment, starting from the previous
       segment's state.
@@ -376,30 +608,17 @@ def evolve(
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the spread E_max - E_min of the energies of the Hamiltonian."
         )
+    # The Hermitian part, which eigh then reads in full: the derivatives of
+    # _Propagator treat every entry of its input as a variable, so it has to be
+    # the matrix that is evolved, not just one triangle of it.
     h = (h + h.mH) / 2
-    use_matrix_exp = torch.is_grad_enabled() and h.requires_grad
 
     if gamma == 0 or steps is None:  # no steps only without dephasing, see above
-        if use_matrix_exp:
-            # Avoid eigenvector gradients at degenerate eigenvalues (#505).
-            propagator = torch.linalg.matrix_exp(-1j * h * t)
-            psi = propagator[..., :, 0]
-            return psi.unsqueeze(-1) @ psi.conj().unsqueeze(-2)
-
-        # H = V E V†: the columns of V are the energy eigenvectors.
-        energies, vectors = torch.linalg.eigh(h)
-        # ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m); evolve |g…g⟩.
-        amplitudes = torch.exp(-1j * energies * t) * vectors[..., 0, :].conj()
-        psi = vectors @ amplitudes[..., :, None]
+        psi = _Propagator.apply(h, t, True)[0]
         return psi @ psi.mH
 
     dt = t / steps
-    if use_matrix_exp:
-        propagator = torch.linalg.matrix_exp(-1j * h * dt)
-    else:
-        # U(dt) = V e^(−i E dt) V†: the exact unitary step from the eigendecomposition.
-        energies, vectors = torch.linalg.eigh(h)
-        propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
+    propagator = _Propagator.apply(h, dt, False)[0]
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
     # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)

@@ -689,9 +689,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `centred data has rank r < n_components` and the run stops, where it used to take the
   rounding noise as an input (#580, #600)
 - `evolve`: gradients through it were silently wrong where the Hamiltonian has
-  degenerate eigenvalues. When the Hamiltonian requires grad, the propagator
-  now comes from `torch.linalg.matrix_exp` instead of `eigh`; forward-mode AD
-  is still affected (#674) (#505, #668)
+  degenerate eigenvalues (#505, #668)
+- `evolve`: forward-mode derivatives (`torch.func.jacfwd`, `jvp`, `torch.autograd.forward_ad`)
+  were still wrong at degenerate eigenvalues, and with gradients on, the state came from
+  `torch.linalg.matrix_exp` and differed from the one without, by up to `3.6e-8` at a large
+  `‖H·t‖`. The propagator now always comes from `eigh`, the same in every autograd mode, and
+  is differentiated in its eigenbasis (Daleckii–Krein) in reverse and forward mode. At
+  `MAX_ATOMS`, forward and backward take about twice the forward pass, where `matrix_exp`
+  took over 20 times as long and 4.5 times the memory (#674, #PR)
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
