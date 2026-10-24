@@ -22,7 +22,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from hqnn_forge.encoding._common import resolve_backend
+from hqnn_forge.encoding._common import AtomRegisterLike, resolve_backend
 from hqnn_forge.encoding.amplitude_embedding import AmplitudeEncodingLayer
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
@@ -40,6 +40,7 @@ from hqnn_forge.initializers.restricted_variance import (
 )
 from hqnn_forge.models.base import custom_encoder
 from hqnn_forge.noise import Channel, NoiseMethod, Position
+from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 
 #: Constructor defaults that mark an option as "not asked for".  Both options
 #: are inert outside the configuration that uses them, so a non-default value
@@ -82,6 +83,52 @@ def validate_encoder_activation(encoder_activation: str) -> None:
         raise ValueError(
             f"encoder_activation must be 'tanh' or 'sigmoid'; got {encoder_activation!r}."
         )
+
+
+def neutral_atom_config(
+    atom_register: AtomRegisterLike | None,
+    blockade_radius: float | None,
+    ccz: bool,
+) -> tuple[list[list[float]] | None, float | None, bool]:
+    """
+    The ``entangler="rydberg"`` register options as primitives, for ``_config``.
+
+    The checkpoint stores the config and must load with
+    ``torch.load(weights_only=True)``, so an
+    :class:`~hqnn_forge.rydberg.AtomRegister` is stored as its positions in
+    µm, one ``[x, y]`` list per atom in atom (wire) order, as
+    :meth:`hqnn_forge.rydberg.RydbergFeatureMap.get_config` stores its
+    register, and ``blockade_radius`` as a ``float``.  Both read back exactly:
+    the positions are the register's ``float64`` values, and the constructor
+    accepts them in place of the register.  ``None`` stays ``None`` (the
+    default chain and radius).  Whether the options fit ``entangler`` and
+    ``n_qubits`` is checked by the encoding layer.
+
+    Raises
+    ------
+    TypeError
+        For complex or boolean positions, or a ``ccz`` that is not a ``bool``.
+    ValueError
+        For other positions :class:`~hqnn_forge.rydberg.AtomRegister` refuses,
+        or a ``blockade_radius`` that is not a finite number ``> 0``.
+    """
+    positions = (
+        None
+        if atom_register is None
+        else (
+            atom_register
+            if isinstance(atom_register, AtomRegister)
+            else AtomRegister(atom_register)
+        ).positions.tolist()
+    )
+    radius = (
+        None
+        if blockade_radius is None
+        else _finite_number(blockade_radius, "blockade_radius", positive=True)
+    )
+    if not isinstance(ccz, bool):
+        raise TypeError(f"ccz must be True or False; got {ccz!r}.")
+    return positions, radius, ccz
 
 
 ENCODING_TYPES = ("angle", "iqp", "amplitude", "reuploading")
@@ -216,6 +263,9 @@ class QuantumTrunk(nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> int:
         """
         Build ``classical_encoder``, ``quantum_layer`` and ``dropout`` on ``self``.
@@ -305,6 +355,9 @@ class QuantumTrunk(nn.Module):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
         elif encoding_type == "iqp":
             self.quantum_layer = IQPEncodingLayer(
@@ -323,6 +376,9 @@ class QuantumTrunk(nn.Module):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
         elif encoding_type == "amplitude":
             self.quantum_layer = AmplitudeEncodingLayer(
@@ -341,6 +397,9 @@ class QuantumTrunk(nn.Module):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
         else:
             self.quantum_layer = DataReuploadingLayer(
@@ -360,6 +419,9 @@ class QuantumTrunk(nn.Module):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
 
         # ── Dropout ───────────────────────────────────────────────────────

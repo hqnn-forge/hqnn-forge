@@ -406,8 +406,10 @@ Options shared by both models:
   `(n_layers, n_qubits)` instead of `(n_layers, n_qubits, 3)`) or `"rydberg"` (the blockade
   `CZ` gates of a neutral-atom chain, 6 µm apart at a blockade radius of 8.69 µm, in their
   parallel layers, then `Rot`; `circuit_summary` reports those layers as
-  `n_blockade_layers`. Other atom registers and `CCZ` are available through
-  `hqnn_forge.circuits.neutral_atom_layer`).
+  `n_blockade_layers`). With `"rydberg"`, `atom_register=` (an `AtomRegister` or one `[x, y]`
+  row per qubit, in µm), `blockade_radius=` (µm) and `ccz=True` run the block on another
+  connected register, with `CCZ` on its blockade triangles; the config and checkpoints store
+  the positions.
 - `readout="all"` (default: ⟨Z_i⟩ on every qubit) or `"first"` (⟨Z_0⟩ only, so the head reads
   a single number).
 - `encoder_activation="tanh"` (default: `tanh(·)·π`, in (-π, π)) or `"sigmoid"`

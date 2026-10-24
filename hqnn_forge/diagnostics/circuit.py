@@ -47,7 +47,12 @@ import torch.nn as nn
 
 from hqnn_forge._encoding_contract import CircuitLayer
 from hqnn_forge._resolve import resolve_encoding_layer
-from hqnn_forge.circuits import RYDBERG_BLOCKADE_RADIUS, blockade_schedule, rydberg_chain
+from hqnn_forge.circuits import blockade_schedule
+from hqnn_forge.encoding._common import (
+    neutral_atom_radius,
+    neutral_atom_register,
+    resolve_neutral_atom_options,
+)
 
 #: Gate names a circuit is decomposed to before its resources are counted.
 #: Every gate the library's circuits emit is in here, so the count is of the
@@ -110,10 +115,13 @@ class CircuitSummary:
         on the same footing as ``n_trainable_params``.
     n_blockade_layers:
         For ``entangler="rydberg"``: the parallel CZ/CCZ layers of the whole
-        stack on its atom register, ``n_layers`` times
-        ``len(blockade_schedule(rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS))``.
-        That is ``n_layers · min(3, n_qubits − 1)``
-        (:func:`hqnn_forge.circuits.rydberg_chain`).  The ``Rot`` on every atom
+        stack on the layer's own atom register, ``n_layers`` times
+        ``len(blockade_schedule(register, blockade_radius, ccz=ccz))``, with the
+        layer's ``atom_register``, ``blockade_radius`` and ``ccz``.  On the
+        default register, :func:`hqnn_forge.circuits.rydberg_chain`
+        ``(n_qubits)`` at
+        :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`, that is
+        ``n_layers · min(3, n_qubits − 1)``.  The ``Rot`` on every atom
         between two blocks keeps their gate layers apart, so the per-block
         counts add.  ``None`` for every other entangler, which has no
         blockade constraint.
@@ -727,13 +735,28 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
 
 
 def _blockade_layers(layer: CircuitLayer, n_qubits: int) -> int | None:
-    """``CircuitSummary.n_blockade_layers``: ``None`` unless ``layer.entangler == "rydberg"``."""
+    """
+    ``CircuitSummary.n_blockade_layers``: ``None`` unless ``layer.entangler == "rydberg"``.
+
+    The register, radius and ``ccz`` are the layer's own (its
+    ``atom_register``, ``blockade_radius`` and ``ccz`` attributes; a layer
+    without them, or with ``None``, runs the default chain and radius).
+    """
     if getattr(layer, "entangler", None) != "rydberg":
         return None
     n_layers = getattr(layer, "n_layers", None)
     if not isinstance(n_layers, int):
         raise TypeError(f"{type(layer).__name__} has entangler='rydberg' but no int n_layers.")
-    per_block = blockade_schedule(rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS)
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits,
+        "rydberg",
+        getattr(layer, "atom_register", None),
+        getattr(layer, "blockade_radius", None),
+        getattr(layer, "ccz", False),
+    )
+    per_block = blockade_schedule(
+        neutral_atom_register(n_qubits, register), neutral_atom_radius(radius), ccz=ccz
+    )
     return n_layers * len(per_block)
 
 

@@ -15,11 +15,12 @@ argument through :func:`hqnn_forge.encoding.angle_embedding.apply_variational_la
   PennyLane's ``qml.StronglyEntanglingLayers`` (Rot first, then a CNOT ring of
   growing range).
 * ``entangler="hardware_efficient"`` is ``hardware_efficient_layer`` per layer.
-* ``entangler="rydberg"`` is ``neutral_atom_layer`` per layer on
+* ``entangler="rydberg"`` is ``neutral_atom_layer`` per layer, by default on
   ``rydberg_chain(n_qubits)`` at ``RYDBERG_BLOCKADE_RADIUS``: a chain whose
-  only edges are neighbours, so no triangle and no CCZ.  Any other
-  :class:`~hqnn_forge.rydberg.AtomRegister`, and ``ccz=True``, are for
-  circuits that call ``neutral_atom_layer`` themselves (#418).
+  only edges are neighbours, so no triangle and no CCZ (#418).  The encoders
+  and classifiers take any other :class:`~hqnn_forge.rydberg.AtomRegister`,
+  radius and ``ccz=True`` as their ``atom_register``, ``blockade_radius`` and
+  ``ccz`` arguments (#644).
 
 Exported symbols
 ----------------

@@ -201,10 +201,15 @@ The functions in `hqnn_forge/circuits/` are the per-layer blocks the encoders ru
 their `entangler` argument through `apply_variational_layers`. Note the naming wart:
 `strongly_entangling_layer` is `entangler="ring"` (not `"strongly_entangling"`, which is
 PennyLane's `qml.StronglyEntanglingLayers`), `hardware_efficient_layer` is
-`entangler="hardware_efficient"` and `neutral_atom_layer` is `entangler="rydberg"` on the fixed
-register `rydberg_chain(n_qubits)`. A primitive that needs data besides `n_qubits`, such as an
-atom register, has to derive it from `n_qubits` in order to become an `entangler` value: the
-signature below passes nothing else.
+`entangler="hardware_efficient"` and `neutral_atom_layer` is `entangler="rydberg"`, by default
+on the register `rydberg_chain(n_qubits)`. A primitive that needs data besides `n_qubits`, such
+as an atom register, either derives a default from `n_qubits` or takes it as keyword-only
+options next to `entangler`, as `"rydberg"` does with `atom_register`, `blockade_radius` and
+`ccz` (#644). Such options are threaded through `apply_variational_layers`,
+`validate_circuit_options` (both refuse them with any other `entangler`), every encoder's
+circuit factory, QNode builder and class, `QuantumTrunk._build_trunk` and the classifiers.
+`get_config` stores them as primitives, and each needs a `_LEGACY_DEFAULTS` entry in
+`hqnn_forge/utils/checkpoint.py` that reproduces the circuit from before it existed.
 
 The core of adding an ansatz is three steps; the sections below list the conventions, tests and
 other places to update:
