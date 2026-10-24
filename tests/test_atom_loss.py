@@ -153,8 +153,9 @@ class TestDensity:
     @pytest.mark.parametrize("theta", [0.0, 0.9, math.pi / 2, 2.5, math.pi])
     def test_single_qubit_closed_form(self, theta: float, p: float) -> None:
         # ⟨Z⟩ = cos θ before the loss; (1 − p) cos θ − p after it.  One gate,
-        # so "all" and "end" place the same single site.  p = 0 is the
-        # noiseless model, checked bit for bit in the eval-mode test below.
+        # so "all" and "end" place the same single site.  p = 0 inserts no
+        # channel (training_noise_qnode refuses it); the sweep test below
+        # checks that p = 0 gives the clean model.
         qnode = _one_qubit()
         for position in ("all", "end"):
             noisy = training_noise_qnode(qnode, 1, p, position, channel="atom_loss")
