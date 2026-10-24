@@ -20,7 +20,12 @@ import pytest
 import torch
 
 from hqnn_forge.diagnostics import effective_dimension, gradient_variance
-from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer, QuantumEncodingLayer
+from hqnn_forge.encoding import (
+    AmplitudeEncodingLayer,
+    AnalogRydbergLayer,
+    DataReuploadingLayer,
+    QuantumEncodingLayer,
+)
 from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import (
@@ -45,7 +50,13 @@ class _Backend(TypedDict):
 
 
 CPU: _Backend = {"device_name": "default.qubit", "diff_method": "backprop"}
-Layer = QuantumEncodingLayer | IQPEncodingLayer | AmplitudeEncodingLayer | DataReuploadingLayer
+Layer = (
+    QuantumEncodingLayer
+    | IQPEncodingLayer
+    | AmplitudeEncodingLayer
+    | DataReuploadingLayer
+    | AnalogRydbergLayer
+)
 LayerFactory = Callable[..., Layer]
 Model = HybridBinaryClassifier | ParallelHybridClassifier | MulticlassHybridClassifier
 # Every encoding layer (#227).  The amplitude layer is built for N_QUBITS

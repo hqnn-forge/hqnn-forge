@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from hqnn_forge.encoding._common import resolve_backend
 from hqnn_forge.encoding.amplitude_embedding import AmplitudeEncodingLayer
+from hqnn_forge.encoding.analog_rydberg import AnalogRydbergLayer
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
     DiffMethod,
@@ -84,7 +85,7 @@ def validate_encoder_activation(encoder_activation: str) -> None:
         )
 
 
-ENCODING_TYPES = ("angle", "iqp", "amplitude", "reuploading")
+ENCODING_TYPES = ("angle", "iqp", "amplitude", "reuploading", "analog")
 
 
 def _check_encoding_options(
@@ -115,12 +116,13 @@ def _check_encoding_options(
     if encoding_type not in ENCODING_TYPES:
         raise ValueError(
             f"Unsupported encoding_type: {encoding_type!r}; choose 'angle', 'iqp', "
-            f"'amplitude' or 'reuploading'."
+            f"'amplitude', 'reuploading' or 'analog'."
         )
-    if embedding_rotation != "X" and encoding_type in ("iqp", "amplitude"):
+    if embedding_rotation != "X" and encoding_type in ("iqp", "amplitude", "analog"):
+        name = {"iqp": "IQP", "amplitude": "amplitude", "analog": "analog"}[encoding_type]
         raise ValueError(
             f"embedding_rotation applies to encoding_type='angle' or 'reuploading' only; "
-            f"{'IQP' if encoding_type == 'iqp' else 'amplitude'} embedding has no rotation axis."
+            f"{name} embedding has no rotation axis."
         )
     if trainable_input_scaling and encoding_type != "reuploading":
         raise ValueError(
@@ -177,7 +179,11 @@ class QuantumTrunk(nn.Module):
 
     classical_encoder: nn.Module
     quantum_layer: (
-        QuantumEncodingLayer | IQPEncodingLayer | AmplitudeEncodingLayer | DataReuploadingLayer
+        QuantumEncodingLayer
+        | IQPEncodingLayer
+        | AmplitudeEncodingLayer
+        | DataReuploadingLayer
+        | AnalogRydbergLayer
     )
     dropout: nn.Module
     n_input_features: int
@@ -230,6 +236,22 @@ class QuantumTrunk(nn.Module):
         validate_dropout_p(dropout_p)
         validate_encoder_activation(encoder_activation)
         validate_init(init_strategy, init_std)
+        if encoding_type == "analog":
+            # The analog layer has no gates: no entangler to choose, and its
+            # weights are a pulse that starts from the layer's stated one.
+            if entangler != "ring":
+                raise ValueError(
+                    f"entangler applies to the gate-based encodings only; "
+                    f"encoding_type='analog' entangles through the Rydberg interaction of its "
+                    f"register, so entangler={entangler!r} would be recorded and ignored."
+                )
+            if init_strategy != "restricted":
+                raise ValueError(
+                    f"init_strategy applies to the gate-based encodings only; "
+                    f"encoding_type='analog' starts from the pulse Ω = Ω_max/2, Δ = 0, φ = 0 "
+                    f"(AnalogRydbergLayer), so init_strategy={init_strategy!r} would be "
+                    f"recorded and ignored."
+                )
         if classical_encoder is not None and not use_classical_encoder:
             raise ValueError(
                 "classical_encoder replaces the built-in encoder and needs "
@@ -261,6 +283,7 @@ class QuantumTrunk(nn.Module):
         )
 
         self.n_input_features = n_input_features
+        self._analog = encoding_type == "analog"
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.init_strategy = init_strategy
@@ -342,6 +365,22 @@ class QuantumTrunk(nn.Module):
                 seed=seed,
                 readout_error=readout_error,
             )
+        elif encoding_type == "analog":
+            self.quantum_layer = AnalogRydbergLayer(
+                n_qubits=n_qubits,
+                n_segments=n_layers,
+                device_name=device_name,
+                diff_method=diff_method,
+                readout=readout,
+                noise_level=noise_level,
+                noise_position=noise_position,
+                noise_method=noise_method,
+                noise_trajectories=noise_trajectories,
+                shots=shots,
+                noise_channel=noise_channel,
+                seed=seed,
+                readout_error=readout_error,
+            )
         else:
             self.quantum_layer = DataReuploadingLayer(
                 n_qubits=n_qubits,
@@ -373,6 +412,12 @@ class QuantumTrunk(nn.Module):
     def _initialise_quantum_weights(self) -> None:
         """Draw the circuit weights with ``init_strategy`` (the models' classical init is their own)."""
         weights = self.quantum_layer.qlayer.weights  # dim 0: layer (variational_weight_shape)
+        if getattr(self, "_analog", False):
+            # Raw pulse values, not rotation angles: zero is the layer's stated
+            # pulse (AnalogRydbergLayer.set_pulse is its inverse).
+            with torch.no_grad():
+                weights.zero_()
+            return
         if self.init_strategy == "block_local":
             block_local_init_(weights.data, n_qubits=self.n_qubits)
         elif self.init_strategy == "normal":

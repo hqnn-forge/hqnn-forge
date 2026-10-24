@@ -388,6 +388,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RYDBERG_BLOCKADE_RADIUS` = 8.69 µm, so CZ on neighbours only, in `min(3, n_qubits − 1)`
   parallel layers per block), and `CircuitSummary.n_blockade_layers`, which counts those layers
   (`None` for the other entanglers) (#418, #643)
+- `AnalogRydbergLayer` and `encoding_type="analog"` in every classifier: a register evolving
+  under a piecewise-constant global pulse with trainable Rabi frequency, detuning and phase per
+  segment (bounded by reparameterisation), each input in one atom's local detuning, simulated
+  and differentiated in torch; `rydberg_hamiltonian` takes a drive `phase` (default 0)
+  (#420, #PR)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;

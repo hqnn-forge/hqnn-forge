@@ -51,9 +51,12 @@ In that basis ``n_i`` is diagonal with entry ``b_i(k)``, and ``X_i`` flips bit
   two of these coincide (different ``i`` flip different bits) and none is on
   the diagonal, so every row holds exactly ``N`` off-diagonal entries.
 
-The matrix is real and symmetric.  It is returned as ``complex128`` because
-what consumes it (``exp(−iHt)``, a density matrix) is complex, and because a
-drive phase makes it complex (see the Notes of :func:`rydberg_hamiltonian`).
+With the default drive phase ``φ = 0`` the matrix is real and symmetric.  It
+is returned as ``complex128`` because what consumes it (``exp(−iHt)``, a
+density matrix) is complex, and because a drive phase makes it complex: with
+``φ_i`` the drive entry is ``Ω_i/2 · e^{iφ_i}`` where atom ``i`` is in ``|g⟩``
+in the row state and ``Ω_i/2 · e^{−iφ_i}`` where it is in ``|r⟩`` (derived in
+the Notes of :func:`rydberg_hamiltonian`), so the matrix stays Hermitian.
 
 References
 ----------
@@ -117,15 +120,18 @@ def rydberg_hamiltonian(
     *,
     c6: float,
     interactions: bool = True,
+    phase: Any = 0.0,
 ) -> torch.Tensor:
     """
     The dense Rydberg Hamiltonian of a register, for one or a batch of pulses.
 
     ::
 
-        H = Σ_i Ω_i/2 · X_i  −  Σ_i Δ_i n_i  +  Σ_{i<j} C6/|r_i − r_j|⁶ · n_i n_j
+        H = Σ_i Ω_i/2 · (cos φ_i X_i − sin φ_i Y_i)  −  Σ_i Δ_i n_i
+            +  Σ_{i<j} C6/|r_i − r_j|⁶ · n_i n_j
 
-    with ``n_i = |r⟩⟨r|_i``, in rad/µs.  The derivation of every matrix
+    with ``n_i = |r⟩⟨r|_i``, in rad/µs, and the drive phase ``φ_i = 0`` by
+    default, which leaves ``Ω_i/2 · X_i``.  The derivation of every matrix
     element, the sign conventions and the basis ordering (atom ``i`` is tensor
     factor and PennyLane wire ``i``, atom 0 the most significant bit of the
     index) are in the module docstring.
@@ -155,6 +161,13 @@ def rydberg_hamiltonian(
         The result is then the Kronecker sum of the single-atom Hamiltonians
         ``[[0, Ω_i/2], [Ω_i/2, −Δ_i]]``: the non-interacting control
         (``V_ij = 0`` exactly, not a large spacing).
+    phase:
+        Drive phase φ in radians, default 0: a scalar or one value per atom,
+        with the shapes accepted for ``omega`` (``()``, ``(N,)``,
+        ``(batch, N)`` or ``(batch, 1)``).  The drive of atom ``i`` becomes
+        ``Ω_i/2 · (cos φ_i X_i − sin φ_i Y_i) = Ω_i/2 · (e^{iφ_i} |g⟩⟨r|_i
+        + e^{−iφ_i} |r⟩⟨g|_i)``, the form of ``docs/rydberg-model.md`` and of
+        the trainable analog layer (#420); see "Drive phase" in the Notes.
 
     Returns
     -------
@@ -163,37 +176,47 @@ def rydberg_hamiltonian(
         neither ``omega`` nor ``delta`` has a batch axis, else
         ``(batch, 2^N, 2^N)`` with sample ``b`` built from ``omega[b]`` and
         ``delta[b]``; an argument without a batch axis is shared by all
-        samples.  The imaginary part is zero.
+        samples.  The imaginary part is zero when ``phase`` is 0.
 
     Raises
     ------
     TypeError
         If ``register`` is not an :class:`~hqnn_forge.rydberg.AtomRegister`,
-        or ``omega`` or ``delta`` is complex or boolean.
+        or ``omega``, ``delta`` or ``phase`` is complex or boolean.
     ValueError
-        If the register has more than :data:`MAX_ATOMS` atoms; if ``delta``
-        or ``omega`` has another shape than those above or their batch sizes
-        differ (a batch of 1 is not broadcast to another batch size); if
-        either holds a NaN or an infinity; or if ``c6`` is not a finite
-        number.
+        If the register has more than :data:`MAX_ATOMS` atoms; if ``delta``,
+        ``omega`` or ``phase`` has another shape than those above or their
+        batch sizes differ (a batch of 1 is not broadcast to another batch
+        size); if any of them holds a NaN or an infinity; or if ``c6`` is not
+        a finite number.
 
     Notes
     -----
     * **Precision.**  ``omega`` and ``delta`` are converted to ``float64``
       whatever their dtype, and the result is ``complex128``.
     * **Gradients.**  The matrix is linear in ``omega`` and ``delta`` and
-      built with differentiable operations: ``∂H/∂Δ_i = −n_i`` and
-      ``∂H/∂Ω_i = X_i/2`` reach tensors that require them.  The positions and
-      ``c6`` are constants.
+      built with differentiable operations: ``∂H/∂Δ_i = −n_i``,
+      ``∂H/∂Ω_i = (cos φ_i X_i − sin φ_i Y_i)/2`` and
+      ``∂H/∂φ_i = −Ω_i/2 · (sin φ_i X_i + cos φ_i Y_i)`` reach tensors that
+      require them.  The positions and ``c6`` are constants.
     * **Batched and unbatched calls agree bit for bit.**  Each diagonal entry
       is accumulated atom by atom in the same order either way, so sample
       ``b`` of a batched call equals the unbatched call on ``omega[b]`` and
       ``delta[b]`` exactly.
-    * **Drive phase.**  With a phase φ the drive term reads
-      ``Ω/2 · Σ_i (cos φ X_i − sin φ Y_i)`` (the trainable analog layer,
-      #420).  This function is the case ``φ = 0``.  Everything after ``delta``
-      is keyword-only, so a ``phase`` argument defaulting to 0 can be added
-      without changing any existing call.
+    * **Drive phase.**  With ``X = |g⟩⟨r| + |r⟩⟨g|`` and
+      ``Y = −i |g⟩⟨r| + i |r⟩⟨g|`` in the basis ``(|g⟩, |r⟩)``::
+
+          cos φ X − sin φ Y = (cos φ + i sin φ) |g⟩⟨r| + (cos φ − i sin φ) |r⟩⟨g|
+                            = e^{iφ} |g⟩⟨r| + e^{−iφ} |r⟩⟨g|
+
+      so the drive entry at ``(k, k XOR 2^(N−1−i))`` is ``Ω_i/2 · e^{iφ_i}``
+      where atom ``i`` is in ``|g⟩`` in the row state ``k`` (``b_i(k) = 0``)
+      and its complex conjugate where it is in ``|r⟩``.  The two entries of a
+      pair are built as one value and its conjugate, so the matrix is
+      Hermitian exactly.  ``φ`` and ``φ + 2π`` give the same matrix; a
+      negative Ω is the phase ``φ + π``.  At ``φ = 0`` the factor is exactly
+      ``1 + 0i`` and the matrix is bit for bit that of a call without
+      ``phase``.
 
     Examples
     --------
@@ -220,6 +243,7 @@ def rydberg_hamiltonian(
     c6 = _finite_number(c6, "c6")
     delta = _finite_tensor(delta, "delta")
     omega = _finite_tensor(omega, "omega")
+    phase = _finite_tensor(phase, "phase")
     if delta.ndim not in (1, 2) or delta.shape[-1] != n:
         raise ValueError(
             f"delta must have shape ({n},) or (batch, {n}), one detuning per atom; "
@@ -228,22 +252,24 @@ def rydberg_hamiltonian(
     # The accepted shapes are checked one by one, not by broadcasting: that
     # would also take an omega of shape (1,) for a global one on N > 1 atoms,
     # and a batch of 1 for any other batch size.
-    batch = {int(tensor.shape[0]) for tensor in (omega, delta) if tensor.ndim == 2}
-    atoms_last = (
-        omega.ndim == 0
-        or (omega.ndim == 1 and omega.shape[0] == n)
-        or (omega.ndim == 2 and omega.shape[1] in (1, n))
-    )
-    if not atoms_last or len(batch) > 1:
-        raise ValueError(
-            f"omega must be a scalar or have its atoms on the last axis, with shape ({n},), "
-            f"(batch, {n}) or (batch, 1), and match the batch of delta "
-            f"(shape {tuple(delta.shape)}); got shape {tuple(omega.shape)}. "
-            f"One global omega per sample has shape (batch, 1)."
+    batch = {int(tensor.shape[0]) for tensor in (omega, delta, phase) if tensor.ndim == 2}
+    for name, tensor in (("omega", omega), ("phase", phase)):
+        atoms_last = (
+            tensor.ndim == 0
+            or (tensor.ndim == 1 and tensor.shape[0] == n)
+            or (tensor.ndim == 2 and tensor.shape[1] in (1, n))
         )
-    # Both now (*batch, n) with the atoms last; *batch is () or (batch,).
+        if not atoms_last or len(batch) > 1:
+            raise ValueError(
+                f"{name} must be a scalar or have its atoms on the last axis, with shape "
+                f"({n},), (batch, {n}) or (batch, 1), and match the batch of delta "
+                f"(shape {tuple(delta.shape)}); got shape {tuple(tensor.shape)}. "
+                f"One global {name} per sample has shape (batch, 1)."
+            )
+    # All now (*batch, n) with the atoms last; *batch is () or (batch,).
     shape = (*batch, n)
     omega = omega.to(delta.device).expand(shape)
+    phase = phase.to(delta.device).expand(shape)
     delta = delta.expand(shape)
 
     dim = 2**n
@@ -260,8 +286,12 @@ def rydberg_hamiltonian(
         diagonal = diagonal + ((bits @ v) * bits).sum(dim=-1)
 
     h = torch.diag_embed(diagonal.to(torch.complex128))
-    # Drive: Ω_i/2 at (k, k XOR 2^(n-1-i)), the index with atom i's bit flipped.
-    half_omega = (omega / 2).to(torch.complex128)
+    # Drive: Ω_i/2 · e^{iφ_i} at (k, k XOR 2^(n-1-i)), the index with atom i's
+    # bit flipped, where b_i(k) = 0 (|g⟩ in the row), and its conjugate where
+    # b_i(k) = 1.  e^{iφ} = cos φ + i sin φ, exactly 1 + 0i at φ = 0.
+    up = (omega / 2) * torch.polar(torch.ones_like(phase), phase)
     for i in range(n):
-        h[..., index, index ^ (1 << (n - 1 - i))] = half_omega[..., i, None]
+        h[..., index, index ^ (1 << (n - 1 - i))] = torch.where(
+            bits[:, i] == 0, up[..., i, None], up[..., i, None].conj()
+        )
     return h

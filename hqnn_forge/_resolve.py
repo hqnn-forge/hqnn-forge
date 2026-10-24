@@ -70,7 +70,8 @@ def resolve_encoding_layer(
         )
         raise TypeError(
             f"{caller} expects {expected} (QuantumEncodingLayer, IQPEncodingLayer, "
-            f"AmplitudeEncodingLayer, DataReuploadingLayer); got {type(target).__name__}."
+            f"AmplitudeEncodingLayer, DataReuploadingLayer, AnalogRydbergLayer); "
+            f"got {type(target).__name__}."
         )
     return layer, layer.qlayer, layer.n_qubits
 

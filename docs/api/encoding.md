@@ -2,6 +2,12 @@
 
 ::: hqnn_forge.encoding
 
+## The analog Rydberg layer: Hamiltonian, bounds and readout
+
+::: hqnn_forge.encoding.analog_rydberg
+    options:
+      members: false
+
 ## Input checks
 
 Not exported from `hqnn_forge.encoding`, but used by every encoder to

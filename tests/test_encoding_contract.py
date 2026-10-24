@@ -23,6 +23,7 @@ import torch.nn as nn
 from hqnn_forge._resolve import require_prepare_inputs, resolve_encoding_layer
 from hqnn_forge.encoding import (
     AmplitudeEncodingLayer,
+    AnalogRydbergLayer,
     CircuitLayer,
     DataReuploadingLayer,
     EncodingLayer,
@@ -85,12 +86,21 @@ def _reuploading_scaled() -> EncodingLayer:
     )
 
 
+def _analog_rydberg() -> EncodingLayer:
+    # A pulse of its own, so a phase or detuning dropped on the way to the
+    # circuit would show; inputs go through σ inside the circuit, not here.
+    layer = AnalogRydbergLayer(n_qubits=N_QUBITS, n_segments=2)
+    layer.set_pulse(omega=[3.0, 9.0], detuning=[-2.0, 4.0], phase=[0.0, 1.2])
+    return layer
+
+
 ENCODERS: dict[str, Callable[[], EncodingLayer]] = {
     "angle": _angle,
     "angle-y-first": _angle_y_first,
     "iqp": _iqp,
     "amplitude-padded": _amplitude_padded,
     "reuploading-scaled": _reuploading_scaled,
+    "analog-rydberg": _analog_rydberg,
 }
 
 
