@@ -611,10 +611,10 @@ def evolve(
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the spread E_max - E_min of the energies of the Hamiltonian."
         )
-    # The Hermitian part, whose triangle that eigh reads is the whole matrix:
-    # the derivatives of _Propagator treat every entry of its input as a
-    # variable, so it has to be the matrix that is evolved, not just one
-    # triangle of it.
+    # The Hermitian part, so that the lower triangle, the only one eigh reads,
+    # determines the whole matrix: the derivatives of _Propagator treat every
+    # entry of its input as a variable, so it has to be the matrix that is
+    # evolved, not just one triangle of it.
     h = (h + h.mH) / 2
 
     if gamma == 0 or steps is None:  # no steps only without dephasing, see above
