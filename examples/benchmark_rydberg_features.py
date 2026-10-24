@@ -205,7 +205,9 @@ in the directory under their own names until pruned.  ``--prune-cache``
 or key environment differs from the running process, reports the files and
 bytes removed, and exits without running the benchmark; files it cannot read as
 an entry (such as ``*.part`` files or entries from before #543) are listed and
-left untouched (#575).
+left untouched (#575).  A ``--cache-dir`` that is not an existing directory is
+refused, and stale entries that cannot be removed are listed separately
+(:attr:`PruneReport.not_removed`) and left in place (#634).
 
 A power loss shortly after ``os.replace`` can still leave the final ``.npz`` entry empty or
 partially written.  On the next request, ``fetch`` treats an unreadable entry as a cache
@@ -284,9 +286,13 @@ and ``true`` on a warm one, as its source line's is); ``measurement`` and
 ``shots``; the fold (``fold``, ``n_splits``,
 ``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
 dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
+``raw_constant_columns`` (raw column indices only centred in step 2 despite
+nonzero computed variance) and ``feature_constant_columns`` (the analogous
+indices for step 4, empty when that standardisation is off);
 ``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
 and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
-with their scores, and per tuning fold whether its features were a cache hit
+with their scores, the analogous ``raw_constant_columns`` and
+``feature_constant_columns`` per tuning fold, and whether its features were a cache hit
 and the ``environment()`` they were computed in (``feature_cache_hits``,
 ``feature_environments``, like the fields of the fold below); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
@@ -355,8 +361,10 @@ import contextlib
 import dataclasses
 import errno
 import hashlib
+import importlib
 import itertools
 import json
+import lzma
 import math
 import numbers
 import os
@@ -365,6 +373,7 @@ import tempfile
 import time
 import warnings
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1452,11 +1461,15 @@ class PruneReport(NamedTuple):
         Files in the cache directory that could not be read as a valid
         entry (leftover ``*.part`` files, legacy entries from before #543,
         or corrupt files), left untouched.
+    not_removed:
+        Stale entries whose removal failed (a read-only mount, another
+        owner), each with the error, left in place.
     """
 
     files: int
     bytes: int
     unreadable: tuple[Path, ...]
+    not_removed: tuple[tuple[Path, str], ...] = ()
 
 
 _ENTRY_ERRORS = (
@@ -1467,6 +1480,24 @@ _ENTRY_ERRORS = (
     TypeError,
     zipfile.BadZipFile,
 )
+
+#: What reading a damaged compressed, encrypted or unsupported ``.npz`` member
+#: raises beyond :data:`_ENTRY_ERRORS`: a corrupt deflate, LZMA or (3.14+)
+#: Zstandard stream, an encrypted member, an unknown compression method.  bz2
+#: raises ``OSError``, already in :data:`_ENTRY_ERRORS`.
+_MEMBER_DECODE_ERRORS: tuple[type[Exception], ...] = (
+    zlib.error,
+    lzma.LZMAError,
+    RuntimeError,
+    NotImplementedError,
+)
+try:
+    _MEMBER_DECODE_ERRORS += (importlib.import_module("compression.zstd").ZstdError,)
+except ImportError:  # compression.zstd is new in Python 3.14
+    pass
+
+#: What :meth:`FeatureCache.prune` treats as an unreadable entry.
+_PRUNE_READ_ERRORS: tuple[type[Exception], ...] = (*_ENTRY_ERRORS, *_MEMBER_DECODE_ERRORS)
 
 
 def _stored_environment(stored: Mapping[str, Any]) -> dict[str, Any]:
@@ -1488,8 +1519,7 @@ class FeatureCache:
     they were computed in (JSON) and the code digest; it is written to a
     temporary name and renamed, so an interrupted run leaves no partial
     entry.  With ``directory=None`` nothing is stored and every request
-    computes.  With ``--prune-cache``, stale entries are removed, the outcome
-    is reported, and the process exits without running the benchmark.
+    computes.  :meth:`prune` removes the entries of other code or versions.
 
     Parameters
     ----------
@@ -1609,12 +1639,14 @@ class FeatureCache:
         cache.  Entries with matching code and key environment are kept.
         Files that cannot be read as a valid entry (leftover ``*.part``
         files, entries from before #543, or corrupt files) are not removed
-        and are listed in :attr:`PruneReport.unreadable`.
+        and are listed in :attr:`PruneReport.unreadable`; stale entries that
+        cannot be removed are listed in :attr:`PruneReport.not_removed`.
 
         Returns
         -------
         PruneReport
-            Number of removed files, total bytes removed, and unreadable files.
+            Number of removed files, total bytes removed, unreadable files and
+            stale entries that could not be removed.
         """
         if self.directory is None or not self.directory.exists():
             return PruneReport(files=0, bytes=0, unreadable=())
@@ -1622,6 +1654,7 @@ class FeatureCache:
         removed_files = 0
         removed_bytes = 0
         unreadable: list[Path] = []
+        not_removed: list[tuple[Path, str]] = []
         current_key_env = key_environment(self.environment)
 
         for path in sorted(self.directory.iterdir()):
@@ -1644,7 +1677,13 @@ class FeatureCache:
                         raw_env = _stored_environment(stored)
                         entry_key_env = key_environment(raw_env)
                         is_stale = entry_key_env != current_key_env
-            except _ENTRY_ERRORS:
+            except FileNotFoundError:
+                # Removed meanwhile by another prune, or by hand: there is
+                # nothing to report.
+                continue
+            # One damaged member, in a file placed by something else, must not
+            # abort the whole prune.
+            except _PRUNE_READ_ERRORS:
                 unreadable.append(path)
                 continue
 
@@ -1654,13 +1693,19 @@ class FeatureCache:
                     path.unlink()
                     removed_files += 1
                     removed_bytes += size
-                except OSError:
-                    unreadable.append(path)
+                except FileNotFoundError:
+                    # Removed meanwhile by another prune, or by hand: nothing is
+                    # left to report, and this process removed nothing.
+                    continue
+                except OSError as exc:
+                    # strerror only: str(exc) repeats the full path.
+                    not_removed.append((path, exc.strerror or str(exc)))
 
         return PruneReport(
             files=removed_files,
             bytes=removed_bytes,
             unreadable=tuple(unreadable),
+            not_removed=tuple(not_removed),
         )
 
 
@@ -1755,14 +1800,27 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
 
     Constant columns
     ----------------
-    The variance computed from ``n`` values near ``μ_j`` carries a rounding
-    error of up to about ``n ε σ_j² + (n ε |μ_j|)²`` with ``ε = 2⁻⁵²``
-    (the bound of Chan, Golub and LeVeque for the two-pass algorithm, which
-    scikit-learn's ``StandardScaler`` applies).  A column whose computed
-    ``σ_j²`` does not exceed that bound cannot be told from a constant one,
-    whose variance is 0, and is only centred.  Scaled instead, its rounding
-    noise would become a feature of unit variance: a column of ½ and
-    ½ ± ``2⁻⁵³`` would turn into values of about ±1.2.
+    The fitting columns are copied as rows, so their sums run along a
+    contiguous axis, where NumPy sums pairwise: blocks of at most 128
+    values, each summed with eight interleaved accumulators that are then
+    combined pairwise, plus a remainder of up to 7 values added one at a
+    time; the blocks are combined pairwise.  A value thus enters at most
+    ``k = 24 + max(0, ceil(log2(n/128)))`` additions, each with relative
+    error at most ``ε/2`` (``ε = 2⁻⁵²``), and the division by ``n`` adds
+    one more rounding, so the computed mean is off by at most about
+    ``δ = (k + 1)(ε/2)|μ_j|`` for values near ``μ_j``.  For every
+    ``n ≥ 2`` this is at most
+    ``2 ceil(log2(n)) ε |μ_j|``: up to 128 rows by direct count (closest at
+    ``n = 127``, 25 against 28), and above that because
+    ``k + 1 ≤ ceil(log2(n)) + 18 ≤ 4 ceil(log2(n))``.  A mean off by
+    ``δ`` adds ``δ²`` to the computed variance; the sum of squares keeps
+    the conservative ``n ε σ_j²`` term.  For values this close to the mean,
+    ``x - mean`` is exact by Sterbenz's lemma, so the subtraction adds no
+    rounding term.  A column whose computed variance is at most
+    ``n ε σ_j² + (2 ceil(log2(n)) ε |μ_j|)²`` is treated as constant.
+    This is tighter than the ``(n ε |μ_j|)²`` term of
+    scikit-learn's ``StandardScaler``.  Scaled instead, its rounding noise
+    could become a feature of unit variance.
 
     Parameters
     ----------
@@ -1794,14 +1852,31 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
     fitted = matrix[rows]
     if not np.isfinite(fitted).all():
         raise ValueError("features are not finite on the fitting rows.")
-    n = rows.size
-    eps = np.finfo(np.float64).eps
-    mean = fitted.mean(axis=0)
-    var = fitted.var(axis=0)
-    constant = var <= n * eps * var + (n * eps * mean) ** 2
+    mean, var, constant = _standardisation_stats(fitted)
     std = np.where(constant, 1.0, np.sqrt(var))
     result: FloatArray = (matrix - mean) / std
     return result
+
+
+def _standardisation_stats(
+    fitted: FloatArray,
+) -> tuple[FloatArray, FloatArray, npt.NDArray[np.bool_]]:
+    """Mean, variance and constant mask for fitting rows, summed pairwise by column."""
+    columns = np.ascontiguousarray(fitted.T)
+    n = fitted.shape[0]
+    eps = np.finfo(np.float64).eps
+    mean = columns.mean(axis=1)
+    var = columns.var(axis=1)
+    depth = math.ceil(math.log2(n)) if n > 1 else 0
+    mean_error = 2 * depth * eps * mean
+    constant = var <= n * eps * var + mean_error**2
+    return mean, var, constant
+
+
+def _centred_constant_columns(features: FloatArray, fit_rows: RowArray) -> list[int]:
+    """Indices only centred by the rounding bound despite nonzero computed variance."""
+    _, var, constant = _standardisation_stats(features[fit_rows])
+    return np.flatnonzero(constant & (var > 0)).tolist()
 
 
 def head_features(features: FloatArray, split: Split, standardise: bool) -> FloatArray:
@@ -2157,9 +2232,16 @@ def run_dataset(
             smote_seed=seeds["smote_seed"],
         )
         tuning_splits: list[Split] = []
+        tuning_raw_constant_columns: list[list[int]] = []
         candidates: list[dict[str, Any]] = []
         if settings.n_trials:
             tuning_splits = inner_splits(X, y, train_part, settings, seeds["tune_seed"])
+            tuning_raw_constant_columns = [
+                _centred_constant_columns(X, train_part[fit])
+                for fit, _ in stratified_kfold(
+                    y[train_part], settings.inner_folds, random_state=seeds["tune_seed"]
+                )
+            ]
             candidates = sample_configs(
                 settings.search_space, settings.n_trials, seeds["tune_seed"]
             )
@@ -2170,6 +2252,7 @@ def run_dataset(
             "val_idx": np.sort(val_idx),
             "test_idx": np.sort(test_idx),
             "n_synthetic": split.n_synthetic,
+            "raw_constant_columns": _centred_constant_columns(X, train_part),
             "seeds": {
                 "random_state": settings.random_state,
                 "split_seed": split_seed,
@@ -2203,6 +2286,9 @@ def run_dataset(
             matrix = cached.features
             standardise = settings.standardise and rep.standardise
             head_matrix = head_features(matrix, split, standardise)
+            feature_constant_columns = (
+                _centred_constant_columns(matrix, split.real_train) if standardise else []
+            )
             separation = {
                 "train": separation_measures(
                     matrix[split.real],
@@ -2220,6 +2306,10 @@ def run_dataset(
             tuning_cached = [features_of(rep, s, cache) for s in tuning_splits]
             tuning_features = [
                 head_features(c.features, s, standardise)
+                for c, s in zip(tuning_cached, tuning_splits, strict=True)
+            ]
+            tuning_feature_constant_columns = [
+                _centred_constant_columns(c.features, s.real_train) if standardise else []
                 for c, s in zip(tuning_cached, tuning_splits, strict=True)
             ]
             arm_b_records: list[dict[str, Any]] = []
@@ -2243,6 +2333,8 @@ def run_dataset(
                         "inner_folds": settings.inner_folds,
                         "candidates": candidates,
                         "scores": scores,
+                        "raw_constant_columns": tuning_raw_constant_columns,
+                        "feature_constant_columns": tuning_feature_constant_columns,
                         "feature_cache_hits": [c.hit for c in tuning_cached],
                         "feature_environments": [c.environment for c in tuning_cached],
                     }
@@ -2270,6 +2362,7 @@ def run_dataset(
                     "shots": settings.shots if sampled else None,
                     **fold_info,
                     "feature_dim": int(matrix.shape[1]),
+                    "feature_constant_columns": feature_constant_columns,
                     "n_parameters": model.count_parameters(),
                     "n_frozen_parameters": rep.n_frozen_parameters,
                     "model": {"class": type(model).__name__, "config": model.get_config()},
@@ -2400,6 +2493,12 @@ def check_writable(out: str | os.PathLike[str]) -> None:
             mode = os.stat(path).st_mode
         except FileNotFoundError:
             mode = None
+        if mode is not None and stat.S_ISDIR(mode):
+            raise IsADirectoryError(
+                errno.EISDIR,
+                os.strerror(errno.EISDIR),
+                str(path),
+            )
         if mode is not None and (stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
             if not os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids):
                 raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
@@ -2683,18 +2782,39 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, and ``--separation-seed`` still apply.
+
+    ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
+    other option, ``--quick`` and ``--out`` included, is ignored.
     """
     parser = _parser()
     args = parser.parse_args(argv)
-    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
-    if args.patience < 0:
-        parser.error(
-            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
-            f"got {args.patience}"
-        )
     if args.prune_cache:
         if args.no_cache:
             parser.error("--prune-cache cannot be used with --no-cache")
+        # Checked before FeatureCache, which creates a missing directory: a
+        # mistyped path must not look like an already-clean cache.
+        if not args.cache_dir.is_dir():
+            parser.error(
+                f"argument --cache-dir: {args.cache_dir} is not an existing directory, "
+                "so there is no cache to prune"
+            )
+        if CODE_SHA256 is None:
+            # Read again only to say why; a digest of the files as they are now is not used.
+            try:
+                code_fingerprint()
+            except RuntimeError:
+                reason = (
+                    "hqnn_forge is not imported from Python source files, or holds "
+                    "modules that are not Python source"
+                )
+            except OSError as exc:
+                reason = f"its source files cannot be read ({exc})"
+            else:
+                reason = (
+                    "its source files could not be read when this script was imported; "
+                    "run it again"
+                )
+            parser.error(f"--prune-cache cannot tell stale entries from current ones: {reason}")
         cache = FeatureCache(args.cache_dir)
         report = cache.prune()
         print(
@@ -2705,7 +2825,16 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             print(
                 f"unreadable cache files (not removed): {', '.join(p.name for p in report.unreadable)}"
             )
+        if report.not_removed:
+            failed = ", ".join(f"{p.name} ({err})" for p, err in report.not_removed)
+            print(f"stale cache files that could not be removed: {failed}")
         return []
+    # 0 is the one spelling of "no early stopping": a negative value is a typo, not a second one.
+    if args.patience < 0:
+        parser.error(
+            "argument --patience: must be 0 (no early stopping) or an integer >= 1; "
+            f"got {args.patience}"
+        )
     # 0 is the one spelling of "no limit": a negative value is a typo, not a second one.
     if args.max_separation_rows < 0 or 0 < args.max_separation_rows < MIN_SEPARATION_ROWS:
         parser.error(

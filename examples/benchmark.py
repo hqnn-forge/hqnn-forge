@@ -65,7 +65,7 @@ def stratified_subset(
     return X[keep], y[keep]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Hybrid model against its matched classical control."
     )
@@ -90,7 +90,20 @@ def main() -> None:
     parser.add_argument(
         "--record", help="write an experiment record (JSON) for reproducing the run here"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.max_rows < 2:
+        parser.error(f"argument --max-rows: must be an integer >= 2; got {args.max_rows}")
+    if args.folds < 2:
+        parser.error(f"argument --folds: must be an integer >= 2; got {args.folds}")
+    if args.epochs < 1:
+        parser.error(f"argument --epochs: must be an integer >= 1; got {args.epochs}")
+    if args.qubits < 2:
+        parser.error(f"argument --qubits: must be an integer >= 2; got {args.qubits}")
+    if args.layers < 1:
+        parser.error(f"argument --layers: must be an integer >= 1; got {args.layers}")
+    if args.seeds < 1:
+        parser.error(f"argument --seeds: must be an integer >= 1; got {args.seeds}")
 
     datasets = {"synthetic": synthetic()}
     if args.credit_card:

@@ -51,6 +51,16 @@ Alternative = Literal["two-sided", "greater", "less"]
 #: built; above it the normal approximation (with tie correction) is used.
 EXACT_MAX_N: int = 50
 
+#: Default absolute tolerance below which paired differences are treated as zero,
+#: and within which absolute differences are treated as ties.
+DEFAULT_ATOL: float = 1e-12
+
+
+def _check_atol(atol: float) -> float:
+    if not (math.isfinite(atol) and atol >= 0.0):
+        raise ValueError(f"atol must be a finite non-negative float; got {atol!r}.")
+    return float(atol)
+
 
 class WilcoxonResult(NamedTuple):
     """
@@ -91,15 +101,19 @@ def _differences(scores_a: npt.ArrayLike, scores_b: npt.ArrayLike) -> npt.NDArra
     return a - b
 
 
-def _average_ranks(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+def _average_ranks(
+    values: npt.NDArray[np.float64],
+    atol: float = DEFAULT_ATOL,
+) -> npt.NDArray[np.float64]:
     """1-based ranks with ties sharing their mean rank."""
+    tol = _check_atol(atol)
     order = np.argsort(values, kind="mergesort")
     ranks = np.empty(values.size, dtype=np.float64)
     sorted_vals = values[order]
     i = 0
     while i < values.size:
         j = i
-        while j + 1 < values.size and sorted_vals[j + 1] == sorted_vals[i]:
+        while j + 1 < values.size and sorted_vals[j + 1] - sorted_vals[i] <= tol:
             j += 1
         ranks[order[i : j + 1]] = 0.5 * (i + j) + 1.0
         i = j + 1
@@ -108,9 +122,11 @@ def _average_ranks(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
 
 def _signed_ranks(
     diffs: npt.NDArray[np.float64],
+    atol: float = DEFAULT_ATOL,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
-    nonzero = diffs[diffs != 0.0]
-    return _average_ranks(np.abs(nonzero)), nonzero > 0
+    tol = _check_atol(atol)
+    nonzero = diffs[np.abs(diffs) > tol]
+    return _average_ranks(np.abs(nonzero), atol=tol), nonzero > 0
 
 
 def _exact_null_counts(ranks: npt.NDArray[np.float64]) -> dict[int, int]:
@@ -161,12 +177,15 @@ def wilcoxon_signed_rank(
     scores_a: npt.ArrayLike,
     scores_b: npt.ArrayLike,
     alternative: Alternative = "two-sided",
+    *,
+    atol: float = DEFAULT_ATOL,
 ) -> WilcoxonResult:
     """
     Wilcoxon signed-rank test on paired per-fold scores.
 
-    Zero differences are dropped before ranking (Wilcoxon's original
-    treatment).  Tied absolute differences get average ranks.
+    Zero differences (at most ``atol`` in absolute value) are dropped before
+    ranking (Wilcoxon's original treatment). Tied absolute differences
+    (differing by at most ``atol`` from the run's start) get average ranks.
 
     Parameters
     ----------
@@ -175,6 +194,10 @@ def wilcoxon_signed_rank(
     alternative:
         ``"two-sided"`` (default); ``"greater"`` tests whether ``a`` tends to
         exceed ``b``; ``"less"`` the reverse.
+    atol:
+        Absolute tolerance below which differences ``|a - b| <= atol`` are
+        treated as zero and dropped, and within which non-zero absolute
+        differences are treated as tied (default 1e-12).
 
     Returns
     -------
@@ -183,9 +206,10 @@ def wilcoxon_signed_rank(
     Raises
     ------
     ValueError
-        If the inputs differ in length, are empty or non-finite, or if every
-        difference is zero (the test is undefined; the rank-biserial
-        correlation is 0 in that case).
+        If the inputs differ in length, are empty or non-finite, if ``atol``
+        is negative or non-finite, or if every difference is zero within
+        ``atol`` (the test is undefined; the rank-biserial correlation is 0
+        in that case).
 
     Examples
     --------
@@ -198,7 +222,8 @@ def wilcoxon_signed_rank(
         raise ValueError(
             f"alternative must be 'two-sided', 'greater' or 'less'; got {alternative!r}."
         )
-    ranks, positive = _signed_ranks(_differences(scores_a, scores_b))
+    tol = _check_atol(atol)
+    ranks, positive = _signed_ranks(_differences(scores_a, scores_b), atol=tol)
     n = int(ranks.size)
     if n == 0:
         raise ValueError("every paired difference is zero, so the signed-rank test is undefined.")
@@ -223,12 +248,18 @@ def wilcoxon_signed_rank(
     return WilcoxonResult(w_plus, p, n, min_p, "normal")
 
 
-def rank_biserial_correlation(scores_a: npt.ArrayLike, scores_b: npt.ArrayLike) -> float:
+def rank_biserial_correlation(
+    scores_a: npt.ArrayLike,
+    scores_b: npt.ArrayLike,
+    *,
+    atol: float = DEFAULT_ATOL,
+) -> float:
     """
     Matched-pairs rank-biserial correlation, the effect size for the
     signed-rank test.
 
-    ``r = (W+ − W−) / (W+ + W−)`` over the non-zero differences (Kerby 2014).
+    ``r = (W+ − W−) / (W+ + W−)`` over the non-zero differences (Kerby 2014),
+    where differences of at most ``atol`` in absolute value are treated as zero.
     It lies in [-1, 1]: ``+1`` when ``a`` beats ``b`` on every fold, ``-1``
     when it loses on every fold, ``0`` when wins and losses balance by rank.
     If every difference is zero the models are indistinguishable and ``0.0``
@@ -238,8 +269,13 @@ def rank_biserial_correlation(scores_a: npt.ArrayLike, scores_b: npt.ArrayLike) 
     ----------
     scores_a, scores_b:
         Paired metric values, one per fold, same length.
+    atol:
+        Absolute tolerance below which differences ``|a - b| <= atol`` are
+        treated as zero and dropped, and within which non-zero absolute
+        differences are treated as tied (default 1e-12).
     """
-    ranks, positive = _signed_ranks(_differences(scores_a, scores_b))
+    tol = _check_atol(atol)
+    ranks, positive = _signed_ranks(_differences(scores_a, scores_b), atol=tol)
     total = float(np.sum(ranks))
     if total == 0.0:
         return 0.0
@@ -344,7 +380,9 @@ def average_ranks(
     """
     matrix = _score_matrix(scores)
     signed = -matrix if higher_is_better else matrix
-    return np.mean([_average_ranks(row) for row in signed], axis=0)
+    # Exact ties only: the round-off tolerance of the signed-rank test is not
+    # applied to the Friedman ranks, whose scores can be of any scale (#687).
+    return np.mean([_average_ranks(row, atol=0.0) for row in signed], axis=0)
 
 
 def _check_ranks(ranks: npt.ArrayLike, n_datasets: int) -> npt.NDArray[np.float64]:
