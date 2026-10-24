@@ -180,7 +180,8 @@ from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _bits
 # torch 2.3 imports torch._dynamo the first time an autograd.Function runs
 # under a torch.func transform, and that import fails there (a circular
 # import, then a random operation inside vmap).  Imported here, outside any
-# transform, it does not; torch 2.4 needs no help.
+# transform, it does not; torch 2.4 needs no help, so this goes once the
+# torch floor reaches 2.4.
 if tuple(int(part) for part in torch.__version__.split(".")[:2]) < (2, 4):
     import torch._dynamo
 
@@ -368,7 +369,8 @@ class _Propagator(torch.autograd.Function):
     """
     ``U(τ) = V e^(−iEτ) V†`` from ``eigh``, or its first column only.
 
-    Differentiated by ``_Frechet`` in both modes, never through ``eigh``.  Returns ``(U, E, V)``; ``E`` and ``V`` are not differentiable.  With
+    Differentiated by ``_Frechet`` in both modes, never through ``eigh``.
+    Returns ``(U, E, V)``; ``E`` and ``V`` are not differentiable.  With
     ``first_column``, ``U e_0`` of shape ``(..., 2^N, 1)``: the state that
     ``|g…g⟩`` evolves to, ``ψ_k = Σ_m V_km e^(−i E_m τ) conj(V_0m)``.
     """
@@ -485,8 +487,9 @@ def evolve(
         ``ρ(t)``, ``complex128``, with the shape and device of
         ``hamiltonian``.  Entry ``[..., a, b]`` is ``⟨a|ρ|b⟩``.  Trace 1,
         Hermitian and positive semidefinite up to rounding, at any step size;
-        the rounding error of the trace grows by a few ``1e-16`` per step
-        (``1.4e-15`` for 6 atoms 0.6 µm apart, ``‖H‖₂ ≈ 6e8`` rad/µs).
+        the rounding error of the trace grows by about ``1e-16`` to ``1e-15``
+        per step (``1.4e-15`` per step for 6 atoms 0.6 µm apart,
+        ``‖H‖₂ ≈ 6e8`` rad/µs).
 
     Raises
     ------
@@ -608,9 +611,10 @@ def evolve(
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the spread E_max - E_min of the energies of the Hamiltonian."
         )
-    # The Hermitian part, which eigh then reads in full: the derivatives of
-    # _Propagator treat every entry of its input as a variable, so it has to be
-    # the matrix that is evolved, not just one triangle of it.
+    # The Hermitian part, whose triangle that eigh reads is the whole matrix:
+    # the derivatives of _Propagator treat every entry of its input as a
+    # variable, so it has to be the matrix that is evolved, not just one
+    # triangle of it.
     h = (h + h.mH) / 2
 
     if gamma == 0 or steps is None:  # no steps only without dephasing, see above
