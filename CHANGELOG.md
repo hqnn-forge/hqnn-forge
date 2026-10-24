@@ -383,7 +383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
-  passing a non-`None` seed warns and directs users to the device's own seeding option (#476)
+  passing a non-`None` seed warns and directs users to the device's own seeding option (#659)
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
   allocating a dense diagonal state tensor; shot estimates are the correctly rounded value of
   `count / S`, guaranteeing bit-for-bit identical results across chunk sizes for the same drawn bitstrings (#617)
