@@ -696,7 +696,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `‖H·t‖`. The propagator now always comes from `eigh`, the same in every autograd mode, and
   is differentiated in its eigenbasis (Daleckii–Krein) in reverse and forward mode. At
   `MAX_ATOMS`, forward and backward take about twice the forward pass, where `matrix_exp`
-  took over 20 times as long and 4.5 times the memory (#674, #PR)
+  took over 20 times as long and 3 to 4.5 times the memory (#674, #697)
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
