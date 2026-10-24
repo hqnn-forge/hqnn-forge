@@ -291,7 +291,7 @@ class TestSweep:
 
     def test_unknown_channel_error_names_readout(self) -> None:
         model = HybridBinaryClassifier(n_input_features=3, n_qubits=3, n_layers=1, **CPU)
-        with pytest.raises(ValueError, match="'phase_flip', 'readout'; got 'readouts'"):
+        with pytest.raises(ValueError, match="'atom_loss', 'readout'; got 'readouts'"):
             noise_sweep(model, _x(), [0.01], channel="readouts")  # type: ignore[arg-type]
 
     def test_every_error_is_checked_before_the_first_evaluation(self) -> None:
