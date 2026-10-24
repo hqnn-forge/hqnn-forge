@@ -900,9 +900,10 @@ def _noise_scores(
                 raise ValueError("retuning needs validation features and labels.")
             if bool(torch.isfinite(val_prob).all()):
                 retuned = float(find_optimal_threshold(y_val, val_prob).threshold)
-        fixed = (
-            float(matthews_corrcoef(y_test, (prob >= threshold).long())) if finite else math.nan
-        )
+        # Legacy noise_mcc keeps main's convention, as _fit_and_score does: NaN
+        # probabilities compare False, so they score as all negative. Only the
+        # per-level records mark non-finite outputs invalid (fixed_mcc None).
+        fixed = float(matthews_corrcoef(y_test, (prob >= threshold).long()))
         scores[float(p)] = fixed
         if results is not None:
             results.append(

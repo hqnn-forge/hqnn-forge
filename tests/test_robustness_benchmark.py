@@ -285,7 +285,9 @@ def test_nonfinite_noisy_predictions_retained(monkeypatch: pytest.MonkeyPatch) -
         y_val=np.array([0, 1]),
         results=rows,
     )
-    assert np.isnan(result[0.2])
+    # Legacy field unchanged from main: NaN scores as negative, so predictions
+    # [0, 0] against labels [0, 1] give the all-negative MCC of 0.
+    assert result[0.2] == 0.0
     assert rows[0]["fixed_mcc"] is None and rows[0]["retuned_mcc"] is None
     assert rows[0]["retuned_threshold"] is None and rows[0]["finite"] is False
 
