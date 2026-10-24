@@ -91,11 +91,14 @@ Both factors are exact, so the only error is that of the splitting.
   ``n = t/dt`` steps is of second order, ``O(t · dt²)``**: halving ``dt``
   divides it by 4.
 * **Its size.**  The ``dt³`` term is built from the double commutators
-  ``[𝓛_D, [𝓛_D, 𝓛_H]]`` and ``[𝓛_H, [𝓛_H, 𝓛_D]]``, of order ``γ² ‖H‖`` and
-  ``γ ‖H‖²``.  ``dt`` therefore has to resolve both ``1/γ`` and the largest
-  level spacing of ``H``, which in the blockade is the interaction ``V``,
-  not Ω.  It vanishes when ``H`` is diagonal (no drive): ``𝓛_H`` then also
-  acts elementwise, the two parts commute and one step is exact.
+  ``[𝓛_D, [𝓛_D, 𝓛_H]]`` and ``[𝓛_H, [𝓛_H, 𝓛_D]]``, of order ``(Nγ)² W``
+  and ``Nγ W²``, with ``W = E_max − E_min`` the spread of the energies of
+  ``H`` (a constant shift of ``H`` leaves ``𝓛_H`` unchanged, so only the
+  spread counts).  ``dt`` therefore has to resolve both the fastest
+  dephasing rate ``Nγ/2`` and ``W``, which in the blockade is set by ``V``,
+  not Ω; :func:`evolve` states the condition.  It vanishes when ``H`` is
+  diagonal (no drive): ``𝓛_H``
+  then also acts elementwise, the two parts commute and one step is exact.
 * **Every step is a physical map** at any ``dt``.  ``U ρ U†`` is unitary
   conjugation.  The damping factor ``exp(−γ τ d_H(a, b)/2)`` is the matrix of
   a product of single-atom dephasing channels: it has a unit diagonal and is
@@ -243,10 +246,11 @@ def evolve(
     n_steps:
         Number of splitting steps, an integer ``>= 1``.  Required when
         ``gamma > 0`` and without a default: the step that is accurate enough
-        depends on γ and on the level spacings of ``H`` (the interaction, in
-        the blockade), which this function does not guess.  Not used when
-        ``gamma = 0``, where no time stepping is needed. Without gradients,
-        the result is exact up to floating-point rounding; with gradients,
+        depends on γ and on the spread ``W = E_max − E_min`` of the energies
+        of ``H`` (set by the interaction, in the blockade), which this
+        function does not guess (see "Choosing ``n_steps``" below).  Not
+        used when ``gamma = 0``, where no time stepping is needed.  Without
+        gradients, the result is exact up to floating-point rounding; with gradients,
         ``matrix_exp`` introduces rounding error that can grow with ``‖H·t‖``
         (#674).
 
@@ -280,10 +284,36 @@ def evolve(
       may be at most ``1e-12`` of the sample's largest ``|H|`` entry, or 100
       machine epsilons of the input's dtype where that is more (``1.2e-5``
       for single precision, and no more than that below it).
-    * **Choosing ``n_steps``.**  Halving ``dt`` divides the error by 4, so
-      two runs with ``n_steps`` and ``2 · n_steps`` differ by about 3/4 of
-      the coarser run's error.  ``dt`` must be small against ``1/γ`` and
-      against the inverse of the largest level spacing of ``H``.
+    * **Choosing ``n_steps``.**  No count is assumed here, and none suits
+      every input (#507).  Once ``dt`` is small, halving it divides the error
+      by 4, so two runs with ``n`` and ``2n`` steps differ by about 3/4 of
+      the coarser run's error, and **the finer run is off by about a third
+      of their difference**.  ``dt`` is small when it resolves the fastest
+      rate of the generator: the rates of ``𝓛_H`` are the differences
+      ``E_k − E_l`` of the energies of ``H`` (``𝓛_H`` maps ``|k⟩⟨l|`` to
+      ``−i (E_k − E_l) |k⟩⟨l|`` in the eigenbasis of ``H``), at most their
+      spread ``W = E_max − E_min``, and those of ``𝓛_D`` are
+      ``(γ/2) d_H(a, b)`` for basis states ``a``, ``b``, at most ``Nγ/2``.
+      The two parts do not commute, so ``W + Nγ/2`` bounds the rates of the
+      generator rather than adding up shared ones.  With
+      ``dt · (W + Nγ/2) <= 1/2`` for the coarser run, the finer run's largest
+      error over the features ``⟨n_i⟩``, ``⟨n_i n_j⟩`` was within 10 % of a
+      third of their largest difference in 99 % of the cases of five seeded
+      sweeps of 300 cases each (#627): 1, 2 and 4 atoms, ``V/Ω`` from 0 to
+      100, ``γ/Ω`` from 0.1 to 100, ``ΩT`` from π to 16π, detunings within
+      ``±2 Ω``.  It is an estimate, not a bound: single atoms reached 1.6
+      times it in the sweeps, and 0.8 at a point outside them.  A single
+      feature's error was 0.84 to 5.0 times a third of its own difference,
+      and at ``dt · (W + Nγ/2) <= 1`` the largest error was up to 3.5 times
+      the estimate.  Errors below about
+      ``1e-10`` stop falling by 4 per halving, as rounding takes over, and
+      there the estimate says nothing.  That is a condition for trusting the
+      estimate, not the count the features need, which can be far smaller.
+      **Before it holds, two runs can agree while both are wrong**: one
+      resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω`` ends with ``⟨n⟩ = 0`` to
+      rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
+      of those steps is a whole number of π pulses, so between steps the
+      atom is in ``|g⟩`` or ``|r⟩`` and leaves no coherence to dephase.
     * **Cost.** Without gradients, one eigendecomposition per sample, then two
         ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
         gradients are required, one ``matrix_exp`` per sample replaces the
@@ -344,7 +374,7 @@ def evolve(
         raise ValueError(
             "n_steps is required when gamma > 0: the splitting has an error of order "
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
-            "the level spacings of the Hamiltonian."
+            "the spread E_max - E_min of the energies of the Hamiltonian."
         )
     h = (h + h.mH) / 2
     use_matrix_exp = torch.is_grad_enabled() and h.requires_grad
