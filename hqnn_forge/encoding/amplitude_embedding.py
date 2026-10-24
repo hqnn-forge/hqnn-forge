@@ -368,10 +368,10 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         Training-time noise, exactly as for
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`: ``noise_level``
         is the strength of ``noise_channel`` (default ``"depolarizing"``), in
-        ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping and flip
+        ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping, flip and loss
         channels (default 0, noiseless), applied in train mode only, at
         ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
-        or by trajectories (amplitude damping with restrictions).  See
+        or by trajectories (amplitude damping and atom loss with restrictions).  See
         :mod:`hqnn_forge.noise`.
     readout_error:
         A train-mode readout error ``(p01, p10)`` on the outputs, exactly as

@@ -388,6 +388,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RYDBERG_BLOCKADE_RADIUS` = 8.69 µm, so CZ on neighbours only, in `min(3, n_qubits − 1)`
   parallel layers per block), and `CircuitSummary.n_blockade_layers`, which counts those layers
   (`None` for the other entanglers) (#418, #643)
+- `channel="atom_loss"` (`noise_channel=` on the layers and classifiers): neutral-atom atom
+  loss read out as `|1⟩`, exactly `qml.ResetError(p0=0, p1=p)`, so ⟨Z⟩ → (1 − p)⟨Z⟩ − p at
+  `position="end"`; post hoc through `apply_depolarizing_noise` and `noise_sweep`, for training
+  with `noise_method="density"` or as weighted Kraus trajectories with the amplitude-damping
+  restrictions (#419)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;

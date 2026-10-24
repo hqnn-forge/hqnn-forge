@@ -481,7 +481,7 @@ hqnn_forge/
 │                    under dephasing (Lindblad solver, excitation readout); a fixed feature map
 │                    from inputs to excitation probabilities, exact or from shots
 ├── kernels.py       Quantum kernel matrices from the encoding layers (QSVM)
-├── noise.py         Noise channels (depolarizing, damping, flips), post hoc or during training
+├── noise.py         Noise channels (depolarizing, damping, flips, atom loss), post hoc or during training
 └── sklearn.py       scikit-learn estimator wrapper (cross_val_score, GridSearchCV, Pipeline);
                      needs the `sklearn` extra
 ```
