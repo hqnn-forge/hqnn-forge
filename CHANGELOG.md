@@ -392,7 +392,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under a piecewise-constant global pulse with trainable Rabi frequency, detuning and phase per
   segment (bounded by reparameterisation), each input in one atom's local detuning, simulated
   and differentiated in torch; `rydberg_hamiltonian` takes a drive `phase` (default 0)
-  (#420, #PR)
+  (#420, #698)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
