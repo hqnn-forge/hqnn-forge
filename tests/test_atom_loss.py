@@ -149,15 +149,14 @@ def _hand_built(theta: tuple[float, float, float], p: float, position: str) -> n
 
 
 class TestDensity:
-    @pytest.mark.parametrize("p", [0.0, 0.1, 0.35, 1.0])
+    @pytest.mark.parametrize("p", [0.1, 0.35, 1.0])
     @pytest.mark.parametrize("theta", [0.0, 0.9, math.pi / 2, 2.5, math.pi])
     def test_single_qubit_closed_form(self, theta: float, p: float) -> None:
         # ⟨Z⟩ = cos θ before the loss; (1 − p) cos θ − p after it.  One gate,
-        # so "all" and "end" place the same single site.
+        # so "all" and "end" place the same single site.  p = 0 is the
+        # noiseless model, checked bit for bit in the eval-mode test below.
         qnode = _one_qubit()
         for position in ("all", "end"):
-            if p == 0.0:
-                continue  # training_noise_qnode needs p > 0
             noisy = training_noise_qnode(qnode, 1, p, position, channel="atom_loss")
             got = float(noisy(torch.tensor(theta, dtype=torch.float64)))
             assert got == pytest.approx((1 - p) * math.cos(theta) - p, abs=1e-12)
@@ -350,6 +349,27 @@ class TestTrajectories:
         torch.testing.assert_close(
             out, torch.tensor([math.cos(theta), -2 * c2, -2 * s2], dtype=torch.float64)
         )
+
+    def test_amplitude_damping_branches_as_before_the_generalisation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Before #419 the jump was ``torch.rand(shape) < q``: a float32 uniform
+        # against q rounded to float32.  At γ = 0.9, q = 0.45 rounds down to
+        # r = 0.449999988..., a value torch.rand can return; r < q in float64
+        # but not in float32, so the old draw took branch 0 (no jump), and the
+        # generalised sampler must too.  Branch 0 applies
+        # diag(1, sqrt(1 − γ)) / sqrt(1 − q) to RY(θ)|0⟩:
+        # ⟨Z⟩ = (cos²(θ/2) − (1 − γ) sin²(θ/2)) / (1 − q).  The jump would read
+        # γ sin²(θ/2) / q = 2 sin²(θ/2) instead.
+        gamma, theta = 0.9, 0.9
+        q = gamma / 2
+        r = torch.tensor(q, dtype=torch.float32)
+        assert float(r) < q and not bool(r < q)
+        noisy = trajectory_noise_qnode(_one_qubit(), gamma, "end", channel="amplitude_damping")
+        monkeypatch.setattr(torch, "rand", lambda *shape, **kwargs: r.clone())
+        got = float(noisy(torch.tensor(theta, dtype=torch.float64)))
+        c2, s2 = math.cos(theta / 2) ** 2, math.sin(theta / 2) ** 2
+        assert got == pytest.approx((c2 - (1 - gamma) * s2) / (1 - q), abs=1e-12)
 
     @pytest.mark.parametrize("position", ["all", "end"])
     def test_monte_carlo_mean_matches_density(self, position: Position) -> None:

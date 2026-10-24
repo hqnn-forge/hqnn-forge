@@ -504,13 +504,16 @@ def _kraus_trajectories(
     # One uniform r per sample and site: branch 1 for r < q_1, branch 2 for
     # q_1 ≤ r < q_1 + q_2, ..., branch 0 for r ≥ Σ q_i.  bucketize counts the
     # edges at or below r, so branch = (count + 1) mod (number of branches);
-    # with one jump branch this is ``r < q``, as before #419.
+    # with one jump branch this is ``r < q``, as before #419.  The edges are
+    # cast to r's dtype, as the scalar ``q`` was in that comparison, so the
+    # same uniforms give the same branches bit for bit (in float64 a uniform
+    # between q and its float32 rounding would switch branch).
     edges = torch.tensor(np.cumsum(q), dtype=torch.float64)
     n_branches = len(q) + 1
 
     def kraus_branch(wires: object) -> None:
         r = torch.rand(shape)
-        u = (torch.bucketize(r.to(torch.float64), edges, right=True) + 1) % n_branches
+        u = (torch.bucketize(r, edges.to(r.dtype), right=True) + 1) % n_branches
         qml.QubitUnitary(matrices[u], wires=wires, unitary_check=False)
 
     return qml.noise.insert(tape, kraus_branch, (), position=position)
