@@ -388,6 +388,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RYDBERG_BLOCKADE_RADIUS` = 8.69 µm, so CZ on neighbours only, in `min(3, n_qubits − 1)`
   parallel layers per block), and `CircuitSummary.n_blockade_layers`, which counts those layers
   (`None` for the other entanglers) (#418, #643)
+- A results page, `docs/results/rydberg-features-benchmark.md`, with the summary script
+  `examples/summarise_rydberg_benchmark.py`: one run of `examples/benchmark_rydberg_features.py`
+  over the `V/Ω` and `γ/Ω` grid on the positive control and Iranian Churn, 13 folds so that the
+  Holm-corrected exact Wilcoxon test can reach α = 0.05 (#502)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
