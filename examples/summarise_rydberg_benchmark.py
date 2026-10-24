@@ -15,12 +15,15 @@ Markdown:
   feature simulation and of the final fit over the lines that computed them.
 * **A against B** paired by fold, per head and grid point, and **every arm
   against each classical baseline** (arm C with the linear and with the MLP
-  head), paired by fold: mean MCC difference, the exact two-sided Wilcoxon
-  signed-rank p-value (:func:`hqnn_forge.evaluation.wilcoxon_signed_rank`),
-  the rank-biserial effect and the Holm-adjusted p-value
-  (:func:`hqnn_forge.evaluation.holm_correction`).  **All comparisons of one
-  dataset form one Holm family**; an undefined test (every pair tied)
-  counts as ``p = 1`` in it, as ``docs/methodology.md`` prescribes.
+  head), paired by fold, as ``V/Ω`` × ``γ/Ω`` grids of the mean MCC
+  difference and its Holm-adjusted p-value
+  (:func:`hqnn_forge.evaluation.holm_correction` over the exact two-sided
+  Wilcoxon signed-rank p-values of
+  :func:`hqnn_forge.evaluation.wilcoxon_signed_rank`).  ``--long`` adds one
+  row per comparison with the pairs left after ties, the exact p-value, its
+  floor and the rank-biserial effect.  **All comparisons of one dataset form
+  one Holm family**; an undefined test (every pair tied) counts as ``p = 1``
+  in it, as ``docs/methodology.md`` prescribes.
 * **Mechanism**: the separation measures of arms A and B on the real
   training rows, averaged over folds per grid point, and for each measure
   the Spearman rank correlation across the grid points between its A − B
@@ -31,7 +34,11 @@ Markdown:
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
-        docs/results/rydberg_features_benchmark.jsonl
+        docs/results/rydberg_features_benchmark.jsonl.xz
+
+The committed file is the runner's JSONL, xz-compressed; the runner's
+``read_records``, which this script reads through, opens a ``.xz`` path with
+:mod:`lzma` and any other path as plain text.
 """
 
 from __future__ import annotations
@@ -299,6 +306,50 @@ def comparison_table(family: Sequence[Mapping[str, Any]], kind: str) -> str:
     return "\n".join(lines)
 
 
+def _cell(c: Mapping[str, Any]) -> str:
+    mark = " ✓" if c["p_holm"] <= ALPHA else ""
+    return f"{c['mean_diff']:+.3f} ({_p(c['p_holm'])}{mark})"
+
+
+def grid_table(family: Sequence[Mapping[str, Any]], kind: str, head: str, against: Key) -> str:
+    """Arm A's comparisons of one head as a ``V/Ω`` × ``γ/Ω`` grid: ΔMCC (Holm p)."""
+    cells = {
+        (c["a"][2], c["a"][3]): c
+        for c in family
+        if c["kind"] == kind
+        and c["a"][0] == "A"
+        and c["a"][1] == head
+        and c["b"][:2] == against[:2]
+    }
+    vs = sorted({v for v, _ in cells})
+    gammas = sorted({g for _, g in cells})
+    lines = [
+        "| V/Ω | " + " | ".join(f"γ/Ω = {g:g}" for g in gammas) + " |",
+        "|---|" + "---|" * len(gammas),
+    ]
+    for v in vs:
+        entries = [_cell(cells[(v, g)]) if (v, g) in cells else "–" for g in gammas]
+        lines.append(f"| {v:g} | " + " | ".join(entries) + " |")
+    return "\n".join(lines)
+
+
+def other_arms_table(family: Sequence[Mapping[str, Any]]) -> str:
+    """Every arm row except A against each baseline: ΔMCC (Holm p)."""
+    rows: dict[Key, dict[Key, Mapping[str, Any]]] = {}
+    for c in family:
+        if c["kind"] == "arm − baseline" and c["a"][0] != "A":
+            rows.setdefault(c["a"], {})[c["b"]] = c
+    bases: list[Key] = [(*b, None, None) for b in BASELINES]
+    lines = [
+        "| arm | " + " | ".join(f"against {_label(b)}" for b in bases) + " |",
+        "|---|" + "---|" * len(bases),
+    ]
+    for key in sorted(rows, key=_sort):
+        entries = [_cell(rows[key][b]) if b in rows[key] else "–" for b in bases]
+        lines.append(f"| {_label(key)} | " + " | ".join(entries) + " |")
+    return "\n".join(lines)
+
+
 def _mean_measure(folds: Mapping[int, Mapping[str, Any]], measure: str, part: str) -> float:
     values = [float(r["separation"][part][measure]) for r in folds.values()]
     finite = [x for x in values if math.isfinite(x)]
@@ -352,9 +403,13 @@ def mechanism_tables(
 
 
 def summarise(
-    records: Sequence[Mapping[str, Any]], *, permutations: int = 10_000, seed: int = 0
+    records: Sequence[Mapping[str, Any]],
+    *,
+    permutations: int = 10_000,
+    seed: int = 0,
+    long: bool = False,
 ) -> str:
-    """The Markdown tables of every dataset in ``records``."""
+    """The Markdown tables of every dataset in ``records``; ``long`` adds one row per test."""
     by_dataset: dict[str, list[Mapping[str, Any]]] = {}
     for r in records:
         by_dataset.setdefault(r["dataset"], []).append(r)
@@ -379,12 +434,46 @@ def summarise(
             "",
             "### A against B (MCC, paired by fold)",
             "",
-            comparison_table(family, "A − B"),
+            "Mean ΔMCC = A − B over the folds (Holm-adjusted p; ✓: at most α).",
             "",
+        ]
+        for head in heads:
+            sections += [
+                f"Head `{head}`:",
+                "",
+                grid_table(family, "A − B", head, ("B", head, None, None)),
+                "",
+            ]
+        sections += [
             "### Every arm against the classical baselines (MCC, paired by fold)",
             "",
-            comparison_table(family, "arm − baseline"),
+            "Mean ΔMCC = arm − baseline (Holm-adjusted p; ✓: at most α).",
             "",
+        ]
+        for head in heads:
+            for base in BASELINES:
+                sections += [
+                    f"Arm A, head `{head}`, against {base[0]}/{base[1]}:",
+                    "",
+                    grid_table(family, "arm − baseline", head, (*base, None, None)),
+                    "",
+                ]
+        sections += [
+            "The other arms:",
+            "",
+            other_arms_table(family),
+            "",
+        ]
+        if long:
+            sections += [
+                "### Every comparison",
+                "",
+                comparison_table(family, "A − B"),
+                "",
+                comparison_table(family, "arm − baseline"),
+                "",
+            ]
+        sections += [
             "### Separation measures (real training rows, mean over folds)",
             "",
             mechanism_tables(rows, part="train", permutations=permutations, seed=seed, heads=heads)
@@ -401,13 +490,22 @@ def main(
     read: Callable[[Path], list[dict[str, Any]]] = read_records,
 ) -> str:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[1])
-    parser.add_argument("results", type=Path, help="JSON lines of benchmark_rydberg_features.py")
+    parser.add_argument(
+        "results", type=Path, help="JSON lines of benchmark_rydberg_features.py, or .jsonl.xz"
+    )
     parser.add_argument(
         "--permutations", type=int, default=10_000, help="draws of the permutation p-values"
     )
     parser.add_argument("--seed", type=int, default=0, help="seed of the permutation draws")
+    parser.add_argument(
+        "--long",
+        action="store_true",
+        help="also print every comparison as a row: n, W pairs, exact p, its floor, effect",
+    )
     args = parser.parse_args(argv)
-    text = summarise(read(args.results), permutations=args.permutations, seed=args.seed)
+    text = summarise(
+        read(args.results), permutations=args.permutations, seed=args.seed, long=args.long
+    )
     print(text)
     return text
 

@@ -159,6 +159,8 @@ def test_a_tie_in_every_fold_is_undefined_and_counts_as_one() -> None:
 def test_summarise_prints_the_tracking_correlation() -> None:
     text = summary.summarise(_records(), permutations=99)
     assert "Holm family: 8 comparisons" in text
+    # The A − B grid: ΔMCC 0.36 over the 13 folds, Holm p 8 · 2/2^13, significant.
+    assert "| 1 | +0.360 (0.0020 ✓) |" in text
     # Two grid points are too few for a rank correlation: it is reported as missing, with n.
     assert "| linear | fisher_ratio | – | 2 | – |" in text
     # The Fisher ratio of A at V/Ω = 1 (2 in every fold) beside that of B (0.5).

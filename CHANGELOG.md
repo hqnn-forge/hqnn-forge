@@ -391,7 +391,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A results page, `docs/results/rydberg-features-benchmark.md`, with the summary script
   `examples/summarise_rydberg_benchmark.py`: one run of `examples/benchmark_rydberg_features.py`
   over the `V/Ω` and `γ/Ω` grid on the positive control and Iranian Churn, 13 folds so that the
-  Holm-corrected exact Wilcoxon test can reach α = 0.05 (#502)
+  Holm-corrected exact Wilcoxon test can reach α = 0.05, with its raw output xz-compressed as
+  `docs/results/rydberg_features_benchmark.jsonl.xz`. The interactions helped a linear head on
+  the positive control and added nothing usable on Iranian Churn. The runner's `read_records`
+  now also reads a `.xz` file (#502, #703)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
