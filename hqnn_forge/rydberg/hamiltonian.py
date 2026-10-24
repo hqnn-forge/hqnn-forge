@@ -288,10 +288,13 @@ def rydberg_hamiltonian(
     h = torch.diag_embed(diagonal.to(torch.complex128))
     # Drive: Ω_i/2 · e^{iφ_i} at (k, k XOR 2^(n-1-i)), the index with atom i's
     # bit flipped, where b_i(k) = 0 (|g⟩ in the row), and its conjugate where
-    # b_i(k) = 1.  e^{iφ} = cos φ + i sin φ, exactly 1 + 0i at φ = 0.
+    # b_i(k) = 1.  e^{iφ} = cos φ + i sin φ, exactly 1 + 0i at φ = 0.  The
+    # conjugate of a zero imaginary part is −0.0; adding 0 turns it back into
+    # +0.0, so at φ = 0 even the sign bits are those of the real matrix.
     up = (omega / 2) * torch.polar(torch.ones_like(phase), phase)
+    down = up.conj() + 0.0
     for i in range(n):
         h[..., index, index ^ (1 << (n - 1 - i))] = torch.where(
-            bits[:, i] == 0, up[..., i, None], up[..., i, None].conj()
+            bits[:, i] == 0, up[..., i, None], down[..., i, None]
         )
     return h

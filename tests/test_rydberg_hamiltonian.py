@@ -611,6 +611,9 @@ class TestPhase:
             before, rydberg_hamiltonian(self.REGISTER, 2.0, delta, c6=DEFAULT_C6, phase=0.0)
         )
         assert torch.equal(before.imag, torch.zeros_like(before.imag))
+        # torch.equal takes −0.0 for 0.0; the real matrix converted to
+        # complex128 (the matrix before the phase existed) has +0.0 throughout.
+        assert not bool(torch.signbit(before.imag).any())
 
     @pytest.mark.parametrize("per_atom", [False, True])
     def test_matches_pennylane_with_x_and_y(self, per_atom: bool) -> None:
