@@ -156,6 +156,32 @@ def test_a_tie_in_every_fold_is_undefined_and_counts_as_one() -> None:
     assert only["p_holm"] == 1.0
 
 
+def test_tracking_pairs_a_minus_b_of_measure_and_mcc_per_grid_point() -> None:
+    """ρ is +1 where A − B of a measure rises with A − B of MCC, −1 where it falls."""
+    records = []
+    for fold in range(N_FOLDS):
+        records.append(_line("B", "linear", fold, 0.1, v=1.0, gamma=0.0))
+        for k, v in enumerate((1.0, 3.0, 10.0, 30.0)):
+            # ΔMCC = 0.1 k; ΔFisher = (1 + k) − 0.5 rises with it, Δrank = −0.5 k falls.
+            records.append(
+                _line(
+                    "A",
+                    "linear",
+                    fold,
+                    0.1 + 0.1 * k,
+                    v=v,
+                    gamma=0.0,
+                    fisher_ratio=1.0 + k,
+                    effective_rank=3.0 - 0.5 * k,
+                )
+            )
+    text = summary.mechanism_tables(
+        summary._rows(records), part="train", permutations=99, seed=0, heads=["linear"]
+    )
+    assert "| linear | fisher_ratio | 1.00 | 4 |" in text
+    assert "| linear | effective_rank | -1.00 | 4 |" in text
+
+
 def test_summarise_prints_the_tracking_correlation() -> None:
     text = summary.summarise(_records(), permutations=99)
     assert "Holm family: 8 comparisons" in text
