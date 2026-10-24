@@ -7,7 +7,9 @@ Every expected value here is obtained another way than through the code under
 test: the single-qubit closed form ``⟨Z⟩ → (1 − p)⟨Z⟩ − p``, its two-qubit
 correlator, a density matrix built by hand in NumPy, an enumeration of every
 trajectory branch weighted by its probability, and a Monte Carlo mean within
-a stated number of standard errors.
+a stated number of standard errors.  The erasure derivation in the module
+docstring (#702) is checked the same way: the kept fraction ``(1 − p)^k``
+computed by hand, and the no-loss branch against the noiseless circuit.
 
 Index conventions, as in PennyLane: wire 0 is the most significant bit of a
 basis index, ``|0⟩`` has ``Z = +1`` and ``|1⟩`` (the dark state a lost atom
@@ -387,6 +389,89 @@ class TestTrajectories:
                 noise_channel="atom_loss",
                 noise_method="trajectories",
             )
+
+
+class TestErasureDerivation:
+    """
+    The module docstring's erasure derivation (#702): post-selecting on no
+    loss at any of the ``k`` sites keeps a fraction ``(1 − p)^k`` of the
+    samples, and a kept sample's output and gradient are the noiseless ones.
+    """
+
+    @pytest.mark.parametrize("position", ["all", "end"])
+    def test_the_no_loss_branch_is_the_noiseless_circuit(
+        self, position: Position, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The circuit has 5 sites at "all" (1 + 1 + 2 + 1 gate wires) and 2 at
+        # "end".  At p = 0.3, by hand: 0.7^5 = 0.16807 and 0.7^2 = 0.49.
+        p = 0.3
+        kept = {"all": 0.16807, "end": 0.49}[position]
+        n_sites = {"all": 5, "end": 2}[position]
+        combos = torch.tensor(list(itertools.product(range(3), repeat=n_sites)))
+        prob = torch.tensor((1 - p, p / 2, p / 2), dtype=torch.float64)[combos].prod(1)
+        no_loss = (combos == 0).all(1)
+        assert int(no_loss.sum()) == 1
+        assert float(prob[no_loss].sum()) == pytest.approx(kept, abs=1e-12)
+
+        noisy = trajectory_noise_qnode(_two_qubit(), p, position, channel="atom_loss")
+        _, forced = _forced_branches(combos, p / 2, p / 2)
+        monkeypatch.setattr(torch, "rand", forced)
+        theta = torch.tensor(THETA, dtype=torch.float64, requires_grad=True)
+        out = torch.stack(noisy(theta.expand(len(combos), 3)), -1)
+        # The renormalised post-selected output: Σ over no-loss rows of
+        # prob · out, divided by the kept fraction.
+        conditional = (prob[no_loss, None] * out[no_loss]).sum(0) / prob[no_loss].sum()
+        conditional.sum().backward()
+        assert theta.grad is not None
+        monkeypatch.undo()
+
+        clean_theta = torch.tensor(THETA, dtype=torch.float64, requires_grad=True)
+        clean = torch.stack(_two_qubit()(clean_theta))
+        clean.sum().backward()
+        torch.testing.assert_close(
+            conditional, torch.tensor(_hand_built(THETA, 0.0, position)), atol=1e-12, rtol=0
+        )
+        torch.testing.assert_close(conditional, clean, atol=1e-12, rtol=0)
+        torch.testing.assert_close(theta.grad, clean_theta.grad, atol=1e-12, rtol=0)
+
+    def test_monte_carlo_kept_fraction_and_conditional_mean(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 4000 draws at "all" (5 sites), p = 0.1.  A draw is flagged when any
+        # site took a jump (its uniform is below p).  The kept fraction lies
+        # within Z binomial standard errors of 0.9^5 = 0.59049, and the mean
+        # output of the kept draws equals the noiseless value: they are the
+        # noiseless circuit, so not a Monte Carlo estimate but exact.
+        p, draws, n_sites = 0.1, 4000, 5
+        noisy = trajectory_noise_qnode(_two_qubit(), p, "all", channel="atom_loss")
+        real_rand = torch.rand
+        uniforms: list[torch.Tensor] = []
+
+        def recording(*shape: Any, **kwargs: Any) -> torch.Tensor:
+            r = real_rand(*shape, **kwargs)
+            uniforms.append(r)
+            return r
+
+        monkeypatch.setattr(torch, "rand", recording)
+        torch.manual_seed(3)
+        with torch.no_grad():
+            out = torch.stack(noisy(torch.tensor(THETA, dtype=torch.float64).expand(draws, 3)), -1)
+        monkeypatch.undo()
+        assert len(uniforms) == n_sites
+        flagged = (torch.stack(uniforms, 1) < p).any(1)
+        kept = 1 - flagged.double().mean()
+        expected = 0.9**5
+        assert expected == pytest.approx(0.59049, abs=1e-15)
+        se = math.sqrt(expected * (1 - expected) / draws)
+        assert abs(float(kept) - expected) <= Z * se
+        clean = torch.tensor(_hand_built(THETA, 0.0, "all"))
+        kept_out = out[~flagged]
+        # Every kept draw is the noiseless value to rounding (zero spread), so
+        # the conditional mean is held to 1e-12 rather than to Z SE.
+        torch.testing.assert_close(kept_out, clean.expand_as(kept_out), atol=1e-12, rtol=0)
+        # The flagged draws are not: their mean is far from the clean value,
+        # so the post-selection is what makes the difference.
+        assert ((out[flagged].mean(0) - clean).abs() > 0.05).any()
 
 
 class TestValidation:

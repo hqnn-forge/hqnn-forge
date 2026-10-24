@@ -102,9 +102,20 @@ trajectories the channel is sampled by weighted Kraus branches, like
 amplitude damping (see *Damping channels as trajectories* below), with the
 same restrictions: branch 0 is the identity, drawn with ``1 − p``, so a draw
 without loss is the noiseless circuit exactly, and the two jumps, drawn with
-``p/2`` each, apply ``sqrt(2) |1⟩⟨0|`` and ``sqrt(2) |1⟩⟨1|``.  A loss that
-imaging detects, so that the lost samples can be discarded (an *erasure*),
-is not modelled.
+``p/2`` each, apply ``sqrt(2) |1⟩⟨0|`` and ``sqrt(2) |1⟩⟨1|``.
+
+A loss that imaging detects, so that the lost samples can be discarded (an
+*erasure*), is not a channel here (#702), because what it does to the model
+follows from the operators above.  The no-loss operator ``sqrt(1 − p) I``
+does not depend on the state.  Post-selecting on no loss at any of the
+``k`` sites therefore leaves ``(1 − p)^k U ρ U†``, where ``U`` is the
+noiseless circuit and ``k`` is the number of sites (``n_qubits`` at
+``"end"``, the sum of the gate widths at ``"all"``).  Renormalising by the
+no-loss probability ``(1 − p)^k``, which does not depend on θ, gives the
+noiseless state exactly.  A kept sample's ⟨O⟩ and its gradient are the
+noiseless ones, and the kept fraction is ``(1 − p)^k``.  Without the
+renormalisation, the flag would scale outputs and gradients by the constant
+``(1 − p)^k``.
 
 ``p = 0`` replaces nothing: the original QNode stays in place, so the output
 is bit-identical to the noiseless model rather than merely close to it.  It
