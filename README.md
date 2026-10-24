@@ -387,7 +387,7 @@ Options shared by both models:
 
 - `encoding_type="angle"` (default), `"iqp"` (Havlíček-style feature map with pairwise
   `x_i x_j` phases), `"reuploading"` (the angle embedding repeated before every variational
-  layer, with optional `trainable_input_scaling`) or `"amplitude"` (the classical encoder maps
+  layer, with optional `trainable_input_scaling`), `"amplitude"` (the classical encoder maps
   to `2**n_qubits` amplitudes, which needs `diff_method="backprop"`; without the encoder, 1 to
   `2**n_qubits` raw features are zero-padded) or `"analog"` (no gates: a Rydberg atom chain
   under a trainable piecewise-constant pulse of `n_layers` segments, each feature in one atom's
