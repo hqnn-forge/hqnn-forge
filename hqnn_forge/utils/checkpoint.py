@@ -151,6 +151,9 @@ _LEGACY_DEFAULTS: dict[str, Any] = {
     "noise_channel": "depolarizing",  # the only channel before #313
     "seed": None,  # the device's generator unseeded, as before #354
     "readout_error": None,  # no training-time readout error before #358
+    "atom_register": None,  # entangler="rydberg" ran on rydberg_chain(n_qubits)
+    "blockade_radius": None,  # at RYDBERG_BLOCKADE_RADIUS, without CCZ, before
+    "ccz": False,  # #644; the three are inert under every other entangler
 }
 
 #: Constructor arguments added deliberately without a legacy default: no value

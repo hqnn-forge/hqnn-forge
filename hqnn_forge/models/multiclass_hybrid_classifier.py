@@ -74,7 +74,7 @@ use_classical_encoder, dropout_p, device_name, diff_method, init_strategy,
 encoding_type, embedding_rotation, entangler, readout, encoder_activation,
 init_std, noise_level, noise_position, noise_method, noise_trajectories,
 trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel, seed,
-readout_error:
+readout_error, atom_register, blockade_radius, ccz:
     As for :class:`~hqnn_forge.models.HybridBinaryClassifier`.
 """
 
@@ -85,6 +85,7 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
+from hqnn_forge.encoding._common import AtomRegisterLike
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
     DiffMethod,
@@ -92,7 +93,12 @@ from hqnn_forge.encoding.angle_embedding import (
     Readout,
     RotationAxis,
 )
-from hqnn_forge.models._trunk import DEFAULT_ENCODER_ACTIVATION, DEFAULT_INIT_STD, QuantumTrunk
+from hqnn_forge.models._trunk import (
+    DEFAULT_ENCODER_ACTIVATION,
+    DEFAULT_INIT_STD,
+    QuantumTrunk,
+    neutral_atom_config,
+)
 from hqnn_forge.models.base import ClassifierBase
 from hqnn_forge.noise import Channel, NoiseMethod, Position, validate_readout_error
 from hqnn_forge.utils.rng import as_seed, seeded_rng
@@ -122,7 +128,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     init_strategy, encoding_type, embedding_rotation, entangler, readout,
     encoder_activation, init_std, noise_level, noise_position, noise_method,
     noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel, seed,
-    readout_error:
+    readout_error, atom_register, blockade_radius, ccz:
         The trunk's options, exactly as for
         :class:`~hqnn_forge.models.HybridBinaryClassifier`.  With
         ``readout="first"`` every class head reads ⟨Z_0⟩ alone.
@@ -184,12 +190,19 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
         seed = as_seed(seed, "seed")
         # Plain floats: _config goes into the checkpoint as it is.
         readout_error = validate_readout_error(readout_error)
+        # Primitives: _config goes into the checkpoint as it is.
+        atom_register, blockade_radius, ccz = neutral_atom_config(
+            atom_register, blockade_radius, ccz
+        )
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
@@ -224,6 +237,9 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
 
             if n_classes < 2:
@@ -259,6 +275,9 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
 
             # ── Class heads: one row per class ────────────────────────────────

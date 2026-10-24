@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 
 from hqnn_forge.encoding._common import (
+    AtomRegisterLike,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -44,9 +45,11 @@ from hqnn_forge.encoding._common import (
     check_inputs,
     expand_batch_dimension,
     measure_z,
+    neutral_atom_repr,
     readout_wires,
     resolve_backend,
     resolve_device,
+    resolve_neutral_atom_options,
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
@@ -69,6 +72,10 @@ def _make_iqp_embedding_circuit(
     n_repeats: int = 1,
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
     """
     Factory returning the bare quantum function for the IQP embedding.
@@ -86,11 +93,15 @@ def _make_iqp_embedding_circuit(
     Called inside a QNode it records one ``qml.expval(PauliZ)`` measurement per
     readout wire; the QNode turns them into the expectation values.
 
-    ``entangler`` and ``readout`` are as in
+    ``entangler``, ``atom_register``, ``blockade_radius``, ``ccz`` and
+    ``readout`` are as in
     :func:`hqnn_forge.encoding.angle_embedding.apply_variational_layers` and
     :func:`~hqnn_forge.encoding.angle_embedding.measure_z`.
     """
     validate_circuit_options(n_qubits, entangler, readout)
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits, entangler, atom_register, blockade_radius, ccz
+    )
     # All-to-all entangling pattern, the same as qml.IQPEmbedding(pattern=None)
     pairs = list(combinations(range(n_qubits), 2))
 
@@ -130,7 +141,15 @@ def _make_iqp_embedding_circuit(
                 qml.CNOT(wires=[i, j])
 
         # ── 2 & 3. Variational layers, then ⟨Z⟩ on the readout wires ─────
-        apply_variational_layers(weights, n_qubits, n_layers, entangler)
+        apply_variational_layers(
+            weights,
+            n_qubits,
+            n_layers,
+            entangler,
+            atom_register=register,
+            blockade_radius=radius,
+            ccz=ccz,
+        )
         return measure_z(n_qubits, readout)
 
     return circuit
@@ -146,6 +165,10 @@ def build_iqp_qnode(
     readout: Readout = "all",
     shots: int | None = None,
     seed: int | None = None,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> qml.QNode:
     """Build and return a PennyLane QNode for the IQP feature map."""
     if n_qubits < 2:
@@ -155,7 +178,16 @@ def build_iqp_qnode(
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits, seed=seed)
     validate_device_shots(device, shots)
-    circuit_fn = _make_iqp_embedding_circuit(n_qubits, n_layers, n_repeats, entangler, readout)
+    circuit_fn = _make_iqp_embedding_circuit(
+        n_qubits,
+        n_layers,
+        n_repeats,
+        entangler,
+        readout,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
+    )
 
     qnode = qml.QNode(
         func=circuit_fn,
@@ -172,7 +204,8 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
     """
     A PyTorch nn.Module wrapping the IQP-embedding QNode.
 
-    ``entangler`` and ``readout`` are the options of
+    ``entangler``, ``atom_register``, ``blockade_radius``, ``ccz`` and
+    ``readout`` are the options of
     :class:`~hqnn_forge.encoding.QuantumEncodingLayer`; the output width is
     ``n_outputs`` (``n_qubits``, or 1 with ``readout="first"``), and the
     input width ``n_features`` is ``n_qubits``, one feature per qubit.
@@ -202,6 +235,10 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        *,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
 
@@ -212,6 +249,9 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
+        self.atom_register, self.blockade_radius, self.ccz = resolve_neutral_atom_options(
+            n_qubits, entangler, atom_register, blockade_radius, ccz
+        )
 
         qnode = build_iqp_qnode(
             n_qubits=n_qubits,
@@ -223,6 +263,9 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
             readout=readout,
             shots=shots,
             seed=seed,
+            atom_register=self.atom_register,
+            blockade_radius=self.blockade_radius,
+            ccz=self.ccz,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
@@ -268,6 +311,7 @@ class IQPEncodingLayer(TrainingNoiseMixin, nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
+        options += neutral_atom_repr(self)
         options += self._noise_repr()
         return (
             f"n_qubits={self.n_qubits}, "

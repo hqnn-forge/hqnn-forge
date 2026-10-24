@@ -153,7 +153,9 @@ class ClassifierBase(nn.Module):
         A module argument (a custom ``classical_encoder``) is deep-copied, so
         a model built from the config does not share it with this one; the
         copy carries the module's current weights, since the model never
-        re-initialises a custom encoder.
+        re-initialises a custom encoder.  A list (the ``atom_register``
+        positions) is deep-copied too, so editing the returned config leaves
+        the model's own untouched.
         """
         if self._config is None:
             raise NotImplementedError(
@@ -161,7 +163,7 @@ class ClassifierBase(nn.Module):
                 f"set self._config in __init__."
             )
         return {
-            name: copy.deepcopy(value) if isinstance(value, nn.Module) else value
+            name: copy.deepcopy(value) if isinstance(value, (nn.Module, list)) else value
             for name, value in self._config.items()
         }
 

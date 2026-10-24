@@ -388,6 +388,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RYDBERG_BLOCKADE_RADIUS` = 8.69 µm, so CZ on neighbours only, in `min(3, n_qubits − 1)`
   parallel layers per block), and `CircuitSummary.n_blockade_layers`, which counts those layers
   (`None` for the other entanglers) (#418, #643)
+- `atom_register`, `blockade_radius` and `ccz` on every encoder, its QNode builder, and the
+  three hybrid classifiers: `entangler="rydberg"` on any connected `AtomRegister` with
+  `n_qubits` atoms, at any blockade radius, optionally with CCZ on its blockade triangles.
+  `None` keeps the default chain. `get_config` and checkpoints store the positions as a list of
+  `[x, y]` lists, older `"rydberg"` checkpoints load as the chain, the options are refused with
+  any other entangler, and `CircuitSummary.n_blockade_layers` counts the layer's own register
+  (#644, #PR)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
