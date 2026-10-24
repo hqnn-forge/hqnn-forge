@@ -392,7 +392,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loss read out as `|1⟩`, exactly `qml.ResetError(p0=0, p1=p)`, so ⟨Z⟩ → (1 − p)⟨Z⟩ − p at
   `position="end"`; post hoc through `apply_depolarizing_noise` and `noise_sweep`, for training
   with `noise_method="density"` or as weighted Kraus trajectories with the amplitude-damping
-  restrictions (#419)
+  restrictions (#419, #701)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
