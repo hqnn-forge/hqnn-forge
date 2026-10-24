@@ -394,12 +394,7 @@ def evolve(
         return psi @ psi.mH
 
     dt = t / steps
-    if use_matrix_exp:
-        propagator = torch.linalg.matrix_exp(-1j * h * dt)
-    else:
-        # U(dt) = V e^(−i E dt) V†: the exact unitary step from the eigendecomposition.
-        energies, vectors = torch.linalg.eigh(h)
-        propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
+    propagator = _propagator(h, dt)
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
     # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)
@@ -417,6 +412,32 @@ def evolve(
         # two adjacent half steps are one full step; the last step ends on a half
         rho = rho * (full_damping if step < steps - 1 else half_damping)
     return rho
+
+
+def _propagator(h: torch.Tensor, tau: float) -> torch.Tensor:
+    """
+    ``U(τ) = e^(−iHτ)`` of a Hermitian ``complex128`` ``h``, batched over leading axes.
+
+    The unitary step of :func:`evolve`, and the per-segment propagator of the
+    analog encoding layer (:mod:`hqnn_forge.encoding.analog_rydberg`), so a
+    piecewise-constant pulse is propagated exactly as one constant segment
+    is.  ``h`` in rad/µs, ``τ`` in µs.  The caller has checked that ``h`` is
+    Hermitian (``evolve`` symmetrises it; the analog layer builds it with
+    :func:`~hqnn_forge.rydberg.rydberg_hamiltonian`, Hermitian by
+    construction).
+
+    * Without a gradient to track: ``H = V E V†`` from ``torch.linalg.eigh``
+      and ``U = V e^(−iEτ) V†``, exact up to rounding.
+    * When ``h`` requires grad and grad mode is on: ``torch.linalg.matrix_exp``,
+      whose backward pass has no ``1/(E_m − E_k)`` term and is therefore
+      correct at a degenerate spectrum (#505).  Forward-mode AD
+      (``torch.func.jvp``, ``jacfwd``) still takes the ``eigh`` path, with
+      the degeneracy limitation of #674.
+    """
+    if torch.is_grad_enabled() and h.requires_grad:
+        return torch.linalg.matrix_exp(-1j * h * tau)
+    energies, vectors = torch.linalg.eigh(h)
+    return (vectors * torch.exp(-1j * energies * tau)[..., None, :]) @ vectors.mH
 
 
 def _populations_to_features(

@@ -387,9 +387,11 @@ Options shared by both models:
 
 - `encoding_type="angle"` (default), `"iqp"` (Havlíček-style feature map with pairwise
   `x_i x_j` phases), `"reuploading"` (the angle embedding repeated before every variational
-  layer, with optional `trainable_input_scaling`) or `"amplitude"` (the classical encoder maps
+  layer, with optional `trainable_input_scaling`), `"amplitude"` (the classical encoder maps
   to `2**n_qubits` amplitudes, which needs `diff_method="backprop"`; without the encoder, 1 to
-  `2**n_qubits` raw features are zero-padded).
+  `2**n_qubits` raw features are zero-padded) or `"analog"` (no gates: a Rydberg atom chain
+  under a trainable piecewise-constant pulse of `n_layers` segments, each feature in one atom's
+  local detuning; `AnalogRydbergLayer`).
 - `init_strategy="restricted"` (one σ for the whole circuit), `"block_local"` (the same σ in
   the first layer, narrowing by up to √2 towards the last) or `"normal"` (plain
   `N(0, init_std²)`, `init_std=0.1` by default); see `hqnn_forge.initializers`.
@@ -462,7 +464,7 @@ The API reference documents each architecture's constructor and the pieces behin
 
 ```
 hqnn_forge/
-├── encoding/        Quantum feature maps (angle, IQP, amplitude, data re-uploading)
+├── encoding/        Quantum feature maps (angle, IQP, amplitude, data re-uploading, analog Rydberg)
 ├── circuits/        Reusable VQC ansatz primitives
 ├── initializers/    Small-angle (restricted-variance) weight initialisation
 ├── preprocessing/   PCA + normalisation, stratified folds, SMOTE (no sklearn runtime dep)
@@ -659,5 +661,6 @@ APA.
 - Saffman, Walker & Mølmer (2010) — *Quantum information with Rydberg atoms*
 - Jaksch et al. (2000) — *Fast quantum gates for neutral atoms*
 - Levine et al. (2019) — *Parallel implementation of high-fidelity multiqubit gates with neutral atoms*
+- Henriet et al. (2020) — *Quantum computing with neutral atoms*
 - Fisher (1936) — *The use of multiple measurements in taxonomic problems*
 - Roy & Vetterli (2007) — *The effective rank: a measure of effective dimensionality*

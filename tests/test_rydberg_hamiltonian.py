@@ -560,3 +560,114 @@ class TestValidation:
     def test_c6_and_interactions_are_keyword_only(self) -> None:
         with pytest.raises(TypeError, match="positional"):
             rydberg_hamiltonian(self.REGISTER, 1.0, [0.0, 0.0, 0.0], DEFAULT_C6)  # type: ignore[misc]
+
+
+def pennylane_phased_matrix(
+    register: AtomRegister,
+    omega: list[float],
+    delta: list[float],
+    phase: list[float],
+    c6: float,
+) -> torch.Tensor:
+    """``Ω_i/2 (cos φ_i X_i − sin φ_i Y_i) − Δ_i n_i + V_ij n_i n_j``, written in PennyLane."""
+    n = register.n_atoms
+    op = qml.s_prod(0.0, qml.Identity(0))
+    for i in range(n):
+        drive = qml.s_prod(math.cos(phase[i]), qml.PauliX(i)) - qml.s_prod(
+            math.sin(phase[i]), qml.PauliY(i)
+        )
+        op = op + qml.s_prod(omega[i] / 2, drive)
+    plain = pennylane_matrix(register, [0.0] * n, delta, c6, True)
+    return torch.as_tensor(qml.matrix(op, wire_order=range(n)), dtype=C128) + plain
+
+
+class TestPhase:
+    """The drive phase φ of #420: ``Ω/2 · Σ_i (cos φ X_i − sin φ Y_i)``."""
+
+    REGISTER = AtomRegister([[0.0, 0.0], [4.1, 0.3], [1.2, 6.5]])
+
+    @pytest.mark.parametrize("phase", [0.3, -1.2, math.pi / 2, math.pi])
+    def test_one_atom_matrix_typed_in(self, phase: float) -> None:
+        """``[[0, Ω/2 e^{iφ}], [Ω/2 e^{−iφ}, −Δ]]``: the drive is ``Ω/2 (e^{iφ} |g⟩⟨r| + h.c.)``."""
+        h = rydberg_hamiltonian(AtomRegister([[0.0, 0.0]]), 2.0, [0.5], c6=1.0, phase=phase)
+        expected = torch.tensor(
+            [
+                [0.0, complex(math.cos(phase), math.sin(phase))],
+                [complex(math.cos(phase), -math.sin(phase)), -0.5],
+            ],
+            dtype=C128,
+        )
+        assert torch.allclose(h, expected, rtol=0, atol=1e-15)
+
+    def test_a_quarter_turn_drives_along_minus_y(self) -> None:
+        h = rydberg_hamiltonian(AtomRegister([[0.0, 0.0]]), 2.0, [0.0], c6=1.0, phase=math.pi / 2)
+        minus_y = torch.tensor([[0.0, 1j], [-1j, 0.0]], dtype=C128)  # −Y with Ω/2 = 1
+        assert torch.allclose(h, minus_y, rtol=0, atol=1e-15)
+
+    def test_the_default_is_phase_zero_bit_for_bit(self) -> None:
+        delta = torch.tensor([[0.3, -1.1, 2.2], [0.1, 0.2, 0.3]], dtype=torch.float64)
+        before = rydberg_hamiltonian(self.REGISTER, 2.0, delta, c6=DEFAULT_C6)
+        assert torch.equal(
+            before, rydberg_hamiltonian(self.REGISTER, 2.0, delta, c6=DEFAULT_C6, phase=0.0)
+        )
+        assert torch.equal(before.imag, torch.zeros_like(before.imag))
+        # torch.equal takes −0.0 for 0.0; the real matrix converted to
+        # complex128 (the matrix before the phase existed) has +0.0 throughout.
+        assert not bool(torch.signbit(before.imag).any())
+        # Ω = −0.0 gives −0.0 at both entries of a pair, as (Ω/2).to(complex128) did.
+        h = rydberg_hamiltonian(self.REGISTER, -0.0, delta, c6=DEFAULT_C6, phase=0.0)
+        assert torch.equal(torch.signbit(h.real), torch.signbit(h.real.mT))
+
+    @pytest.mark.parametrize("per_atom", [False, True])
+    def test_matches_pennylane_with_x_and_y(self, per_atom: bool) -> None:
+        omega = [2.0, 2.5, 3.0]
+        delta = [0.3, -1.1, 2.2]
+        phase = [0.7, -2.1, 1.3] if per_atom else [0.7] * 3
+        h = rydberg_hamiltonian(
+            self.REGISTER,
+            omega,
+            delta,
+            c6=DEFAULT_C6,
+            phase=phase if per_atom else 0.7,
+        )
+        expected = pennylane_phased_matrix(self.REGISTER, omega, delta, phase, DEFAULT_C6)
+        assert torch.allclose(h, expected, rtol=1e-12, atol=1e-12)
+
+    def test_hermitian_exactly(self) -> None:
+        h = rydberg_hamiltonian(
+            self.REGISTER, [2.0, 2.5, 3.0], [0.3, -1.1, 2.2], c6=1e5, phase=0.9
+        )
+        assert torch.equal(h, h.mH)
+
+    def test_batched_phase_equals_a_loop(self) -> None:
+        delta = torch.tensor([[0.3, -1.1, 2.2], [0.1, 0.2, 0.3]], dtype=torch.float64)
+        phase = torch.tensor([[0.4], [-2.0]], dtype=torch.float64)  # one global φ per sample
+        h = rydberg_hamiltonian(self.REGISTER, 2.0, delta, c6=DEFAULT_C6, phase=phase)
+        for b in range(2):
+            single = rydberg_hamiltonian(
+                self.REGISTER, 2.0, delta[b], c6=DEFAULT_C6, phase=float(phase[b, 0])
+            )
+            assert torch.equal(h[b], single)
+
+    def test_derivative_is_the_rotated_drive(self) -> None:
+        """``∂H/∂φ = Ω/2 · Σ_i (−sin φ X_i − cos φ Y_i)``, contracted with a fixed probe."""
+        register = AtomRegister.chain(2, 5.0)
+        phase = torch.tensor(0.6, dtype=torch.float64, requires_grad=True)
+        probe = torch.arange(16, dtype=torch.float64).reshape(4, 4) * (1 + 0.5j)
+        h = rydberg_hamiltonian(register, 2.0, [0.3, -0.8], c6=1.0e6, phase=phase)
+        (h * probe).sum().real.backward()
+        x = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=C128)
+        y = torch.tensor([[0.0, -1j], [1j, 0.0]], dtype=C128)
+        eye = torch.eye(2, dtype=C128)
+        derivative = (-math.sin(0.6) * x - math.cos(0.6) * y) * (2.0 / 2)
+        dh = torch.kron(derivative, eye) + torch.kron(eye, derivative)
+        assert phase.grad is not None
+        assert phase.grad.item() == pytest.approx((dh * probe).sum().real.item(), rel=1e-13)
+
+    def test_rejects_a_bad_phase(self) -> None:
+        with pytest.raises(ValueError, match="phase must be finite"):
+            rydberg_hamiltonian(self.REGISTER, 1.0, [0.0] * 3, c6=1.0, phase=math.nan)
+        with pytest.raises(TypeError, match="phase must hold real numbers"):
+            rydberg_hamiltonian(self.REGISTER, 1.0, [0.0] * 3, c6=1.0, phase=torch.tensor(1j))
+        with pytest.raises(ValueError, match="phase must be a scalar"):
+            rydberg_hamiltonian(self.REGISTER, 1.0, [0.0] * 3, c6=1.0, phase=[0.0, 0.0])
