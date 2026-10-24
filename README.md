@@ -605,6 +605,12 @@ APA.
 
 ---
 
+The [frozen noise-aware robustness study](https://github.com/hqnn-forge/hqnn-forge/blob/main/docs/results/noise-aware-robustness-study.md)
+provides an opt-in resumable runner with channel-aware validation thresholds,
+inner-training PCA and a validation-only training extension. Its scientific
+measurements and conclusions are pending; benchmark defaults are unchanged.
+
+
 ## References
 
 - Cerezo et al. (2021) — *Cost function dependent barren plateaus in shallow parametrized quantum circuits*

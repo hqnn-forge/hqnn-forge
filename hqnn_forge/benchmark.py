@@ -79,14 +79,17 @@ References
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import itertools
+import logging
 import math
 import os
+import random
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -97,14 +100,16 @@ import torch.nn as nn
 from hqnn_forge.evaluation import (
     brier_score,
     expected_calibration_error,
+    find_optimal_threshold,
     holm_correction,
     matthews_corrcoef,
     parameter_efficiency,
+    pr_auc,
     rank_biserial_correlation,
     wilcoxon_signed_rank,
 )
 from hqnn_forge.models import BinaryClassifierBase, HybridBinaryClassifier
-from hqnn_forge.noise import Position, apply_depolarizing_noise, validate_noise
+from hqnn_forge.noise import Channel, Position, apply_depolarizing_noise, validate_noise
 from hqnn_forge.preprocessing import oversample_fold, stratified_kfold
 from hqnn_forge.training import train_model
 from hqnn_forge.utils import FocalLoss, classical_baseline
@@ -120,6 +125,7 @@ __all__: list[str] = [
     "HybridBuilder",
     "LossBuilder",
     "Tuning",
+    "ValidationExtension",
     "default_hybrid",
     "fingerprint",
     "run_benchmark",
@@ -199,11 +205,15 @@ class FoldResult:
     hyperparameters: dict[str, Any] = field(default_factory=dict)
     """The training settings tuning chose for this fold and model; empty without tuning."""
     noise_mcc: dict[float, float] = field(default_factory=dict)
-    """Hybrid only: test MCC under depolarising noise of each swept probability."""
+    """Hybrid only: test MCC at the clean threshold under each inference noise level."""
     brier: float = math.nan
     """Brier score of the test probabilities (#319)."""
     ece: float = math.nan
     """Expected calibration error of the test probabilities, ``ECE_BINS`` quantile bins."""
+    noise_results: list[dict[str, Any]] = field(default_factory=list)
+    """Per inference level: channel, thresholds, MCC, confusion counts, AP and Brier."""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    """Training attempts, validation-only learning checks and preprocessing hash."""
 
 
 @dataclass(frozen=True)
@@ -356,6 +366,131 @@ def _standardise(
     return (X - mean) / std
 
 
+def _pca_standardise(
+    X: npt.NDArray[np.float64], rows: npt.NDArray[np.intp], components: int
+) -> tuple[npt.NDArray[np.float64], dict[str, Any]]:
+    """Fit dimensionless Z=(X-mean_train)/(std_train+1e-12), then Z @ V[:k].T.
+
+    Rows index only inner training observations; columns retain feature order.
+    V contains right singular vectors of training Z, decreasing singular value.
+    No whitening or component rescaling is performed. The hash covers mean,
+    denominator and projection bytes (float64), with shapes and order retained.
+    """
+    if components > min(len(rows), X.shape[1]):
+        raise ValueError("pca_components exceeds the inner training matrix rank bound.")
+    mean = X[rows].mean(0)
+    denominator = X[rows].std(0) + 1e-12
+    Z = (X - mean) / denominator
+    _, _, vt = np.linalg.svd(Z[rows], full_matrices=False)
+    projection = vt[:components].T.copy()
+    digest = hashlib.sha256()
+    for value in (mean, denominator, projection):
+        digest.update(repr(value.shape).encode())
+        digest.update(np.ascontiguousarray(value).tobytes())
+    return Z @ projection, {
+        "method": "inner_train_standardised_svd",
+        "components": components,
+        "sha256": digest.hexdigest(),
+        "mean": mean.tolist(),
+        "denominator": denominator.tolist(),
+        "projection": projection.tolist(),
+    }
+
+
+@dataclass(frozen=True)
+class ValidationExtension:
+    """One validation-triggered restart; disabled unless explicitly requested.
+
+    The first attempt uses ordinary runner settings. Non-finite validation
+    probabilities, MCC < min_mcc or AP < min_pr_auc_ratio * prevalence under
+    the model's training noise trigger one restart from original weights,
+    Torch RNG and batch seed, with a fresh Adam and no patience. The second
+    attempt is always selected, even if worse. Checkpoints still maximise
+    clean validation MCC. Only analytic density/noiseless binary fits are
+    supported; test rows never participate in this decision.
+    """
+
+    max_epochs: int = 60
+    min_mcc: float = 0.10
+    min_pr_auc_ratio: float = 2.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_epochs, bool)
+            or not isinstance(self.max_epochs, int)
+            or self.max_epochs < 1
+        ):
+            raise ValueError("ValidationExtension.max_epochs must be a positive integer.")
+        if not math.isfinite(self.min_mcc) or not -1 <= self.min_mcc <= 1:
+            raise ValueError("ValidationExtension.min_mcc must lie in [-1, 1].")
+        if not math.isfinite(self.min_pr_auc_ratio) or self.min_pr_auc_ratio < 0:
+            raise ValueError(
+                "ValidationExtension.min_pr_auc_ratio must be finite and nonnegative."
+            )
+
+
+def _predict(
+    model: BinaryClassifierBase, X: npt.NDArray[np.float64], batch_size: int | None
+) -> torch.Tensor:
+    """Bound state memory by predicting chunks; only scalar probabilities accumulate."""
+    x = torch.from_numpy(X.astype(np.float32))
+    if batch_size is None:
+        return model.predict_proba(x)
+    return torch.cat([model.predict_proba(chunk) for chunk in x.split(batch_size)])
+
+
+def _validation_diagnostics(
+    model: BinaryClassifierBase,
+    X: npt.NDArray[np.float64],
+    y: npt.NDArray[np.int64],
+    batch_size: int | None,
+) -> dict[str, Any]:
+    """Validation-only MCC at its own optimum, average precision and prevalence."""
+    prob = _predict(model, X, batch_size)
+    finite = bool(torch.isfinite(prob).all())
+    threshold = find_optimal_threshold(y, prob).threshold if finite else None
+    return {
+        "finite": finite,
+        "threshold": threshold,
+        "mcc": float(matthews_corrcoef(y, (prob >= threshold).long()))
+        if threshold is not None
+        else None,
+        "pr_auc": pr_auc(y, prob) if finite else None,
+        "prevalence": float(y.mean()),
+    }
+
+
+def _training_validation(
+    model: BinaryClassifierBase,
+    X: npt.NDArray[np.float64],
+    y: npt.NDArray[np.int64],
+    batch_size: int | None,
+) -> dict[str, Any]:
+    config = model.get_config()
+    p = config.get("noise_level", 0.0)
+    if not p:
+        return _validation_diagnostics(model, X, y, batch_size)
+    with apply_depolarizing_noise(
+        model,
+        p,
+        position=config.get("noise_position", "all"),
+        channel=config.get("noise_channel", "depolarizing"),
+    ):
+        return _validation_diagnostics(model, X, y, batch_size)
+
+
+def _extension_reasons(diagnostics: Mapping[str, Any], policy: ValidationExtension) -> list[str]:
+    """Dimensionless operational learning guard, not a significance test."""
+    if not diagnostics["finite"]:
+        return ["nonfinite_validation"]
+    reasons = []
+    if diagnostics["mcc"] < policy.min_mcc:
+        reasons.append("validation_mcc")
+    if diagnostics["pr_auc"] < policy.min_pr_auc_ratio * diagnostics["prevalence"]:
+        reasons.append("validation_pr_auc")
+    return reasons
+
+
 def _seeds(root: np.random.SeedSequence, n: int) -> list[int]:
     return [int(s.generate_state(1)[0]) for s in root.spawn(n)]
 
@@ -392,27 +527,134 @@ def _fit_and_score(
     batch_size: int,
     patience: int | None,
     batch_seed: int,
+    validation_extension: ValidationExtension | None = None,
+    noise_batch_size: int | None = None,
+    details: dict[str, Any] | None = None,
 ) -> FitScore:
     """Train, then score the test rows at the validation threshold."""
     as_tensor = torch.from_numpy
-    start = time.perf_counter()
-    history = train_model(
-        model,
-        loss(),
-        torch.optim.Adam(model.parameters(), lr=lr),
-        as_tensor(X_train.astype(np.float32)),
-        as_tensor(y_train.astype(np.float32)),
-        as_tensor(X_val.astype(np.float32)),
-        as_tensor(y_val.astype(np.float32)),
-        max_epochs=max_epochs,
-        batch_size=batch_size,
-        monitor="mcc",
-        patience=patience,
-        generator=torch.Generator().manual_seed(batch_seed),
-    )
-    seconds = time.perf_counter() - start
+    config = model.get_config()
+    if validation_extension is not None and (
+        config.get("shots") is not None or config.get("noise_method", "density") != "density"
+    ):
+        raise ValueError("validation_extension supports analytic density/noiseless training only.")
+    initial = copy.deepcopy(model.state_dict()) if validation_extension is not None else None
+
+    def state_hash() -> str:
+        digest = hashlib.sha256()
+        for key, value in model.state_dict().items():
+            digest.update(key.encode())
+            digest.update(repr(tuple(value.shape)).encode())
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+        return digest.hexdigest()
+
+    initial_hash = state_hash()
+    rng_state = torch.get_rng_state().clone()
+    attempts: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    seconds = 0.0
+    for attempt in range(2 if validation_extension is not None else 1):
+        if attempt:
+            assert initial is not None and validation_extension is not None
+            model.load_state_dict(initial)
+            torch.set_rng_state(rng_state)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        noisy_history: list[dict[str, Any]] = []
+
+        def observe_epoch(record: Any, target: list[dict[str, Any]] = noisy_history) -> None:
+            logging.getLogger(__name__).info(
+                "training epoch=%s loss=%.17g clean_val_mcc=%s",
+                record.epoch,
+                record.train_loss,
+                record.val_score,
+            )
+            target.append(
+                {
+                    "epoch": record.epoch,
+                    **_training_validation(model, X_val, y_val, noise_batch_size),
+                }
+            )
+
+        extra: dict[str, Any] = {}
+        if validation_extension is not None:
+            extra["on_epoch_end"] = observe_epoch
+        start = time.perf_counter()
+        history = train_model(
+            model,
+            loss(),
+            optimizer,
+            as_tensor(X_train.astype(np.float32)),
+            as_tensor(y_train.astype(np.float32)),
+            as_tensor(X_val.astype(np.float32)),
+            as_tensor(y_val.astype(np.float32)),
+            max_epochs=validation_extension.max_epochs
+            if attempt and validation_extension is not None
+            else max_epochs,
+            batch_size=batch_size,
+            monitor="mcc",
+            patience=None if attempt else patience,
+            generator=torch.Generator().manual_seed(batch_seed),
+            **extra,
+        )
+        elapsed = time.perf_counter() - start
+        seconds += elapsed
+        validation = (
+            _training_validation(model, X_val, y_val, noise_batch_size)
+            if validation_extension is not None
+            else None
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "seconds": elapsed,
+                "history": asdict(history),
+                "training_noise_validation": validation,
+                "noisy_validation_history": noisy_history,
+                "optimizer_steps": history.n_epochs
+                * (
+                    math.ceil(len(y_train) / batch_size)
+                    - int(
+                        batch_size > 1
+                        and len(y_train) > batch_size
+                        and len(y_train) % batch_size == 1
+                    )
+                ),
+            }
+        )
+        if attempt == 0 and validation_extension is not None:
+            assert validation is not None
+            reasons = _extension_reasons(validation, validation_extension)
+            if reasons:
+                continue
+        break
+    if details is not None:
+        details.update(
+            {
+                "initial_state_sha256": initial_hash,
+                "selected_state_sha256": state_hash(),
+                "attempts": attempts,
+                "selected_attempt": len(attempts) - 1,
+                "extension_reasons": reasons,
+                "batch_seed": batch_seed,
+                "optimizer_steps": sum(a["optimizer_steps"] for a in attempts),
+                "training_noise": {
+                    "channel": config.get("noise_channel", "depolarizing"),
+                    "probability": config.get("noise_level", 0.0),
+                    "placement": config.get("noise_position", "all"),
+                    "method": config.get("noise_method", "density"),
+                },
+                "clean_validation": _validation_diagnostics(model, X_val, y_val, noise_batch_size)
+                if validation_extension is not None
+                else None,
+            }
+        )
+        # Tensor state stays local to the observer; it is never part of JSON diagnostics.
+        details["optimizer_state"] = optimizer.state_dict()
+    # A trailing one-row batch is merged by train_model, hence one fewer step
+    # than ceil(n/batch_size) when n % batch_size == 1 and n > batch_size.
+    # Selection is finished before the first outer-test prediction.
     threshold = history.best_threshold if history.best_threshold is not None else 0.5
-    prob = model.predict_proba(as_tensor(X_test.astype(np.float32)))
+    prob = _predict(model, X_test, noise_batch_size)
     mcc = matthews_corrcoef(y_test, (prob >= threshold).long())
     # A diverged model's NaN probabilities still score an MCC (every comparison
     # is False, so all negative); they have no calibration, and must not end
@@ -540,7 +782,7 @@ def _evaluate_config(
         X_fit, y_fit = X_fold[fit_rows], y[fit_rows]
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        model = _build(model_name, hybrid, X.shape[1])
+        model = _build(model_name, hybrid, X_fold.shape[1])
         return _fit_and_score(
             model,
             loss,
@@ -603,6 +845,17 @@ def _tune(
     return best[1]
 
 
+def _confusion(y: npt.NDArray[np.int64], prob: torch.Tensor, threshold: float) -> dict[str, int]:
+    """Counts with label 1 positive, prediction positive iff probability >= threshold."""
+    predicted = prob.detach().cpu().numpy().reshape(-1) >= threshold
+    return {
+        "tn": int(np.sum((y == 0) & ~predicted)),
+        "fp": int(np.sum((y == 0) & predicted)),
+        "fn": int(np.sum((y == 1) & ~predicted)),
+        "tp": int(np.sum((y == 1) & predicted)),
+    }
+
+
 def _noise_scores(
     model: BinaryClassifierBase,
     X_test: npt.NDArray[np.float64],
@@ -610,14 +863,63 @@ def _noise_scores(
     threshold: float,
     levels: Sequence[float],
     position: Position,
+    *,
+    channel: Channel = "depolarizing",
+    X_val: npt.NDArray[np.float64] | None = None,
+    y_val: npt.NDArray[np.int64] | None = None,
+    retune: bool = False,
+    batch_size: int | None = None,
+    results: list[dict[str, Any]] | None = None,
 ) -> dict[float, float]:
-    """Test MCC of the trained model under inference-time depolarising noise, per level."""
-    x = torch.from_numpy(X_test.astype(np.float32))
+    """Exact inference noise; legacy return retains the fixed clean threshold.
+
+    MCC=(TP*TN-FP*FN)/sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN)), dimensionless,
+    zero for a zero denominator. A retuned threshold maximises validation MCC
+    under this evaluation channel/level, then is frozen for test scoring.
+    Average precision integrates precision over recall increments; Brier is
+    mean((probability-label)**2). Neither depends on a decision threshold.
+    Non-finite outputs remain explicitly invalid, never dropped from a family.
+    """
     scores: dict[float, float] = {}
     for p in levels:
-        with apply_depolarizing_noise(model, p, position=position):
-            prob = model.predict_proba(x)
-        scores[float(p)] = float(matthews_corrcoef(y_test, (prob >= threshold).long()))
+        with apply_depolarizing_noise(model, p, position=position, channel=channel):
+            val_prob = _predict(model, X_val, batch_size) if retune and X_val is not None else None
+            prob = _predict(model, X_test, batch_size)
+            evaluation_device = _device_name(model)
+        finite = bool(torch.isfinite(prob).all())
+        retuned = None
+        if retune:
+            if val_prob is None or y_val is None:
+                raise ValueError("retuning needs validation features and labels.")
+            if bool(torch.isfinite(val_prob).all()):
+                retuned = float(find_optimal_threshold(y_val, val_prob).threshold)
+        # Legacy noise_mcc keeps main's convention, as _fit_and_score does: NaN
+        # probabilities compare False, so they score as all negative. Only the
+        # per-level records mark non-finite outputs invalid (fixed_mcc None).
+        fixed = float(matthews_corrcoef(y_test, (prob >= threshold).long()))
+        scores[float(p)] = fixed
+        if results is not None:
+            results.append(
+                {
+                    "channel": channel,
+                    "probability": float(p),
+                    "placement": position,
+                    "evaluation_device": evaluation_device,
+                    "finite": finite,
+                    "clean_threshold": float(threshold),
+                    "retuned_threshold": retuned,
+                    "fixed_mcc": fixed if finite else None,
+                    "retuned_mcc": float(matthews_corrcoef(y_test, (prob >= retuned).long()))
+                    if finite and retuned is not None
+                    else None,
+                    "fixed_confusion": _confusion(y_test, prob, threshold) if finite else None,
+                    "retuned_confusion": _confusion(y_test, prob, retuned)
+                    if finite and retuned is not None
+                    else None,
+                    "pr_auc": pr_auc(y_test, prob) if finite else None,
+                    "brier": brier_score(y_test, prob) if finite else None,
+                }
+            )
     return scores
 
 
@@ -633,7 +935,7 @@ def _one_sided_better(hybrid: Sequence[float], control: Sequence[float]) -> tupl
 def _noise_comparison(
     dataset: str,
     folds: Sequence[FoldResult],
-    n_splits: int,
+    n_splits: int | Sequence[int],
     levels: Sequence[float],
     hybrid_noiseless: Sequence[float],
     control: Sequence[float],
@@ -655,7 +957,7 @@ def _noise_comparison(
                     ]
                 )
             )
-            for k in range(n_splits)
+            for k in (range(n_splits) if isinstance(n_splits, int) else n_splits)
         ]
         p_value, min_p = _one_sided_better(per_fold, control)
         rows.append(
@@ -694,6 +996,13 @@ def run_benchmark(
     noise_levels: Sequence[float] | None = None,
     noise_position: Position = "all",
     alpha: float = 0.05,
+    pca_components: int | None = None,
+    noise_channel: Channel = "depolarizing",
+    retune_noise_threshold: bool = False,
+    noise_batch_size: int | None = None,
+    fold_indices: Sequence[int] | None = None,
+    on_fold_end: Callable[[BinaryClassifierBase, FoldResult, dict[str, Any]], None] | None = None,
+    validation_extension: ValidationExtension | None = None,
 ) -> BenchmarkResult:
     """
     Compare ``hybrid`` with its matched classical control on every dataset.
@@ -741,13 +1050,13 @@ def run_benchmark(
         shot noise); a ``ValueError`` is raised otherwise.
     noise_levels, noise_position:
         Also score each trained hybrid model on its test rows under
-        depolarising noise of each probability (inserted as
+        the selected channel at each probability (inserted as
         :func:`hqnn_forge.noise.apply_depolarizing_noise` does, at
         ``noise_position``), at the fold's threshold, and compare it with the
         noise-free control per level (:attr:`BenchmarkResult.noise`).  This
-        is **inference-time** noise on a model trained without it: it asks
-        whether an advantage measured in noiseless simulation survives on a
-        noisy device, not what training under noise would give.
+        is inference-time evaluation; the builder independently chooses the
+        training channel and strength. With the default builder, training is
+        noiseless. Legacy aggregate noise tables always use the clean threshold.
     alpha:
         Significance level for :attr:`BenchmarkResult.noise_summary`.
     tuning:
@@ -758,6 +1067,25 @@ def run_benchmark(
         Also write an experiment record (config, seeds, fold indices,
         dependency versions, devices, metrics) there as JSON; see
         :func:`hqnn_forge.experiment.save_record`.
+
+    pca_components:
+        Optional positive reduced width. Fit standardisation and unwhitened
+        SVD on inner training rows only; incompatible with tuning. None keeps
+        the existing outer-training scaling path.
+    noise_channel, retune_noise_threshold, noise_batch_size:
+        Exact evaluation channel, optional noisy-validation threshold tuning,
+        and maximum prediction chunk size. Legacy noise_mcc/noise summaries
+        always retain the clean threshold; noise_results contains both scores.
+    fold_indices:
+        Nonempty unique outer fold IDs to execute after deriving the complete
+        seed tree. Summaries describe completed folds only, never the full CV.
+    on_fold_end:
+        Observer called after scoring each model with model, FoldResult and
+        history dict (attempts plus local optimizer state). It cannot select
+        training or scoring. Torch, NumPy and Python RNG use is isolated.
+    validation_extension:
+        Optional one-restart policy, selected solely from validation before
+        test scoring. None preserves single-fit training. See ValidationExtension.
 
     Returns
     -------
@@ -773,6 +1101,35 @@ def run_benchmark(
         raise ValueError(f"validation_folds must be >= 2; got {validation_folds}.")
     if not datasets:
         raise ValueError("datasets is empty.")
+    for option, value in (
+        ("pca_components", pca_components),
+        ("noise_batch_size", noise_batch_size),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+        ):
+            raise ValueError(f"{option} must be a positive integer or None.")
+    if pca_components is not None and tuning is not None:
+        raise ValueError("pca_components with tuning is not supported.")
+    selected = list(range(n_splits)) if fold_indices is None else list(fold_indices)
+    if (
+        not selected
+        or any(
+            isinstance(k, bool) or not isinstance(k, int) or not 0 <= k < n_splits
+            for k in selected
+        )
+        or len(set(selected)) != len(selected)
+    ):
+        raise ValueError("fold_indices must be nonempty unique valid outer fold IDs.")
+    # Outer order remains canonical, regardless of the order IDs were requested.
+    selected.sort()
+    validate_noise(
+        0.0,
+        noise_position,
+        channel=noise_channel,
+        channel_name="noise_channel",
+        position_name="noise_position",
+    )
     smote_options = dict(smote_kwargs or {})
     settings: dict[str, Any] = {
         "n_splits": n_splits,
@@ -791,11 +1148,19 @@ def run_benchmark(
         "noise_levels": None if noise_levels is None else [float(p) for p in noise_levels],
         "noise_position": noise_position,
         "alpha": alpha,
+        "pca_components": pca_components,
+        "noise_channel": noise_channel,
+        "retune_noise_threshold": retune_noise_threshold,
+        "noise_batch_size": noise_batch_size,
+        "fold_indices": None if fold_indices is None else selected,
+        "validation_extension": None
+        if validation_extension is None
+        else asdict(validation_extension),
     }
     if noise_levels is not None:
         validate_noise(0.0, noise_position, position_name="noise_position")
         for p in noise_levels:
-            validate_noise(float(p), noise_position, p_name="noise level")
+            validate_noise(float(p), noise_position, p_name="noise level", channel=noise_channel)
     noise_rows: list[dict[str, Any]] = []
     noise_summary: dict[str, dict[str, Any]] = {}
 
@@ -816,6 +1181,8 @@ def run_benchmark(
         y = y.astype(np.int64)
         if not np.isfinite(X).all():
             raise ValueError(f"{name}: X contains NaN or infinite values.")
+        if pca_components is not None and pca_components > X.shape[1]:
+            raise ValueError("pca_components exceeds the dataset feature count.")
         data_info[name] = {
             "n_samples": int(y.size),
             "n_features": int(X.shape[1]),
@@ -837,6 +1204,8 @@ def run_benchmark(
 
         for k, ((train_part, test_idx), fold_root) in enumerate(zip(outer, fold_roots)):
             inner_seed, smote_seed, init_seed, batch_seed = _seeds(fold_root, 4)
+            if k not in selected:
+                continue
             # The first seed is the one a single-seed run uses, so n_seeds=1
             # reproduces earlier results; the others come from a child stream.
             init_seeds = [init_seed]
@@ -847,7 +1216,11 @@ def run_benchmark(
                 y[train_part], validation_folds, random_state=inner_seed
             )[0]
             train_idx, val_idx = train_part[inner_tr], train_part[inner_va]
-            X_fold = _standardise(X, train_part)
+            preprocessing: dict[str, Any] = {"method": "outer_train_standardisation"}
+            if pca_components is None:
+                X_fold = _standardise(X, train_part)
+            else:
+                X_fold, preprocessing = _pca_standardise(X, train_idx, pca_components)
             if oversample:
                 fold = oversample_fold(
                     X_fold, y, train_idx, val_idx, random_state=smote_seed, **smote_options
@@ -888,7 +1261,7 @@ def run_benchmark(
                 for seed_index, seed in enumerate(init_seeds):
                     with torch.random.fork_rng(devices=[]):
                         torch.manual_seed(seed)
-                        model = _build(model_name, hybrid, X.shape[1])
+                        model = _build(model_name, hybrid, X_fold.shape[1])
                         if n_seeds > 1 and model.get_config().get("init_seed") is not None:
                             # The model's own seed overrides the runner's, so
                             # every repeat would start from the same weights.
@@ -911,6 +1284,7 @@ def run_benchmark(
                                 f"with seed=None; got seed={config['seed']}, which "
                                 f"gives every seed the same shot noise."
                             )
+                        details: dict[str, Any] = {}
                         fit = _fit_and_score(
                             model,
                             loss,
@@ -925,8 +1299,12 @@ def run_benchmark(
                             batch_size=train_settings["batch_size"],
                             patience=train_settings["patience"],
                             batch_seed=batch_seed,
+                            validation_extension=validation_extension,
+                            noise_batch_size=noise_batch_size,
+                            details=details,
                         )
                         noisy: dict[float, float] = {}
+                        noise_results: list[dict[str, Any]] = []
                         if noise_levels is not None and model_name == "hybrid":
                             noisy = _noise_scores(
                                 model,
@@ -935,6 +1313,12 @@ def run_benchmark(
                                 fit.threshold,
                                 noise_levels,
                                 noise_position,
+                                channel=noise_channel,
+                                X_val=X_fold[val_idx],
+                                y_val=y[val_idx],
+                                retune=retune_noise_threshold,
+                                batch_size=noise_batch_size,
+                                results=noise_results,
                             )
                     n_parameters[model_name] = model.count_parameters()
                     models.setdefault(name, {})[model_name] = {
@@ -968,10 +1352,28 @@ def run_benchmark(
                             seed_index=seed_index,
                             hyperparameters=dict(chosen[model_name]),
                             noise_mcc=noisy,
+                            noise_results=noise_results,
+                            diagnostics={
+                                **{
+                                    key: value
+                                    for key, value in details.items()
+                                    if key != "optimizer_state"
+                                },
+                                "preprocessing": preprocessing,
+                                "init_seed": seed,
+                            },
                             brier=fit.brier,
                             ece=fit.ece,
                         )
                     )
+                    if on_fold_end is not None:
+                        numpy_state, python_state = np.random.get_state(), random.getstate()
+                        try:
+                            with torch.random.fork_rng(devices=[]):
+                                on_fold_end(model, folds[-1], details)
+                        finally:
+                            np.random.set_state(numpy_state)
+                            random.setstate(python_state)
                 scores[model_name].append(float(np.mean(seed_scores)))
                 briers[model_name].extend(seed_briers)
                 eces[model_name].extend(seed_eces)
@@ -981,7 +1383,7 @@ def run_benchmark(
         hybrid_scores, control_scores = scores["hybrid"], scores["control"]
         if noise_levels is not None:
             noise_rows_here, summary = _noise_comparison(
-                name, folds, n_splits, noise_levels, hybrid_scores, control_scores, alpha
+                name, folds, selected, noise_levels, hybrid_scores, control_scores, alpha
             )
             noise_rows.extend(noise_rows_here)
             noise_summary[name] = summary
@@ -1002,10 +1404,10 @@ def run_benchmark(
                     "architecture": architecture[model_name],
                     "n_samples": int(y.size),
                     "n_positives": int(y.sum()),
-                    "n_folds": n_splits,
+                    "n_folds": len(selected),
                     "n_parameters": n_parameters[model_name],
                     "mcc_mean": mean,
-                    "mcc_std": float(fold_scores.std(ddof=1)),
+                    "mcc_std": float(fold_scores.std(ddof=1)) if len(selected) > 1 else math.nan,
                     "n_seeds": n_seeds,
                     # Undefined with one seed: None, not NaN, so records compare equal.
                     "mcc_seed_std": (
