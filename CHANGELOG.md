@@ -394,7 +394,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `None` keeps the default chain. `get_config` and checkpoints store the positions as a list of
   `[x, y]` lists, older `"rydberg"` checkpoints load as the chain, the options are refused with
   any other entangler, and `CircuitSummary.n_blockade_layers` counts the layer's own register
-  (#644, #PR)
+  (#644, #696)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
