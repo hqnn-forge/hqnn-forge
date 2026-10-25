@@ -225,23 +225,27 @@ def sample_input(layer: CircuitLayer) -> torch.Tensor:
     depend on it.
 
     Amplitude embedding has no state for the zero vector, and the gates of
-    its Möttönen state preparation *do* depend on the input: PennyLane leaves
-    out rotations whose angles are zero.  On PennyLane 0.45, an all-positive
-    vector has no phases and so emits no ``RZ`` rotations, while distinct
-    magnitudes and one negative entry make every rotation block non-zero,
-    yielding ``2**n - 1`` ``RY`` and ``2**n - 1`` ``RZ`` rotations when
-    ``n_features == 2**n``. On PennyLane 0.46, a real state that does not
-    require grad is prepared with ``RY`` and ``CNOT`` alone, its signs in the
-    ``RY`` angles, so the sample shows ``2**n - 1`` ``RY`` and no ``RZ``. For
-    inputs without grad, as here, these counts are the most any real input
-    needs on either version. With fewer features the zero padding leaves out
-    the ``RY`` rotations that act only on padded amplitudes (for ``n = 3``, 6
-    with 4 features, 4 with 2), since no such input can make those non-zero.
-    An input that requires grad (an amplitude layer behind a classical
-    encoder, in training) keeps every rotation: in the checked cases,
-    PennyLane emits ``2**n - 1`` ``RY`` and ``2**n - 1`` ``RZ`` on both
-    versions, padding included, which can be more than this sample shows
-    (#705).
+    its Möttönen state preparation depend on whether the input requires
+    gradients.  Under ``diff_method="backprop"``, the default amplitude
+    sample requires gradients (``requires_grad=True``).  This makes the
+    diagnostic count the gradient-carrying amplitude state-preparation
+    circuit, which retains every rotation in the decomposition:
+    ``2**n - 1`` ``RY``, ``2**n - 1`` ``RZ``, and ``2**(n + 1) - 4`` ``CNOT``
+    gates on both PennyLane 0.45 and 0.46, with padding included in the
+    state-preparation counts.  This circuit matches an amplitude layer
+    behind a classical encoder in training, but an amplitude layer fed raw
+    features can execute a circuit with fewer gates because its inputs do
+    not require gradients (#705, #706).
+
+    When raw inputs without gradients are supplied (e.g. passing a detached
+    tensor explicitly to :func:`draw_circuit`), PennyLane may omit zero-angle
+    rotations: on PennyLane 0.46, a real state without gradients is prepared
+    with ``RY`` and ``CNOT`` alone (no ``RZ``), and zero padding leaves out
+    rotations that act only on padded amplitudes.  Under other differentiation
+    methods (such as ``diff_method="adjoint"`` or ``"parameter-shift"``),
+    the sample carries no gradients because those methods reject input
+    gradients with ``RuntimeError``, and the summary reflects the no-gradient
+    execution.
     """
     width = input_width(layer)
     zeros = torch.zeros(1, width, dtype=torch.float64)
@@ -250,6 +254,11 @@ def sample_input(layer: CircuitLayer) -> torch.Tensor:
     except ValueError:
         full = torch.arange(1, width + 1, dtype=torch.float64)
         full[0] = -1.0
+        qlayer = getattr(layer, "qlayer", None)
+        qnode = getattr(qlayer, "qnode", None)
+        diff_method = getattr(qnode, "diff_method", None)
+        if diff_method == "backprop":
+            full = full.clone().requires_grad_(True)
         return full
     return zeros[0]
 
@@ -707,9 +716,10 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
     # Inertness is structural and does not depend on the input, but which
     # weight entries a gate parameter depends on is read off autograd, where
     # an input of 0 could hide a dependence (an input-times-weight angle).
-    # Distinct magnitudes and one negative entry, as in sample_input, so the
-    # amplitude encoder's state preparation keeps every rotation block (on
-    # PennyLane 0.45 this includes the RZ block; on 0.46 it keeps every RY).
+    # Distinct magnitudes and one negative entry so the amplitude encoder's
+    # state preparation avoids accidental zero-angle rotation omissions
+    # (generic has no requires_grad; count_inert_weights only tracks weight
+    # gradients, and state preparation contains no trainable weights).
     generic = 0.5 + torch.rand(
         input_width(layer), generator=torch.Generator().manual_seed(0), dtype=torch.float64
     )
@@ -767,8 +777,12 @@ def draw_circuit(target: nn.Module, inputs: torch.Tensor | None = None, decimals
 
     Notes
     -----
-    Only the printed angles depend on ``inputs``; the gates and the wiring do
-    not, which is why :func:`circuit_summary` does not take one.
+    For angle-type embeddings, only the printed angles depend on ``inputs``;
+    the gates and the wiring do not.  For amplitude encoding, the gate
+    decomposition can also depend on whether ``inputs`` requires gradients:
+    under backpropagation, the default sample carries ``requires_grad=True``
+    to display the full training decomposition, while an explicit un-differentiated
+    sample may omit zero-angle rotations or use PennyLane 0.46's RY-only path.
     """
     layer, _, _ = resolve_encoding_layer(target, "draw_circuit")
     tape = _logical_tape(layer, inputs)

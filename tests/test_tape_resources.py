@@ -34,9 +34,10 @@ CPU: dict[str, Any] = {"device_name": "default.qubit", "diff_method": "backprop"
 PENNYLANE_046 = Version(qml.__version__) >= Version("0.46.0.dev0")
 
 # Each layer with its number of gates on two or more wires, pinned by hand
-# count: PennyLane 0.46 has no ``gate_sizes`` to compare it with.  The amplitude
-# layer's state preparation PennyLane decomposes differently from one version
-# to the next (18 CNOTs on 0.45, 12 on the 0.46 nightly).
+# count: PennyLane 0.46 has no ``gate_sizes`` to compare it with.  Under
+# backprop, the amplitude layer's gradient-carrying state preparation emits
+# 12 CNOTs (plus 6 in the 2 entangling layers, for 18 total) on both 0.45
+# and 0.46.
 LAYERS = [
     pytest.param(lambda: QuantumEncodingLayer(n_qubits=4, n_layers=2, **CPU), 8, id="angle"),
     pytest.param(
@@ -56,7 +57,7 @@ LAYERS = [
     ),
     pytest.param(
         lambda: AmplitudeEncodingLayer(n_qubits=3, n_layers=2, **CPU),
-        12 if PENNYLANE_046 else 18,
+        18,
         id="amplitude",
     ),
     pytest.param(

@@ -30,7 +30,12 @@ from hqnn_forge.diagnostics import (
     draw_circuit,
     gradient_variance,
 )
-from hqnn_forge.diagnostics.circuit import _logical_tape, _written_tape, sample_input
+from hqnn_forge.diagnostics.circuit import (
+    _decompose_logical,
+    _logical_tape,
+    _written_tape,
+    sample_input,
+)
 from hqnn_forge.encoding import AmplitudeEncodingLayer, QuantumEncodingLayer, is_circuit_layer
 from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
@@ -433,8 +438,9 @@ class TestAmplitudeEmbedding:
         summary = circuit_summary(_amplitude(n_qubits))
         full = 2**n_qubits - 1
         assert summary.gate_counts["RY"] == full
+        assert summary.gate_counts["RZ"] == full
+        assert summary.gate_counts["CNOT"] == 2 ** (n_qubits + 1) - 4 + n_qubits
         assert summary.gate_counts["Rot"] == n_qubits
-        assert summary.gate_counts.get("RZ", 0) == (0 if PENNYLANE_046 else full)
 
     def test_the_counts_bound_every_real_input(self) -> None:
         # PennyLane drops rotation blocks whose angles are all zero, so a
@@ -508,7 +514,9 @@ class TestAmplitudeEmbedding:
         layer = _amplitude(3)
         drawing = draw_circuit(layer)
         assert all(f"{w}: " in drawing for w in range(3)) and "RY(" in drawing
-        assert ("RZ(" in drawing) == (not PENNYLANE_046)
+        assert "RZ(" in drawing
+        nograd_drawing = draw_circuit(layer, sample_input(layer).detach())
+        assert ("RZ(" in nograd_drawing) == (not PENNYLANE_046)
         with pytest.raises(ValueError, match=r"one sample of shape \(8,\)"):
             draw_circuit(layer, torch.zeros(3))
 
@@ -530,3 +538,108 @@ class TestAmplitudeEmbedding:
         )
         assert "RX(0.00)" in draw_circuit(layer)
         assert sample_input(layer).tolist() == [0.0, 0.0, 0.0]
+
+    def test_parameter_shift_sample_has_no_grad_and_summary_succeeds(self) -> None:
+        layer = AmplitudeEncodingLayer(
+            n_qubits=3,
+            n_layers=1,
+            device_name="default.qubit",
+            diff_method="parameter-shift",
+        )
+        sample = sample_input(layer)
+        assert not sample.requires_grad
+
+        summary = circuit_summary(layer)
+        assert summary.gate_counts["RY"] == 2**3 - 1
+        assert summary.gate_counts["Rot"] == 3
+        assert summary.gate_counts.get("RZ", 0) == (0 if PENNYLANE_046 else 2**3 - 1)
+        assert summary.gate_counts["CNOT"] == (9 if PENNYLANE_046 else 15)
+
+        drawing = draw_circuit(layer)
+        assert "RY(" in drawing
+        assert ("RZ(" in drawing) == (not PENNYLANE_046)
+
+    @staticmethod
+    def _assert_summary_matches_training_tape(
+        summary: CircuitSummary,
+        qlayer: qml.qnn.TorchLayer,
+        prepared_inputs: torch.Tensor,
+    ) -> None:
+        weights = dict(qlayer.qnode_weights.items())
+        tape = qml.workflow.construct_tape(qlayer.qnode, level="top")(prepared_inputs, **weights)
+        decomposed = _decompose_logical(tape)
+        actual_counts = Counter(op.name for op in decomposed.operations)
+        actual_two_qubit = sum(1 for op in decomposed.operations if len(op.wires) >= 2)
+
+        assert summary.gate_counts == dict(actual_counts)
+        assert summary.n_two_qubit_gates == actual_two_qubit
+        assert summary.n_gates == len(decomposed.operations)
+
+    def test_circuit_summary_matches_training_forward_tape_with_classical_encoder(
+        self,
+    ) -> None:
+        """
+        Issue #705: for an amplitude layer behind a classical encoder, the
+        diagnostic summary matches the gates and two-qubit count produced by the
+        training forward pass.
+        """
+        model = HybridBinaryClassifier(
+            n_input_features=6,
+            n_qubits=3,
+            n_layers=1,
+            encoding_type="amplitude",
+            use_classical_encoder=True,
+            device_name="default.qubit",
+            diff_method="backprop",
+            init_strategy="normal",
+        )
+        summary = circuit_summary(model)
+        assert summary.gate_counts == {
+            "CNOT": 15,
+            "RY": 7,
+            "RZ": 7,
+            "Rot": 3,
+        }
+
+        x = torch.randn(2, 6, requires_grad=True)
+        enc = model.classical_encoder(x)
+        assert enc.requires_grad
+        sample = enc[0]
+        prepared = model.quantum_layer.prepare_inputs(sample)
+        assert prepared.requires_grad
+
+        self._assert_summary_matches_training_tape(summary, model.quantum_layer.qlayer, prepared)
+
+    def test_circuit_summary_matches_training_forward_tape_padded(self) -> None:
+        """
+        Issue #705: for a padded amplitude layer, the diagnostic summary matches
+        the gates executed by its gradient-carrying training forward pass.
+        """
+        layer = AmplitudeEncodingLayer(
+            n_qubits=3,
+            n_layers=1,
+            n_features=4,
+            device_name="default.qubit",
+            diff_method="backprop",
+        )
+        summary = circuit_summary(layer)
+
+        x = torch.randn(4, dtype=torch.float64, requires_grad=True)
+        prepared = layer.prepare_inputs(x)
+        assert prepared.requires_grad
+
+        self._assert_summary_matches_training_tape(summary, layer.qlayer, prepared)
+
+    def test_circuit_summary_matches_training_forward_tape_full(self) -> None:
+        """
+        Issue #705: for a full-width amplitude layer, the diagnostic summary matches
+        the gates executed by its gradient-carrying training forward pass.
+        """
+        layer = _amplitude(3)
+        summary = circuit_summary(layer)
+
+        x = torch.randn(8, dtype=torch.float64, requires_grad=True)
+        prepared = layer.prepare_inputs(x)
+        assert prepared.requires_grad
+
+        self._assert_summary_matches_training_tape(summary, layer.qlayer, prepared)
