@@ -716,6 +716,9 @@ CONSTRUCTOR_ARGS = {
         "noise_channel",
         "seed",
         "readout_error",
+        "atom_register",
+        "blockade_radius",
+        "ccz",
     },
     ParallelHybridClassifier: {
         "n_input_features",
@@ -744,6 +747,9 @@ CONSTRUCTOR_ARGS = {
         "noise_channel",
         "seed",
         "readout_error",
+        "atom_register",
+        "blockade_radius",
+        "ccz",
     },
     MulticlassHybridClassifier: {
         "n_input_features",
@@ -774,6 +780,9 @@ CONSTRUCTOR_ARGS = {
         "noise_channel",
         "seed",
         "readout_error",
+        "atom_register",
+        "blockade_radius",
+        "ccz",
     },
     ClassicalBaseline: {
         "n_input_features",

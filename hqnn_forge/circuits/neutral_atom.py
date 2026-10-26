@@ -28,16 +28,18 @@ Conventions
 
 Default register
 ----------------
-``entangler="rydberg"`` in the encoders runs this block on a register that
-depends on ``n_qubits`` alone (#418): :func:`rydberg_chain` at
+``entangler="rydberg"`` in the encoders runs this block on a register that,
+by default, depends on ``n_qubits`` alone (#418): :func:`rydberg_chain` at
 :data:`RYDBERG_BLOCKADE_RADIUS`, the open chain
 ``AtomRegister.chain(n_qubits, RYDBERG_SPACING)``.  With ``a = 6 µm`` and
 ``R_b = 8.69 µm``, ``a < R_b ≤ 2a``: neighbours are blockaded
 (``V/Ω = (R_b/a)⁶ = 9.25``) and next-nearest neighbours are not
 (``V/Ω = 0.144``), so the interaction graph is the path
 ``0 — 1 — … — n−1`` and has no triangles.  Since the gates are ideal, every
-spacing in ``[R_b/2, R_b)`` gives this graph and so the same circuit.  A
-custom register reaches a circuit only through :func:`neutral_atom_layer`.
+spacing in ``[R_b/2, R_b)`` gives this graph and so the same circuit.  The
+encoders, and the classifiers built on them, take another register, radius
+and ``ccz`` through their ``atom_register``, ``blockade_radius`` and ``ccz``
+arguments (#644); one register serves every layer of the stack.
 
 The model is purely digital: each gate is the ideal CZ or CCZ, with no pulse,
 no residual interaction and no atom motion.  Pulses and analog evolution live

@@ -395,6 +395,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/results/rydberg_features_benchmark.jsonl.xz`. The interactions helped a linear head on
   the positive control and added nothing usable on Iranian Churn. The runner's `read_records`
   now also reads a `.xz` file (#502, #703)
+- `atom_register`, `blockade_radius` and `ccz` on every encoder, its QNode builder, and the
+  three hybrid classifiers: `entangler="rydberg"` on any connected `AtomRegister` with
+  `n_qubits` atoms, at any blockade radius, optionally with CCZ on its blockade triangles.
+  `None` keeps the default chain. `get_config` and checkpoints store the positions as a list of
+  `[x, y]` lists, older `"rydberg"` checkpoints load as the chain, the options are refused with
+  any other entangler, and `CircuitSummary.n_blockade_layers` counts the layer's own register
+  (#644, #696)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;

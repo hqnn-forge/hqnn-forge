@@ -17,6 +17,7 @@ import inspect
 import logging
 import os
 import warnings
+from collections.abc import Sequence
 from typing import Literal, NoReturn, assert_never, get_args
 
 import pennylane as qml
@@ -25,11 +26,13 @@ from pennylane.exceptions import AllocationError, DeviceError
 
 from hqnn_forge.circuits import (
     RYDBERG_BLOCKADE_RADIUS,
+    blockade_schedule,
     hardware_efficient_layer,
     neutral_atom_layer,
     rydberg_chain,
     strongly_entangling_layer,
 )
+from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 from hqnn_forge.utils.rng import as_seed
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,10 @@ KNOWN_DEVICES: tuple[str, ...] = get_args(KnownDevice)
 DeviceName = str
 Entangler = Literal["ring", "strongly_entangling", "brickwork", "hardware_efficient", "rydberg"]
 Readout = Literal["all", "first"]
+#: What ``atom_register`` accepts: an :class:`~hqnn_forge.rydberg.AtomRegister`,
+#: or its positions in µm, one ``[x, y]`` row per atom (a nested sequence or a
+#: tensor), as :class:`~hqnn_forge.rydberg.AtomRegister` itself takes them.
+AtomRegisterLike = AtomRegister | Sequence[Sequence[float]] | torch.Tensor
 
 #: Devices tried, in order, after the requested one fails.  Each is a strict
 #: subset of the previous one's requirements: ``lightning.qubit`` needs only
@@ -158,6 +165,10 @@ def apply_variational_layers(
     n_layers: int,
     entangler: Entangler = "ring",
     layer_offset: int = 0,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> None:
     """
     Apply the ``n_layers`` variational blocks to the current circuit.
@@ -187,12 +198,21 @@ def apply_variational_layers(
       parameters of the ``Rot`` blocks, with CZ native on many devices.
     * ``"rydberg"``: the blockade CZs of a neutral-atom register in their
       parallel layers, then ``Rot(φ, θ, ω)`` on every qubit:
-      :func:`hqnn_forge.circuits.neutral_atom_layer` on the fixed register
-      :func:`hqnn_forge.circuits.rydberg_chain` ``(n_qubits)`` at
-      :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`.  Its graph is the
-      nearest-neighbour path, so the block is ``CZ(i, i+1)`` for every ``i``
-      (no wrap-around, no CCZ) and then ``Rot``, run in ``min(3, n − 1)``
-      blockade layers (``CircuitSummary.n_blockade_layers``).
+      :func:`hqnn_forge.circuits.neutral_atom_layer` on ``atom_register`` at
+      ``blockade_radius``, the same register in every layer.  By default
+      (both ``None``) the register is :func:`hqnn_forge.circuits.rydberg_chain`
+      ``(n_qubits)`` at :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`.
+      Its graph is the nearest-neighbour path, so the block is ``CZ(i, i+1)``
+      for every ``i`` (no wrap-around, no CCZ) and then ``Rot``, run in
+      ``min(3, n − 1)`` blockade layers (``CircuitSummary.n_blockade_layers``).
+      Any other register gives CZ on the edges of its interaction graph, and
+      with ``ccz=True`` a CCZ on each of its blockade triangles.  The
+      register needs ``n_qubits`` atoms (atom ``i`` is wire ``i``) and a
+      connected interaction graph.
+
+    ``atom_register``, ``blockade_radius`` and ``ccz`` apply to ``"rydberg"``
+    only; a value other than the default with any other ``entangler`` raises
+    ``ValueError``.
 
     ``"ring"``, ``"strongly_entangling"``, ``"brickwork"`` and ``"rydberg"`` take ``weights``
     of shape ``(n_layers, n_qubits, 3)`` and use ``n_layers · n_qubits``
@@ -213,6 +233,9 @@ def apply_variational_layers(
     once.  The ``"ring"``, ``"brickwork"``, ``"hardware_efficient"`` and
     ``"rydberg"`` blocks do not depend on the layer index.
     """
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits, entangler, atom_register, blockade_radius, ccz
+    )
     if entangler == "strongly_entangling":
         # A single wire has no CNOT partner: leave the ranges to the template,
         # which uses 0 there instead of dividing by n - 1 = 0.
@@ -232,9 +255,14 @@ def apply_variational_layers(
             # CZ ladder, then RY(θ) on every qubit
             hardware_efficient_layer(weights[layer], n_qubits)
         elif entangler == "rydberg":
-            # Blockade CZs in parallel layers, then Rot(φ, θ, ω) on every atom;
-            # the same register in every layer (#418)
-            neutral_atom_layer(weights[layer], rydberg_chain(n_qubits), RYDBERG_BLOCKADE_RADIUS)
+            # Blockade CZs (and CCZs) in parallel layers, then Rot(φ, θ, ω) on
+            # every atom; the same register in every layer (#418, #644)
+            neutral_atom_layer(
+                weights[layer],
+                neutral_atom_register(n_qubits, register),
+                neutral_atom_radius(radius),
+                ccz=ccz,
+            )
         elif entangler == "brickwork":
             # Brickwork: even nearest-neighbour pairs, then odd ones
             for start in (0, 1):
@@ -289,20 +317,145 @@ def validate_circuit_options(
     entangler: Entangler,
     readout: Readout,
     rotation: RotationAxis | None = None,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> None:
     """
     Raise ``ValueError`` for an ``entangler``, ``readout`` or (if given)
-    ``rotation`` outside the allowed values.
+    ``rotation`` outside the allowed values, or for an ``atom_register``,
+    ``blockade_radius`` or ``ccz`` that does not fit: a register without
+    ``n_qubits`` atoms or whose interaction graph is not connected, a radius
+    that is not a finite number ``> 0``, or any of the three with an
+    ``entangler`` other than ``"rydberg"`` (``TypeError`` for a ``ccz`` that
+    is not a ``bool``).
 
     The encoding builders call this eagerly: ``qml.AngleEmbedding`` only
     rejects the axis when the circuit first runs, which is a forward pass away
     from the constructor that was given it -- and past get_config and a
-    checkpoint.
+    checkpoint.  The same holds for a register whose graph is disconnected,
+    which :func:`~hqnn_forge.circuits.blockade_schedule` would only refuse
+    when the circuit is first recorded.
     """
     readout_wires(n_qubits, readout)
     _check_entangler(entangler)
     if rotation is not None and rotation not in ("X", "Y", "Z"):
         raise ValueError(f"rotation must be 'X', 'Y' or 'Z'; got {rotation!r}.")
+    resolve_neutral_atom_options(n_qubits, entangler, atom_register, blockade_radius, ccz)
+
+
+def resolve_neutral_atom_options(
+    n_qubits: int,
+    entangler: str,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
+) -> tuple[AtomRegister | None, float | None, bool]:
+    """
+    Check the ``atom_register``, ``blockade_radius`` and ``ccz`` options and return them normalised.
+
+    They describe the register ``entangler="rydberg"`` runs on (#644), and
+    ``None`` means the default of #418: ``atom_register=None`` is
+    :func:`~hqnn_forge.circuits.rydberg_chain` ``(n_qubits)``,
+    ``blockade_radius=None`` is
+    :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`, and the two default
+    independently of each other.  Positions and radius are in µm.
+
+    Checks, in order:
+
+    * With any ``entangler`` but ``"rydberg"``, all three must be at their
+      defaults (``None``, ``None``, ``False``): the other blocks have no
+      register, so a value would be recorded in a config and ignored.
+    * ``atom_register`` is anything :class:`~hqnn_forge.rydberg.AtomRegister`
+      accepts, and has exactly ``n_qubits`` atoms: atom ``i`` is wire ``i``,
+      and every wire of the circuit needs an atom.
+    * ``blockade_radius`` is a finite number ``> 0``.
+    * ``ccz`` is a ``bool`` (``TypeError`` otherwise).
+    * The interaction graph of the effective register at the effective radius
+      connects every atom (:func:`~hqnn_forge.circuits.blockade_schedule`
+      raises otherwise, naming the atoms cut off).
+
+    Returns
+    -------
+    tuple
+        ``(atom_register, blockade_radius, ccz)``: an
+        :class:`~hqnn_forge.rydberg.AtomRegister` or ``None``, a ``float`` or
+        ``None``, and a ``bool``.  ``None`` stays ``None``, so a layer or a
+        config records only what was asked for.
+
+    Raises
+    ------
+    TypeError
+        If ``atom_register`` holds complex or boolean values, or ``ccz`` is
+        not a ``bool``.
+    ValueError
+        For any other check above that fails, and for positions
+        :class:`~hqnn_forge.rydberg.AtomRegister` refuses.
+    """
+    if entangler != "rydberg":
+        given = [
+            name
+            for name, value, default in (
+                ("atom_register", atom_register, None),
+                ("blockade_radius", blockade_radius, None),
+                ("ccz", ccz, False),
+            )
+            if value is not default
+        ]
+        if given:
+            raise ValueError(
+                f"{', '.join(given)} {'apply' if len(given) > 1 else 'applies'} to "
+                f"entangler='rydberg' only; got entangler={entangler!r}, which has no atom "
+                f"register, so {'they' if len(given) > 1 else 'it'} would be recorded and ignored."
+            )
+        return None, None, False
+    register = (
+        None
+        if atom_register is None
+        else atom_register
+        if isinstance(atom_register, AtomRegister)
+        else AtomRegister(atom_register)
+    )
+    if register is not None and register.n_atoms != n_qubits:
+        raise ValueError(
+            f"atom_register has {register.n_atoms} atoms, but entangler='rydberg' puts atom i "
+            f"on wire i and needs one atom per qubit: n_qubits={n_qubits}."
+        )
+    radius = (
+        None
+        if blockade_radius is None
+        else _finite_number(blockade_radius, "blockade_radius", positive=True)
+    )
+    if not isinstance(ccz, bool):
+        raise TypeError(f"ccz must be True or False; got {ccz!r}.")
+    # Raises for a disconnected graph, naming the atoms cut off from atom 0
+    blockade_schedule(neutral_atom_register(n_qubits, register), neutral_atom_radius(radius))
+    return register, radius, ccz
+
+
+def neutral_atom_register(n_qubits: int, atom_register: AtomRegister | None) -> AtomRegister:
+    """The register ``entangler="rydberg"`` runs on: ``atom_register``, or ``rydberg_chain(n_qubits)``."""
+    return rydberg_chain(n_qubits) if atom_register is None else atom_register
+
+
+def neutral_atom_repr(layer: object) -> str:
+    """The ``extra_repr`` fragment of the neutral-atom options a layer was given, if any."""
+    options = ""
+    register = getattr(layer, "atom_register", None)
+    if register is not None:
+        options += f", atom_register={register.positions.tolist()}"
+    radius = getattr(layer, "blockade_radius", None)
+    if radius is not None:
+        options += f", blockade_radius={radius!r}"
+    if getattr(layer, "ccz", False):
+        options += ", ccz=True"
+    return options
+
+
+def neutral_atom_radius(blockade_radius: float | None) -> float:
+    """The blockade radius in µm: ``blockade_radius``, or :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`."""
+    return RYDBERG_BLOCKADE_RADIUS if blockade_radius is None else blockade_radius
 
 
 def _check_entangler(entangler: str) -> None:

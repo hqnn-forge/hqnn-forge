@@ -103,6 +103,7 @@ import torch
 import torch.nn as nn
 
 from hqnn_forge.encoding._common import (
+    AtomRegisterLike,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -112,9 +113,11 @@ from hqnn_forge.encoding._common import (
     check_inputs,
     expand_batch_dimension,
     measure_z,
+    neutral_atom_repr,
     readout_wires,
     resolve_backend,
     resolve_device,
+    resolve_neutral_atom_options,
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
@@ -161,6 +164,10 @@ def _make_amplitude_embedding_circuit(
     diff_method: str,
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
     """
     Factory returning the bare quantum function for the amplitude feature map.
@@ -185,10 +192,14 @@ def _make_amplitude_embedding_circuit(
        template does not re-normalise: ``inputs`` must already have unit norm,
        which the template checks.
     2. :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`
-       with the ``"ring"`` block: per layer a CNOT ring ``CNOT(i → i+1 mod n)``,
-       then ``Rot`` on each qubit.
+       with the ``entangler`` block (and, for ``"rydberg"``, ``atom_register``,
+       ``blockade_radius`` and ``ccz``); the default ``"ring"`` is per layer a
+       CNOT ring ``CNOT(i → i+1 mod n)``, then ``Rot`` on each qubit.
     3. ``[⟨Z_i⟩ for i in range(n_qubits)]``.
     """
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits, entangler, atom_register, blockade_radius, ccz
+    )
 
     def circuit(
         inputs: torch.Tensor,
@@ -201,7 +212,15 @@ def _make_amplitude_embedding_circuit(
         qml.AmplitudeEmbedding(features=inputs, wires=range(n_qubits))
 
         # ── 2 & 3. Variational layers, then ⟨Z⟩ on every wire ──────────────
-        apply_variational_layers(weights, n_qubits, n_layers, entangler)
+        apply_variational_layers(
+            weights,
+            n_qubits,
+            n_layers,
+            entangler,
+            atom_register=register,
+            blockade_radius=radius,
+            ccz=ccz,
+        )
         return measure_z(n_qubits, readout)
 
     return circuit
@@ -221,6 +240,10 @@ def build_amplitude_qnode(
     readout: Readout = "all",
     shots: int | None = None,
     seed: int | None = None,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the amplitude feature map.
@@ -242,22 +265,42 @@ def build_amplitude_qnode(
         Number of entangling + rotation layers in the VQC ansatz.
     device_name, diff_method, entangler, readout:
         As for :func:`hqnn_forge.encoding.build_encoding_qnode`.
+    atom_register, blockade_radius, ccz:
+        The register of ``entangler="rydberg"``, as for
+        :func:`hqnn_forge.encoding.build_encoding_qnode`.
 
     Raises
     ------
     ValueError
-        If ``n_qubits < 2``, or ``entangler`` or ``readout`` is unknown.
+        If ``n_qubits < 2``, or ``entangler`` or ``readout`` is unknown, or
+        for an ``atom_register``, ``blockade_radius`` or ``ccz`` that does
+        not fit (see
+        :func:`~hqnn_forge.encoding.angle_embedding.validate_circuit_options`).
     """
     if n_qubits < 2:
         raise ValueError(f"n_qubits must be ≥ 2 for the CNOT entangling ring; got {n_qubits}.")
-    validate_circuit_options(n_qubits, entangler, readout)
+    validate_circuit_options(
+        n_qubits,
+        entangler,
+        readout,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
+    )
 
     device_name, diff_method = resolve_backend(device_name, diff_method, n_qubits, shots=shots)
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits, seed=seed)
     validate_device_shots(device, shots)
     circuit_fn = _make_amplitude_embedding_circuit(
-        n_qubits, n_layers, diff_method, entangler, readout
+        n_qubits,
+        n_layers,
+        diff_method,
+        entangler,
+        readout,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
     )
 
     qnode = qml.QNode(
@@ -361,6 +404,10 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         The variational block: ``"ring"`` (default), ``"strongly_entangling"``,
         ``"brickwork"``, ``"hardware_efficient"`` or ``"rydberg"``; see
         :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
+    atom_register, blockade_radius, ccz:
+        The register of ``entangler="rydberg"``, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.  Default: the
+        chain :func:`hqnn_forge.circuits.rydberg_chain` ``(n_qubits)``, no CCZ.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``.
@@ -434,6 +481,10 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        *,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
 
@@ -455,6 +506,9 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
+        self.atom_register, self.blockade_radius, self.ccz = resolve_neutral_atom_options(
+            n_qubits, entangler, atom_register, blockade_radius, ccz
+        )
 
         qnode = build_amplitude_qnode(
             n_qubits=n_qubits,
@@ -465,6 +519,9 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
             readout=readout,
             shots=shots,
             seed=seed,
+            atom_register=self.atom_register,
+            blockade_radius=self.blockade_radius,
+            ccz=self.ccz,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
@@ -556,6 +613,7 @@ class AmplitudeEncodingLayer(TrainingNoiseMixin, nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
+        options += neutral_atom_repr(self)
         return (
             f"n_qubits={self.n_qubits}, "
             f"n_layers={self.n_layers}, "
