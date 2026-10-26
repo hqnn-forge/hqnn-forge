@@ -388,6 +388,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RYDBERG_BLOCKADE_RADIUS` = 8.69 µm, so CZ on neighbours only, in `min(3, n_qubits − 1)`
   parallel layers per block), and `CircuitSummary.n_blockade_layers`, which counts those layers
   (`None` for the other entanglers) (#418, #643)
+- A results page, `docs/results/rydberg-features-benchmark.md`, with the summary script
+  `examples/summarise_rydberg_benchmark.py`: one run of `examples/benchmark_rydberg_features.py`
+  over the `V/Ω` and `γ/Ω` grid on the positive control and Iranian Churn, 13 folds so that the
+  Holm-corrected exact Wilcoxon test can reach α = 0.05, with its raw output xz-compressed as
+  `docs/results/rydberg_features_benchmark.jsonl.xz`. The interactions helped a linear head on
+  the positive control and added nothing usable on Iranian Churn. The runner's `read_records`
+  now also reads a `.xz` file (#502, #703)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
@@ -646,8 +653,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#261)
 - `circuit_summary`, `draw_circuit` and `gradient_variance` raised on an
   `AmplitudeEncodingLayer`, because they built their sample input with `n_qubits` features;
-  they now use the layer's input width and `prepare_inputs`, and the default amplitude sample
-  shows the full state preparation, an upper bound on the gate count for any input (#279)
+  they now use the layer's input width and `prepare_inputs`. For an amplitude layer with
+  `diff_method="backprop"`, the default sample requires gradients so the summary and drawing
+  describe the gradient-carrying state preparation circuit (matching an amplitude layer behind
+  a classical encoder, padding included), retaining every rotation and emitting `2**n - 1` `RY`,
+  `2**n - 1` `RZ`, and `2**(n + 1) - 4` `CNOT` gates on both PennyLane 0.45 and 0.46; an amplitude
+  layer fed raw features without gradients can execute fewer gates, and under other differentiation
+  methods (such as `adjoint` or `parameter-shift`) which reject input gradients, the sample carries
+  no gradients and reflects the no-gradient circuit (#279, #705, #706)
 - `circuit_summary` raised `AttributeError` on PennyLane 0.46, whose `specs` resources drop
   `num_gates`, `gate_types` and `gate_sizes`; it now counts depth and gates on the decomposed
   tape itself and gives the same summary on 0.45 and 0.46 (#364)
