@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import itertools
 import math
+import time
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -33,6 +35,7 @@ from hqnn_forge.rydberg import (
     MAX_ATOMS,
     AtomRegister,
     evolve,
+    lindblad,
     readout,
     rydberg_hamiltonian,
 )
@@ -905,14 +908,66 @@ class TestBatch:
         assert torch.equal(evolve(h.real, 0.9), evolve(h, 0.9))
 
 
+def central_differences(
+    function: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    ``∂f/∂x_j ≈ (f(x + ε e_j) − f(x − ε e_j)) / (2ε)``, with ``j`` on new trailing axes.
+
+    The truncation error is ``ε² f‴/6``, about ``1e-12`` for the smooth features
+    here, and rounding adds about ``1e-16/ε = 1e-10``.
+    """
+    flat = x.detach().reshape(-1)
+    columns = []
+    for j in range(flat.numel()):
+        step = torch.zeros_like(flat)
+        step[j] = eps
+        plus = function((flat + step).reshape(x.shape))
+        minus = function((flat - step).reshape(x.shape))
+        columns.append((plus - minus) / (2 * eps))
+    return torch.stack(columns, dim=-1).reshape(*columns[0].shape, *x.shape)
+
+
+def uncoupled_pair(gamma: float, n_steps: int | None) -> Callable[[torch.Tensor], torch.Tensor]:
+    """
+    ``⟨n_0⟩, ⟨n_1⟩, ⟨n_0 n_1⟩`` of #505's two atoms without interactions.
+
+    ``H = h_0 ⊗ 1 + 1 ⊗ h_1``, so its energies are the sums ``e_0 + e_1`` of
+    single-atom energies.  With equal detunings ``h_0 = h_1`` and the two
+    mixed sums coincide: the spectrum is degenerate exactly where the two
+    inputs are equal.
+    """
+    register = AtomRegister.chain(2, 1.0)
+
+    def features(delta: torch.Tensor) -> torch.Tensor:
+        h = rydberg_hamiltonian(register, 2.0, delta, c6=1.3, interactions=False)
+        return readout(evolve(h, 0.8, gamma=gamma, n_steps=n_steps), pairs=True)
+
+    return features
+
+
+#: #505's degenerate point; a point ``1e-9`` away from it, whose two mixed
+#: energies differ by about ``1e-9`` rad/µs, where a divided difference
+#: ``(f(E_m) − f(E_k)) / (E_m − E_k)`` would cancel to a few digits; and a batch
+#: holding both and a non-degenerate point.
+DEGENERATE_POINTS = {
+    "degenerate": [0.4, 0.4],
+    "near-degenerate": [0.4, 0.4 + 1e-9],
+    "batch": [[0.4, 0.4], [0.4, 0.4 + 1e-9], [0.4, 1.1]],
+}
+DEPHASING = [(0.0, None), (0.8, 6)]
+
+
 class TestGradients:
     """
-    Nothing in the solver blocks autograd (#420): no in-place operation on the
-    path. Tests cover gradient correctness for both degenerate and non-degenerate
-    spectra (#505).
+    Derivatives through ``evolve`` in every autograd mode, against central
+    finite differences.  At a degenerate spectrum the backward pass of
+    ``eigh`` returns a finite but wrong gradient (#505), and so did forward
+    mode through it (#674).  ``evolve`` differentiates its propagator in the
+    eigenbasis instead, by the Daleckii–Krein formula of the module docstring.
     """
 
-    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
     @pytest.mark.parametrize("pairs", [False, True])
     def test_gradient_at_a_degenerate_spectrum_matches_finite_differences(
         self, gamma: float, n_steps: int | None, pairs: bool
@@ -930,7 +985,7 @@ class TestGradients:
         delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
         assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
 
-    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
     def test_gradient_of_the_features_matches_finite_differences(
         self, gamma: float, n_steps: int | None
     ) -> None:
@@ -944,36 +999,252 @@ class TestGradients:
         delta = torch.tensor([0.4, 1.1], dtype=F64, requires_grad=True)
         assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
 
-    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
-    def test_gradient_and_non_gradient_paths_agree(
-        self, gamma: float, n_steps: int | None, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("point", DEGENERATE_POINTS)
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
+    @pytest.mark.parametrize(
+        "jacobian", [torch.func.jacfwd, torch.func.jacrev], ids=["jacfwd", "jacrev"]
+    )
+    def test_jacobian_at_a_degenerate_spectrum_matches_finite_differences(
+        self,
+        jacobian: Callable[..., Callable[[torch.Tensor], torch.Tensor]],
+        gamma: float,
+        n_steps: int | None,
+        point: str,
     ) -> None:
-        """Both propagation paths produce equivalent forward results."""
-        register = AtomRegister.chain(2, 1.0)
-        delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
-        h = rydberg_hamiltonian(register, 2.0, delta, c6=1.3, interactions=False)
+        """``torch.func`` in forward and in reverse mode (#674)."""
+        features = uncoupled_pair(gamma, n_steps)
+        delta = torch.tensor(DEGENERATE_POINTS[point], dtype=F64)
+        expected = central_differences(features, delta)
+        torch.testing.assert_close(jacobian(features)(delta), expected, rtol=0, atol=1e-8)
 
-        def fail_eigh(*args: object, **kwargs: object) -> torch.Tensor:
-            raise AssertionError("gradient-enabled evolution must not call torch.linalg.eigh")
+    @pytest.mark.parametrize(
+        ("gamma", "n_steps", "value"), [(0.0, None, -0.02279), (0.8, 6, -0.01892)]
+    )
+    def test_jacfwd_gives_the_finite_differences_of_the_issue(
+        self, gamma: float, n_steps: int | None, value: float
+    ) -> None:
+        """
+        ``∂(⟨n_0⟩ + ⟨n_1⟩)/∂Δ_i`` at ``Δ = (0.4, 0.4)``, to the 4 digits #505
+        reports.  Through ``eigh``, ``jacfwd`` gave ``[−0.0209, −0.0287]`` and
+        ``[+0.0120, −0.0017]`` (#674); the function is symmetric in the two
+        atoms, so the two entries must be equal.
+        """
+        features = uncoupled_pair(gamma, n_steps)
 
-        with monkeypatch.context() as m:
-            m.setattr(torch.linalg, "eigh", fail_eigh)
-            rho_with_grad = evolve(h, 0.8, gamma=gamma, n_steps=n_steps)
+        def total(delta: torch.Tensor) -> torch.Tensor:
+            return features(delta)[:2].sum()
 
-        features_with_grad = readout(rho_with_grad)
+        grad = torch.func.jacfwd(total)(torch.tensor([0.4, 0.4], dtype=F64))
+        torch.testing.assert_close(grad, torch.full((2,), value, dtype=F64), rtol=0, atol=5e-6)
+
+    @pytest.mark.parametrize("point", ["degenerate", "near-degenerate"])
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
+    def test_dual_tensors_match_finite_differences(
+        self, gamma: float, n_steps: int | None, point: str
+    ) -> None:
+        """``torch.autograd.forward_ad``, which ``gradcheck`` drives, besides backward."""
+        delta = torch.tensor(DEGENERATE_POINTS[point], dtype=F64, requires_grad=True)
+        assert torch.autograd.gradcheck(
+            uncoupled_pair(gamma, n_steps), (delta,), eps=1e-6, atol=1e-7, check_forward_ad=True
+        )
+
+    @pytest.mark.parametrize("point", ["degenerate", "near-degenerate"])
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
+    def test_second_derivatives_match_finite_differences(
+        self, gamma: float, n_steps: int | None, point: str
+    ) -> None:
+        """Reverse over reverse and forward over reverse, against differences of the gradient."""
+        delta = torch.tensor(DEGENERATE_POINTS[point], dtype=F64, requires_grad=True)
+        assert torch.autograd.gradgradcheck(
+            uncoupled_pair(gamma, n_steps), (delta,), eps=1e-6, atol=1e-6, check_fwd_over_rev=True
+        )
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), DEPHASING)
+    def test_the_hessian_of_torch_func_matches_finite_differences(
+        self, gamma: float, n_steps: int | None
+    ) -> None:
+        """``torch.func.hessian`` (forward over reverse) at #505's degenerate point."""
+        features = uncoupled_pair(gamma, n_steps)
+
+        def total(delta: torch.Tensor) -> torch.Tensor:
+            return features(delta).sum()
+
+        delta = torch.tensor([0.4, 0.4], dtype=F64)
+        expected = central_differences(torch.func.grad(total), delta, eps=1e-5)
+        torch.testing.assert_close(torch.func.hessian(total)(delta), expected, rtol=0, atol=1e-8)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.5, 4)])
+    def test_the_state_does_not_depend_on_the_autograd_mode(
+        self, gamma: float, n_steps: int | None
+    ) -> None:
+        """
+        A strong blockade, ``‖H‖₂ ≈ 6e8`` rad/µs (6 atoms 0.6 µm apart,
+        ``DEFAULT_C6``), for ``t = 4`` µs: with ``matrix_exp`` on the gradient
+        path, ``ρ`` differed from the ``no_grad`` one by ``3.6e-8`` and its
+        trace from 1 by ``7e-8`` (#674).  Every mode runs the same
+        eigendecomposition now, so the states are equal bit for bit.
+        """
+        register = AtomRegister.chain(6, 0.6)
+
+        def state(delta: torch.Tensor) -> torch.Tensor:
+            h = rydberg_hamiltonian(register, 2.0, delta, c6=DEFAULT_C6)
+            return evolve(h, 4.0, gamma=gamma, n_steps=n_steps)
+
+        delta = torch.linspace(-1.0, 1.0, 6, dtype=F64)
         with torch.no_grad():
-            rho_without_grad = evolve(h.detach(), 0.8, gamma=gamma, n_steps=n_steps)
-            features_without_grad = readout(rho_without_grad)
+            reference = state(delta)
+        assert abs(reference.diagonal().sum().item() - 1) < 1e-12
+        tangent = torch.ones_like(delta)
+        with torch.autograd.forward_ad.dual_level():
+            dual = state(torch.autograd.forward_ad.make_dual(delta, tangent))
+            dual_primal = torch.autograd.forward_ad.unpack_dual(dual).primal.detach()
+        states = {
+            "requires_grad": state(delta.clone().requires_grad_(True)).detach(),
+            "torch.func.jvp": torch.func.jvp(state, (delta,), (tangent,))[0],
+            "torch.func.vjp": torch.func.vjp(state, delta)[0],
+            "forward_ad": dual_primal,
+        }
+        for mode, rho in states.items():
+            assert torch.equal(rho, reference), mode
 
-        torch.testing.assert_close(
-            rho_with_grad.detach(), rho_without_grad, rtol=1e-10, atol=1e-12
+    @pytest.mark.slow
+    def test_a_backward_pass_at_max_atoms_costs_about_a_forward_pass(self) -> None:
+        """
+        The backward pass reuses the forward pass's eigendecomposition and adds
+        four ``2^N × 2^N`` matrix products: forward and backward together took
+        1.8 to 2.2 times the forward pass alone at 10 atoms (2 and 16 threads).
+        With ``matrix_exp`` on the gradient path they took 22 to 45 times as
+        long (#674).  The bound of 4 leaves room for a noisy machine.
+        """
+        register = AtomRegister.chain(MAX_ATOMS, 3.0)
+        delta = torch.linspace(-1.0, 1.0, MAX_ATOMS, dtype=F64)
+
+        def seconds(backward: bool) -> float:
+            times = []
+            for _ in range(3):
+                x = delta.clone().requires_grad_(backward)
+                start = time.perf_counter()
+                h = rydberg_hamiltonian(register, 2.0, x, c6=DEFAULT_C6)
+                total = readout(evolve(h, 4.0)).sum()
+                if backward:
+                    total.backward()
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        assert seconds(backward=True) < 4 * seconds(backward=False)
+
+
+class TestPropagatorDerivative:
+    """
+    The derivative of ``U = e^(−iHτ)`` that ``evolve`` uses (Daleckii–Krein),
+    against ``scipy.linalg.expm_frechet``, which computes the same derivative
+    by scaling and squaring, without an eigendecomposition.
+    ``expm_frechet(A, E)`` is the derivative of ``e^A`` in direction ``E``, so
+    ``d/dε e^(−iτ(H + εX)) = expm_frechet(−iτH, −iτX)``.
+    """
+
+    DIM = 8
+
+    @staticmethod
+    def jvp(
+        function: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor, tangent: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``torch.func.jvp`` for one tensor in and out: ``(f(x), L(x, tangent))``."""
+        output = torch.func.jvp(function, (x,), (tangent,))
+        return output[0], output[1]
+
+    def random_complex(self, generator: torch.Generator) -> torch.Tensor:
+        shape = (self.DIM, self.DIM)
+        return torch.complex(
+            torch.randn(shape, generator=generator, dtype=F64),
+            torch.randn(shape, generator=generator, dtype=F64),
         )
-        torch.testing.assert_close(
-            features_with_grad.detach(),
-            features_without_grad,
-            rtol=1e-10,
-            atol=1e-12,
+
+    def hamiltonian(self, scale: float) -> torch.Tensor:
+        """
+        Complex Hermitian, with a threefold cluster: two equal energies and one
+        ``1e-9`` above them, in a random eigenbasis.
+        """
+        generator = torch.Generator().manual_seed(3)
+        q, _ = torch.linalg.qr(self.random_complex(generator))
+        energies = torch.tensor([-1.0, 0.3, 0.3, 0.3 + 1e-9, 1.2, 2.0, 2.5, 4.0], dtype=F64)
+        h = (q * (scale * energies).to(C128)) @ q.mH
+        return (h + h.mH) / 2
+
+    @pytest.mark.parametrize(("tau", "scale"), [(0.7, 1.0), (300.0, 10.0)])
+    def test_forward_and_reverse_mode_match_expm_frechet(self, tau: float, scale: float) -> None:
+        """
+        A non-Hermitian complex direction: the formula holds for any ``X``.
+        ``‖Hτ‖ = 2.8`` and ``1.2e4``.  Both methods round the phases ``E τ``,
+        so they agree to about ``ε ‖Hτ‖`` relative to the largest entry
+        (measured: ``1e-15`` and ``2.4e-12``); the bound is 10 times that.
+        The gradient is checked by the adjoint identity
+        ``Re Tr(G† L(H, X)) = Re Tr(grad_H† X)`` with ``L`` from scipy, a sum
+        of ``8 × 8`` products with entries of ``G`` of order 1, hence
+        ``64 · atol`` there.
+        """
+        linalg = pytest.importorskip("scipy.linalg")
+        h = self.hamiltonian(scale)
+        generator = torch.Generator().manual_seed(4)
+        direction, cotangent = self.random_complex(generator), self.random_complex(generator)
+        _, frechet = linalg.expm_frechet(-1j * tau * h.numpy(), -1j * tau * direction.numpy())
+        expected = torch.as_tensor(frechet)
+        relative = 10 * torch.finfo(F64).eps * tau * torch.linalg.matrix_norm(h, ord=2).item()
+        atol = relative * expected.abs().max().item()
+
+        def propagator(matrix: torch.Tensor) -> torch.Tensor:
+            return lindblad._Propagator.apply(matrix, tau, False)[0]
+
+        u, tangent = self.jvp(propagator, h, direction)
+        unitary = torch.as_tensor(linalg.expm(-1j * tau * h.numpy()))
+        assert torch.allclose(u, unitary, rtol=0, atol=relative)
+        assert torch.allclose(tangent, expected, rtol=0, atol=atol)
+        (grad,) = torch.func.vjp(propagator, h)[1](cotangent)
+        assert torch.sum(grad.conj() * direction).real.item() == pytest.approx(
+            torch.sum(cotangent.conj() * expected).real.item(), rel=0, abs=self.DIM**2 * atol
         )
+
+    def test_the_first_column_is_the_first_column_with_its_derivatives(self) -> None:
+        """``U e_0``, which ``gamma = 0`` evolves, and its derivatives, from the full ones."""
+        h = self.hamiltonian(1.0)
+        generator = torch.Generator().manual_seed(5)
+        direction = self.random_complex(generator)
+        cotangent = self.random_complex(generator)[:, :1]
+
+        def column(matrix: torch.Tensor) -> torch.Tensor:
+            return lindblad._Propagator.apply(matrix, 0.7, True)[0]
+
+        def full(matrix: torch.Tensor) -> torch.Tensor:
+            return lindblad._Propagator.apply(matrix, 0.7, False)[0]
+
+        u, tangent = self.jvp(full, h, direction)
+        u0, tangent0 = self.jvp(column, h, direction)
+        assert u0.shape == (self.DIM, 1)
+        torch.testing.assert_close(u0, u[:, :1], rtol=0, atol=1e-15)
+        torch.testing.assert_close(tangent0, tangent[:, :1], rtol=0, atol=1e-15)
+        padded = torch.nn.functional.pad(cotangent, (0, self.DIM - 1))
+        (grad0,) = torch.func.vjp(column, h)[1](cotangent)
+        (grad,) = torch.func.vjp(full, h)[1](padded)
+        torch.testing.assert_close(grad0, grad, rtol=0, atol=1e-15)
+
+    def test_the_divided_differences_at_a_gap_of_1e_9(self) -> None:
+        """
+        ``(e^(−iE_mτ) − e^(−iE_kτ)) / (E_m − E_k)`` computed with ``mpmath`` at
+        50 digits, where float64 subtraction would keep about 7 of them.
+        """
+        mpmath = pytest.importorskip("mpmath")  # a dependency of torch, through sympy
+        energies = [0.3, 0.3 + 1e-9, 0.3, -2.0]
+        tau = 0.7
+        actual = lindblad._divided_differences(torch.tensor(energies, dtype=F64), tau)
+        with mpmath.workdps(50):
+            for m, k in itertools.product(range(4), repeat=2):
+                e_m, e_k = mpmath.mpf(energies[m]), mpmath.mpf(energies[k])
+                t = mpmath.mpf(tau)
+                if e_m == e_k:
+                    exact = -1j * t * mpmath.expj(-e_m * t)
+                else:
+                    exact = (mpmath.expj(-e_m * t) - mpmath.expj(-e_k * t)) / (e_m - e_k)
+                assert abs(complex(actual[m, k]) - complex(exact)) < 1e-15
 
 
 class TestValidation:

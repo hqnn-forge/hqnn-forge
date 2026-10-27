@@ -58,6 +58,7 @@ from hqnn_forge.encoding._common import (
     DEVICE_FAILURES,
     FALLBACK_CHAIN,
     KNOWN_DEVICES,
+    AtomRegisterLike,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -69,10 +70,12 @@ from hqnn_forge.encoding._common import (
     expand_batch_dimension,
     is_out_of_memory,
     measure_z,
+    neutral_atom_repr,
     readout_wires,
     reset_device_fallback,
     resolve_backend,
     resolve_device,
+    resolve_neutral_atom_options,
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
@@ -126,6 +129,10 @@ def _make_angle_embedding_circuit(
     rotation: RotationAxis,
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
     """
     Factory returning the *bare quantum function* (not yet a QNode) that
@@ -208,6 +215,15 @@ def _make_angle_embedding_circuit(
        x_{i-L} … x_{i+L} under RX and RY alike, from the first layer on, and
        ⟨Z_0⟩ under ``readout="first"`` sees L + 1 features, all of them only
        from L = n − 1 (see :func:`hqnn_forge.circuits.neutral_atom_layer`).
+       On another ``atom_register`` the same argument runs on its
+       interaction graph instead of the path: CZ and CCZ are diagonal and
+       dress X_i, Y_i only with operators on the neighbours of atom i, so
+       after L layers ⟨Z_i⟩ sees exactly the features of the atoms within
+       graph distance L of atom i (the ball of radius L), under RX and RY,
+       with or without ``ccz`` (a blockade triangle joins atoms that are
+       neighbours already).  ``readout="first"`` then covers every feature
+       once L reaches the eccentricity of atom 0: 2 for a corner of a
+       square, 1 for an atom blockaded with every other.
 
     3. **Per-qubit SU(2) rotation block**:
        ``qml.Rot(φ, θ, ω, wires=i)`` applies Rz(ω)·Ry(θ)·Rz(φ), covering the
@@ -239,6 +255,12 @@ def _make_angle_embedding_circuit(
        back (k < n) keeps ``Rot`` live on wires 0 … k − 1, wire k's ω dead and
        every ``Rot`` beyond wire k dead, so 1 + 3(n − 1 − k) dead.  Layers
        with k ≥ n leave none dead.  That is 21 of 36 at 4 qubits and 3 layers.
+       On another ``atom_register`` the same holds with graph distance from
+       atom 0 in place of the wire index: under ``"all"`` the ``n_qubits``
+       last-layer ω are dead, and under ``"first"`` the k-th layer counted
+       back leaves dead the ω of every atom at distance k from atom 0 and
+       the whole ``Rot`` of every atom farther away (on the chain, atom i is
+       at distance i, which gives the count above).
 
     4. **Measurement**:
        Returns ``[qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]``.
@@ -260,12 +282,15 @@ def _make_angle_embedding_circuit(
         range ``ℓ mod (n-1) + 1``), ``"brickwork"`` (nearest-neighbour
         CNOT pairs, no wrap-around, then Rot), ``"hardware_efficient"`` (a
         CZ ladder, then ``RY``; ``weights`` of shape ``(n_layers, n_qubits)``)
-        or ``"rydberg"`` (the blockade CZs of
+        or ``"rydberg"`` (the blockade CZs of ``atom_register``, by default
         :func:`hqnn_forge.circuits.rydberg_chain`, then Rot).
         See :func:`apply_variational_layers`.
     readout:
         ``"all"`` (step 4 above) or ``"first"`` (``[⟨Z_0⟩]`` only, as in the
         published SHNN).
+    atom_register, blockade_radius, ccz:
+        The register of ``entangler="rydberg"``; see
+        :func:`apply_variational_layers`.
 
     Returns
     -------
@@ -273,6 +298,9 @@ def _make_angle_embedding_circuit(
         A plain Python function suitable for ``@qml.qnode`` decoration.
     """
     validate_circuit_options(n_qubits, entangler, readout, rotation)
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits, entangler, atom_register, blockade_radius, ccz
+    )
 
     def circuit(
         inputs: torch.Tensor,
@@ -286,7 +314,15 @@ def _make_angle_embedding_circuit(
         )
 
         # ── 2 & 3. Variational layers ────────────────────────────────────
-        apply_variational_layers(weights, n_qubits, n_layers, entangler)
+        apply_variational_layers(
+            weights,
+            n_qubits,
+            n_layers,
+            entangler,
+            atom_register=register,
+            blockade_radius=radius,
+            ccz=ccz,
+        )
 
         # ── 4. Measurement: Pauli-Z expectation on the readout wires ─────
         return measure_z(n_qubits, readout)
@@ -309,6 +345,10 @@ def build_encoding_qnode(
     readout: Readout = "all",
     shots: int | None = None,
     seed: int | None = None,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the angle-embedding feature map.
@@ -355,6 +395,9 @@ def build_encoding_qnode(
     shots, seed:
         Finite-shot sampling and the device seed, as for
         :class:`QuantumEncodingLayer`.
+    atom_register, blockade_radius, ccz:
+        The register of ``entangler="rydberg"``, as for
+        :class:`QuantumEncodingLayer`.
 
     Returns
     -------
@@ -369,8 +412,10 @@ def build_encoding_qnode(
     ValueError
         If ``n_qubits < 2`` (minimum for a meaningful entangling ring), or if
         ``rotation``, ``entangler`` or ``readout`` is not one of the values
-        above, or if ``rotation="Z"`` -- all checked here, before the circuit
-        first runs.
+        above, or if ``rotation="Z"``, or for an ``atom_register``,
+        ``blockade_radius`` or ``ccz`` that does not fit (see
+        :func:`validate_circuit_options`) -- all checked here, before the
+        circuit first runs.
 
     Examples
     --------
@@ -397,7 +442,16 @@ def build_encoding_qnode(
     validate_shots(shots, diff_method)
     device = resolve_device(device_name, n_qubits, seed=seed)
     validate_device_shots(device, shots)
-    circuit_fn = _make_angle_embedding_circuit(n_qubits, n_layers, rotation, entangler, readout)
+    circuit_fn = _make_angle_embedding_circuit(
+        n_qubits,
+        n_layers,
+        rotation,
+        entangler,
+        readout,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
+    )
 
     qnode = qml.QNode(
         func=circuit_fn,
@@ -486,6 +540,22 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         ``"rydberg"`` (the same parameter count) or ``"hardware_efficient"``
         (a third of it: one ``RY`` angle per qubit per layer); see
         :func:`apply_variational_layers`.
+    atom_register:
+        With ``entangler="rydberg"`` only: the atom positions in µm, an
+        :class:`~hqnn_forge.rydberg.AtomRegister` or one ``[x, y]`` row per
+        atom, with exactly ``n_qubits`` atoms (atom ``i`` is wire ``i``).
+        ``None`` (default): :func:`hqnn_forge.circuits.rydberg_chain`
+        ``(n_qubits)``, atoms 6 µm apart in a line.
+    blockade_radius:
+        With ``entangler="rydberg"`` only: ``R_b`` in µm, a finite number
+        ``> 0``.  ``None`` (default):
+        :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`, 8.69 µm.  The
+        interaction graph of the register at this radius must connect every
+        atom.
+    ccz:
+        With ``entangler="rydberg"`` only: also a CCZ on every blockade
+        triangle of the register.  Default ``False``.  The default chain has
+        no triangle.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``, the published SHNN readout.
@@ -570,6 +640,11 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         Width of the output: ``n_qubits`` or 1.
     entangler : str
     readout : str
+    atom_register : AtomRegister or None
+        The register as given (converted to an
+        :class:`~hqnn_forge.rydberg.AtomRegister`), ``None`` for the default.
+    blockade_radius : float or None
+    ccz : bool
     noise_level : float
     noise_channel : str
     noise_position : str
@@ -611,6 +686,10 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        *,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
 
@@ -620,6 +699,9 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
+        self.atom_register, self.blockade_radius, self.ccz = resolve_neutral_atom_options(
+            n_qubits, entangler, atom_register, blockade_radius, ccz
+        )
 
         # Build the QNode ─────────────────────────────────────────────────
         qnode = build_encoding_qnode(
@@ -632,6 +714,9 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
             readout=readout,
             shots=shots,
             seed=seed,
+            atom_register=self.atom_register,
+            blockade_radius=self.blockade_radius,
+            ccz=self.ccz,
         )
 
         # Declare the trainable weight tensor shape for TorchLayer ─────────
@@ -723,6 +808,7 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
+        options += neutral_atom_repr(self)
         options += (
             self._noise_repr() + shots_repr(self.shots, self.seed) + backend_repr(self.qlayer)
         )

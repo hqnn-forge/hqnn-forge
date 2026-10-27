@@ -47,6 +47,8 @@ is_circuit_layer        Runtime check for CircuitLayer.
 
 Option types, for annotating calls:
 
+AtomRegisterLike        What ``atom_register`` accepts: an AtomRegister or its
+                        positions in µm, one ``[x, y]`` row per atom.
 DeviceName              Any PennyLane device name (``str``); see ``KNOWN_DEVICES``.
 DiffMethod              Literal of the supported differentiation methods.
 Entangler               Literal of the entangler options.
@@ -68,6 +70,7 @@ from hqnn_forge.encoding.amplitude_embedding import (
 )
 from hqnn_forge.encoding.angle_embedding import (
     AngleEmbeddingQNode,
+    AtomRegisterLike,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -91,6 +94,7 @@ __all__: list[str] = [
     "AUTO_BACKPROP_MAX_QUBITS",
     "AmplitudeEncodingLayer",
     "AngleEmbeddingQNode",
+    "AtomRegisterLike",
     "CircuitLayer",
     "DataReuploadingLayer",
     "DeviceName",

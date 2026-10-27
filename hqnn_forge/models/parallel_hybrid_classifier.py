@@ -94,6 +94,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from hqnn_forge.encoding._common import AtomRegisterLike
 from hqnn_forge.encoding.angle_embedding import (
     DeviceName,
     DiffMethod,
@@ -105,6 +106,7 @@ from hqnn_forge.models._trunk import (
     DEFAULT_ENCODER_ACTIVATION,
     DEFAULT_INIT_STD,
     QuantumTrunk,
+    neutral_atom_config,
     validate_dropout_p,
     validate_encoder_activation,
     validate_init,
@@ -140,8 +142,10 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         ``readout="first"``, ⟨Z_0⟩ misses the first encoded angle under the
         default ring and RX embedding, and most of them under
         ``entangler="brickwork"``; under ``"hardware_efficient"`` and ``"rydberg"``
-        it sees at most ``n_layers + 1`` of them at any depth.  Use 2 or more with a
-        ring.  See step 2 of
+        on its default chain it sees at most ``n_layers + 1`` of them at any
+        depth, and under ``"rydberg"`` on another ``atom_register`` those of
+        the atoms within graph distance ``n_layers`` of atom 0.  Use 2 or more
+        with a ring.  See step 2 of
         :func:`hqnn_forge.encoding.angle_embedding._make_angle_embedding_circuit`.
     classical_hidden_dim:
         Width of the classical MLP branch.  Default: 16.
@@ -196,8 +200,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         range), ``"brickwork"`` (nearest-neighbour CNOT pairs, so each ⟨Z_i⟩
         keeps a local light cone at shallow depth), ``"hardware_efficient"``
         (a CZ ladder then ``RY``: a third of the circuit parameters) or
-        ``"rydberg"`` (the blockade CZs of a neutral-atom chain, then ``Rot``;
-        :func:`hqnn_forge.circuits.rydberg_chain`).  See
+        ``"rydberg"`` (the blockade CZs of a neutral-atom register, by default
+        the chain :func:`hqnn_forge.circuits.rydberg_chain`, then ``Rot``).  See
         :func:`hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
     readout:
         ``"all"`` (default): the head reads every ⟨Z_i⟩.  ``"first"``: ⟨Z_0⟩
@@ -289,6 +293,24 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         without it: evaluate inside
         :func:`hqnn_forge.noise.apply_readout_error` with the same pair to
         keep the shift (#488).  Default ``None``.
+    atom_register:
+        With ``entangler="rydberg"`` only: the atoms the blockade gates act
+        on, an :class:`~hqnn_forge.rydberg.AtomRegister` or its positions in
+        µm, one ``[x, y]`` row per atom, ``n_qubits`` atoms (atom ``i`` is
+        wire ``i``); one register serves every layer.  ``get_config`` and
+        checkpoints store the positions as a list of ``[x, y]`` lists, so the
+        file still loads with ``weights_only=True``.  Default ``None``: the
+        chain :func:`hqnn_forge.circuits.rydberg_chain` ``(n_qubits)``, 6 µm
+        apart.
+    blockade_radius:
+        With ``entangler="rydberg"`` only: ``R_b`` in µm, a finite number
+        ``> 0``; the interaction graph of the register at this radius must
+        connect every atom.  Default ``None``:
+        :data:`~hqnn_forge.circuits.RYDBERG_BLOCKADE_RADIUS`, 8.69 µm.
+    ccz:
+        With ``entangler="rydberg"`` only: also a CCZ on every blockade
+        triangle of the register (none on the default chain).  Default
+        ``False``.
 
     Attributes
     ----------
@@ -339,12 +361,19 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
         seed = as_seed(seed, "seed")
         # Plain floats: _config goes into the checkpoint as it is.
         readout_error = validate_readout_error(readout_error)
+        # Primitives: _config goes into the checkpoint as it is.
+        atom_register, blockade_radius, ccz = neutral_atom_config(
+            atom_register, blockade_radius, ccz
+        )
         # Building the layers draws from the global RNG (nn.Linear and
         # TorchLayer defaults), all of it overwritten by _initialise_weights.
         # With init_seed the whole build runs inside seeded_rng, so the
@@ -378,6 +407,9 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
 
             # Validated before the classical branch is built, as before the shared
@@ -421,6 +453,9 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                atom_register=atom_register,
+                blockade_radius=blockade_radius,
+                ccz=ccz,
             )
 
             # ── Classical head ────────────────────────────────────────────────

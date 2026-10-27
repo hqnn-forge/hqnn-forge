@@ -85,6 +85,7 @@ import torch
 import torch.nn as nn
 
 from hqnn_forge.encoding._common import (
+    AtomRegisterLike,
     DeviceName,
     DiffMethod,
     Entangler,
@@ -95,9 +96,11 @@ from hqnn_forge.encoding._common import (
     check_inputs,
     expand_batch_dimension,
     measure_z,
+    neutral_atom_repr,
     readout_wires,
     resolve_backend,
     resolve_device,
+    resolve_neutral_atom_options,
     shots_repr,
     validate_circuit_options,
     validate_device_shots,
@@ -138,6 +141,10 @@ def _make_data_reuploading_circuit(
     trainable_input_scaling: bool,
     entangler: Entangler = "ring",
     readout: Readout = "all",
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> Callable[..., list[qml.measurements.ExpectationMP]]:
     """
     Factory returning the bare quantum function for the re-uploading circuit.
@@ -158,12 +165,17 @@ def _make_data_reuploading_circuit(
        upload, with ``f = 1`` for ``rotation="Z"`` (whose upload 0 is left
        unscaled) and ``f = 0`` otherwise.
     2. ``apply_variational_layers(weights[ℓ], entangler, layer_offset=ℓ)``,
-       so the ``"strongly_entangling"`` ranges follow the whole ansatz.
+       so the ``"strongly_entangling"`` ranges follow the whole ansatz; for
+       ``"rydberg"`` every block runs on the same ``atom_register`` at the
+       same ``blockade_radius``, with ``ccz``.
 
     Then :func:`~hqnn_forge.encoding.angle_embedding.measure_z` on the
     readout wires.
     """
     first_scaled = _first_scaled_upload(rotation)
+    register, radius, ccz = resolve_neutral_atom_options(
+        n_qubits, entangler, atom_register, blockade_radius, ccz
+    )
 
     def circuit(
         inputs: torch.Tensor,
@@ -179,7 +191,14 @@ def _make_data_reuploading_circuit(
                 features = inputs * input_scaling[layer - first_scaled]
             qml.AngleEmbedding(features=features, wires=range(n_qubits), rotation=rotation)
             apply_variational_layers(
-                weights[layer : layer + 1], n_qubits, 1, entangler, layer_offset=layer
+                weights[layer : layer + 1],
+                n_qubits,
+                1,
+                entangler,
+                layer_offset=layer,
+                atom_register=register,
+                blockade_radius=radius,
+                ccz=ccz,
             )
         return measure_z(n_qubits, readout)
 
@@ -221,6 +240,10 @@ def build_data_reuploading_qnode(
     readout: Readout = "all",
     shots: int | None = None,
     seed: int | None = None,
+    *,
+    atom_register: AtomRegisterLike | None = None,
+    blockade_radius: float | None = None,
+    ccz: bool = False,
 ) -> qml.QNode:
     """
     Build and return a PennyLane QNode for the data re-uploading circuit.
@@ -239,7 +262,7 @@ def build_data_reuploading_qnode(
         If ``True`` the QNode takes a third argument ``input_scaling`` of shape
         :func:`input_scaling_shape` that multiplies the features before each
         scaled upload.
-    entangler, readout:
+    entangler, readout, atom_register, blockade_radius, ccz:
         As for :func:`hqnn_forge.encoding.build_encoding_qnode`.
 
     Raises
@@ -248,14 +271,24 @@ def build_data_reuploading_qnode(
         If ``n_qubits < 2``, ``n_layers < 1``, ``rotation``, ``entangler`` or
         ``readout`` is not one of the values above, or ``rotation="Z"`` with
         ``n_layers=1`` (a lone ``RZ`` upload on ``|0⟩`` is a global phase, so
-        the outputs would not depend on the inputs).  All are checked here,
-        before the circuit first runs.
+        the outputs would not depend on the inputs), or for an
+        ``atom_register``, ``blockade_radius`` or ``ccz`` that does not fit
+        (see :func:`~hqnn_forge.encoding.angle_embedding.validate_circuit_options`).
+        All are checked here, before the circuit first runs.
     """
     if n_qubits < 2:
         raise ValueError(f"n_qubits must be ≥ 2 for the CNOT entangling ring; got {n_qubits}.")
     if n_layers < 1:
         raise ValueError(f"n_layers must be ≥ 1 (one upload per layer); got {n_layers}.")
-    validate_circuit_options(n_qubits, entangler, readout, rotation)
+    validate_circuit_options(
+        n_qubits,
+        entangler,
+        readout,
+        rotation,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
+    )
     if rotation == "Z" and n_layers < 2:
         raise ValueError(
             'rotation="Z" needs n_layers ≥ 2: the first RZ upload acts on |0⟩ as a '
@@ -267,7 +300,15 @@ def build_data_reuploading_qnode(
     device = resolve_device(device_name, n_qubits, seed=seed)
     validate_device_shots(device, shots)
     circuit_fn = _make_data_reuploading_circuit(
-        n_qubits, n_layers, rotation, trainable_input_scaling, entangler, readout
+        n_qubits,
+        n_layers,
+        rotation,
+        trainable_input_scaling,
+        entangler,
+        readout,
+        atom_register=atom_register,
+        blockade_radius=blockade_radius,
+        ccz=ccz,
     )
 
     qnode = qml.QNode(
@@ -368,6 +409,11 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         ``"ring"`` (default), ``"strongly_entangling"``, ``"brickwork"``,
         ``"hardware_efficient"`` or ``"rydberg"``; see
         :func:`~hqnn_forge.encoding.angle_embedding.apply_variational_layers`.
+    atom_register, blockade_radius, ccz:
+        The register of ``entangler="rydberg"``, exactly as for
+        :class:`~hqnn_forge.encoding.QuantumEncodingLayer`; every block runs
+        on the same register.  Default: the chain
+        :func:`hqnn_forge.circuits.rydberg_chain` ``(n_qubits)``, no CCZ.
     readout:
         ``"all"`` (default): the layer returns ``(batch, n_qubits)``.
         ``"first"``: ⟨Z_0⟩ only, ``(batch, 1)``.
@@ -400,6 +446,8 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
     rotation : str
     trainable_input_scaling : bool
     entangler, readout : str
+    atom_register, blockade_radius, ccz
+        As for :class:`~hqnn_forge.encoding.QuantumEncodingLayer`.
     qlayer : pennylane.qnn.TorchLayer
         Owns ``weights`` and, if enabled, ``input_scaling``.
 
@@ -432,6 +480,10 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        *,
+        atom_register: AtomRegisterLike | None = None,
+        blockade_radius: float | None = None,
+        ccz: bool = False,
     ) -> None:
         super().__init__()
 
@@ -443,6 +495,9 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         self.entangler = entangler
         self.readout = readout
         self.n_outputs = len(readout_wires(n_qubits, readout))
+        self.atom_register, self.blockade_radius, self.ccz = resolve_neutral_atom_options(
+            n_qubits, entangler, atom_register, blockade_radius, ccz
+        )
 
         qnode = build_data_reuploading_qnode(
             n_qubits=n_qubits,
@@ -455,6 +510,9 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
             readout=readout,
             shots=shots,
             seed=seed,
+            atom_register=self.atom_register,
+            blockade_radius=self.blockade_radius,
+            ccz=self.ccz,
         )
 
         weight_shapes: dict[str, tuple[int, ...]] = {
@@ -532,6 +590,7 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
             options += f", entangler={self.entangler!r}"
         if self.readout != "all":
             options += f", readout={self.readout!r}"
+        options += neutral_atom_repr(self)
         options += (
             self._noise_repr() + shots_repr(self.shots, self.seed) + backend_repr(self.qlayer)
         )
