@@ -4,10 +4,10 @@ hqnn_forge.noise
 Noise channels, readout error and finite-shot evaluation for HQNN-Forge quantum layers.
 
 The layers and hybrid classifiers can train under depolarizing, amplitude-damping,
-phase-damping, bit-flip or phase-flip noise, and with
+phase-damping, bit-flip, phase-flip or atom-loss noise, and with
 ``readout_error=(p01, p10)`` (see
 *Training-time noise*). Post hoc, :func:`apply_depolarizing_noise` re-runs a
-trained model's quantum layer with any of the five channels for the duration of
+trained model's quantum layer with any of the six channels for the duration of
 a ``with`` block, always as an exact density matrix on ``default.mixed`` whatever
 the layer's ``noise_method``, swapping only the QNode and restoring it when the
 block exits. Gradients still flow, so optimizer steps inside the block can update
@@ -42,6 +42,7 @@ channel                   effect on ⟨Z⟩ at ``"end"``      ``p`` range
 ``"phase_damping"``       unchanged (T2 dephasing)       [0, 1]
 ``"bit_flip"``            ``(1 − 2p) ⟨Z⟩``               [0, 1]
 ``"phase_flip"``          unchanged                      [0, 1]
+``"atom_loss"``           ``(1 − p) ⟨Z⟩ − p``            [0, 1]
 readout error             ``(1 − p01 − p10) ⟨Z⟩``        each in [0, 1]
 (``p01``, ``p10``)        ``+ (p10 − p01)``
 ========================  =============================  ===================
@@ -65,6 +66,56 @@ rebuild the circuit from ``qlayer.qnode``, and
 :func:`apply_readout_error` refuses a layer without the mixin.  Training noise by trajectories covers every channel; see
 *Damping channels as trajectories* below for how the two damping channels are
 sampled and what that rules out.
+
+Atom loss
+---------
+On neutral-atom hardware an atom can leave the trap or the qubit subspace,
+for example after decaying from the Rydberg state during a blockade gate
+(#419).  ``"atom_loss"`` models a lost atom that reads out as ``|1⟩`` --
+dark, no fluorescence -- and is not detected: the readout cannot tell it from
+a qubit in ``|1⟩``.  With probability ``p`` at each site, whatever the state,
+the qubit is replaced by ``|1⟩``.  That is exactly
+``qml.ResetError(p0=0, p1=p)``, whose Kraus operators are
+``sqrt(1 − p) I``, ``sqrt(p) |1⟩⟨0|`` and ``sqrt(p) |1⟩⟨1|``:
+
+    ρ → (1 − p) ρ + p |1⟩⟨1|_w ⊗ Tr_w ρ.
+
+As everywhere in the library ``|0⟩`` has ``Z = +1``, so the dark ``|1⟩`` has
+``Z = −1``.  In the Heisenberg picture the channel on wire ``w`` maps
+``Z_w → (1 − p) Z_w − p I`` (from ``K_i† Z K_i``: ``(1 − p) Z`` from the first
+operator, ``−p |0⟩⟨0|`` and ``−p |1⟩⟨1|`` from the jumps) and leaves operators
+on the other wires alone.  Hence, with loss on the measured wires:
+
+* a single readout: ``⟨Z⟩ → (1 − p) ⟨Z⟩ − p``, so every readout is ``−1``
+  at ``p = 1``;
+* a correlator of two wires: ``⟨Z_i Z_j⟩ → (1 − p)² ⟨Z_i Z_j⟩ −
+  p (1 − p) (⟨Z_i⟩ + ⟨Z_j⟩) + p²``, the product of the two maps;
+* a gradient: at ``"end"`` ``∂⟨Z⟩/∂θ`` is scaled by ``1 − p``; the offset
+  ``−p`` carries none.
+
+Like a readout error's ``p10 − p01``, the offset ``−p`` shifts every output,
+and a head trained under loss learns it: evaluate such a model under the same
+loss.  The sites are those of ``position``, as for every channel: after
+every gate on each wire it acts on (``"all"``), or once per wire before
+measurement (``"end"``); loss after the Rydberg gates only is #700.  As
+trajectories the channel is sampled by weighted Kraus branches, like
+amplitude damping (see *Damping channels as trajectories* below), with the
+same restrictions: branch 0 is the identity, drawn with ``1 − p``, so a draw
+without loss is the noiseless circuit exactly, and the two jumps, drawn with
+``p/2`` each, apply ``sqrt(2) |1⟩⟨0|`` and ``sqrt(2) |1⟩⟨1|``.
+
+A loss that imaging detects, so that the lost samples can be discarded (an
+*erasure*), is not a channel here (#702), because what it does to the model
+follows from the operators above.  The no-loss operator ``sqrt(1 − p) I``
+does not depend on the state.  Post-selecting on no loss at any of the
+``k`` sites therefore leaves ``(1 − p)^k U ρ U†``, where ``U`` is the
+noiseless circuit and ``k`` is the number of sites (``n_qubits`` at
+``"end"``, the sum of the gate widths at ``"all"``).  Renormalising by the
+no-loss probability ``(1 − p)^k``, which does not depend on θ, gives the
+noiseless state exactly.  A kept sample's ⟨O⟩ and its gradient are the
+noiseless ones, and the kept fraction is ``(1 − p)^k``.  Without the
+renormalisation, the flag would scale outputs and gradients by the constant
+``(1 − p)^k``.
 
 ``p = 0`` replaces nothing: the original QNode stays in place, so the output
 is bit-identical to the noiseless model rather than merely close to it.  It
@@ -101,7 +152,8 @@ Two methods, chosen with ``noise_method``:
 ``"trajectories"``
     Pauli-trajectory (Monte Carlo) sampling on the layer's own device and
     differentiation method.  At every channel site each sample independently
-    gets one Pauli, drawn with the channel's weights: for depolarizing ``I``
+    gets one Pauli, drawn with the channel's weights (the two weighted-Kraus
+    channels, amplitude damping and atom loss, are described below): for depolarizing ``I``
     with probability ``1 − p`` and ``X``, ``Y`` or ``Z`` with ``p/3`` each;
     for bit flip ``I`` with ``1 − p`` and ``X`` with ``p``; for phase flip
     ``I`` with ``1 − p`` and ``Z`` with ``p`` (the ``paulis`` weights in
@@ -138,7 +190,7 @@ Two methods, chosen with ``noise_method``:
     ``"trajectories"`` with ``noise_trajectories ≥ 8``, or with fewer draws
     a longer training budget than density needs, and check the runs.
 
-    **Damping channels as trajectories** (#357).  Phase damping with
+    **Damping channels and atom loss as trajectories** (#357, #419).  Phase damping with
     strength ``γ`` keeps the diagonal of ρ and scales its off-diagonal by
     ``sqrt(1 − γ)``, which is exactly what a phase flip with probability
     ``p = (1 − sqrt(1 − γ))/2`` does, so it is sampled as that Pauli channel,
@@ -151,7 +203,8 @@ Two methods, chosen with ``noise_method``:
     unnormalised, and the expectation value of the weighted state, averaged
     over draws, is the channel's output exactly: enumerating every branch of
     a two-qubit circuit reproduced the density result and its gradient to
-    1e-14.  The price is twofold.  First, a draw's output is no longer
+    1e-14.  Atom loss is sampled the same way, with three branches (see
+    *Atom loss* above).  The price is threefold.  First, a draw's output is no longer
     bounded by ±1 and spreads more than a Pauli draw's: the RMS error of one
     draw on a 4-qubit circuit with noise after every gate was 0.16, 0.32 and
     0.88 at ``γ`` = 0.01, 0.05 and 0.2, against 0.13, 0.22 and 0.26 for
@@ -238,23 +291,27 @@ __all__: list[str] = [
 
 Position = Literal["all", "end"]
 NoiseMethod = Literal["density", "trajectories"]
-Channel = Literal["depolarizing", "amplitude_damping", "phase_damping", "bit_flip", "phase_flip"]
+Channel = Literal[
+    "depolarizing", "amplitude_damping", "phase_damping", "bit_flip", "phase_flip", "atom_loss"
+]
 MAX_P = 0.75
 
 
 class _ChannelSpec(NamedTuple):
-    op: type[qml.operation.Channel]
+    #: Builds the channel as ``op(p, wires=w)``: a channel class, or for atom
+    #: loss a function returning ``qml.ResetError(0, p)``.
+    op: Callable[..., qml.operation.Channel]
     #: Largest meaningful strength: 3/4 is fully depolarizing, 1 is a full
-    #: decay, dephasing or flip.
+    #: decay, dephasing, flip or loss.
     max_p: float
     #: (I, X, Y, Z) probabilities of a Pauli channel at strength p, or None:
     #: the channels the trajectory sampler draws as Pauli errors.
     paulis: Callable[[float], tuple[float, float, float, float]] | None
     #: ``(M, q)`` for a channel sampled by weighted Kraus trajectories instead:
-    #: branch 1 is drawn with probability ``q`` and branch ``i`` applies
-    #: ``M[i]``, its Kraus operator divided by the square root of its
-    #: probability (see :func:`_kraus_trajectories`).
-    kraus: Callable[[float], tuple[torch.Tensor, float]] | None = None
+    #: branch ``i ≥ 1`` is drawn with probability ``q[i − 1]``, branch 0 with
+    #: the rest, and branch ``i`` applies ``M[i]``, its Kraus operator divided
+    #: by the square root of its probability (see :func:`_kraus_trajectories`).
+    kraus: Callable[[float], tuple[torch.Tensor, tuple[float, ...]]] | None = None
 
 
 def _phase_damping_as_phase_flip(gamma: float) -> tuple[float, float, float, float]:
@@ -265,7 +322,7 @@ def _phase_damping_as_phase_flip(gamma: float) -> tuple[float, float, float, flo
     return (1 - p, 0.0, 0.0, p)
 
 
-def _amplitude_damping_branches(gamma: float) -> tuple[torch.Tensor, float]:
+def _amplitude_damping_branches(gamma: float) -> tuple[torch.Tensor, tuple[float, ...]]:
     # Kraus operators K0 = diag(1, sqrt(1 - γ)) and K1 = sqrt(γ)|0⟩⟨1|.  The
     # jump branch is drawn with q = γ/2: that makes the weight exactly 1 for a
     # qubit with P(1) = 1/2, and measured best or near-best of γ/4, γ/2, γ and
@@ -273,7 +330,42 @@ def _amplitude_damping_branches(gamma: float) -> tuple[torch.Tensor, float]:
     q = gamma / 2
     k0 = torch.tensor([[1.0, 0.0], [0.0, math.sqrt(1 - gamma)]], dtype=torch.complex128)
     k1 = torch.tensor([[0.0, math.sqrt(gamma)], [0.0, 0.0]], dtype=torch.complex128)
-    return torch.stack([k0 / math.sqrt(1 - q), k1 / math.sqrt(q)]), q
+    return torch.stack([k0 / math.sqrt(1 - q), k1 / math.sqrt(q)]), (q,)
+
+
+def _atom_loss(p: float, wires: object) -> qml.ResetError:
+    """
+    Atom loss read out as ``|1⟩``: exactly ``qml.ResetError(p0=0, p1=p)``.
+
+    A function rather than a bound ``functools.partial``: ``qml.noise.insert``
+    accepts only an operation class or a plain function.
+    """
+    return qml.ResetError(0.0, p, wires=wires)
+
+
+def _atom_loss_branches(p: float) -> tuple[torch.Tensor, tuple[float, ...]]:
+    """
+    Weighted Kraus branches of atom loss read out as ``|1⟩`` (see the module
+    docstring, *Atom loss*).
+
+    ``qml.ResetError(0, p)`` has the Kraus operators ``K0 = sqrt(1 − p) I``,
+    ``K1 = sqrt(p) |1⟩⟨0|`` and ``K2 = sqrt(p) |1⟩⟨1|`` (its ``p0`` ones are
+    zero).  Branches 1 and 2 are drawn with ``p/2`` each, so branch 0 has
+    ``1 − p`` and applies ``K0 / sqrt(1 − p) = I`` exactly -- a draw without
+    loss is the noiseless circuit, for every ``p`` including 1, where it is
+    never drawn -- and the two jumps apply ``sqrt(2) |1⟩⟨0|`` and
+    ``sqrt(2) |1⟩⟨1|``.  Summed over branches, ``Σ_i q_i (K_i/sqrt(q_i))† O
+    (K_i/sqrt(q_i)) = Σ_i K_i† O K_i``: the channel.  The jump probabilities
+    are fixed because the loss itself is state-independent (its total is
+    ``p`` whatever the state); which jump a lost atom takes is not, and the
+    weights carry that, as for amplitude damping.
+    """
+    q = p / 2
+    root2 = math.sqrt(2.0)
+    identity = torch.eye(2, dtype=torch.complex128)
+    from_zero = torch.tensor([[0.0, 0.0], [root2, 0.0]], dtype=torch.complex128)
+    from_one = torch.tensor([[0.0, 0.0], [0.0, root2]], dtype=torch.complex128)
+    return torch.stack([identity, from_zero, from_one]), (q, q)
 
 
 CHANNELS: dict[str, _ChannelSpec] = {
@@ -286,6 +378,7 @@ CHANNELS: dict[str, _ChannelSpec] = {
     "phase_damping": _ChannelSpec(qml.PhaseDamping, 1.0, _phase_damping_as_phase_flip),
     "bit_flip": _ChannelSpec(qml.BitFlip, 1.0, lambda p: (1 - p, p, 0.0, 0.0)),
     "phase_flip": _ChannelSpec(qml.PhaseFlip, 1.0, lambda p: (1 - p, 0.0, 0.0, p)),
+    "atom_loss": _ChannelSpec(_atom_loss, 1.0, None, _atom_loss_branches),
 }
 
 
@@ -398,8 +491,8 @@ def _kraus_trajectories(
     """
     ``tape`` with one weighted Kraus branch per sample at every channel site.
 
-    At each site branch 1 is drawn with the fixed probability ``q`` and branch
-    ``i`` applies ``K_i / sqrt(q_i)``.  The state is left unnormalised, so an
+    At each site branch ``i ≥ 1`` is drawn with the fixed probability ``q_i``
+    (branch 0 with the rest) and branch ``i`` applies ``K_i / sqrt(q_i)``.  The state is left unnormalised, so an
     expectation value is ``⟨ψ|O|ψ⟩`` of the weighted state, and its average
     over draws is ``Σ_i ⟨ψ|K_i† O K_i|ψ⟩``: the channel's output, exactly,
     site by site.  See the module docstring for what this rules out.
@@ -408,9 +501,19 @@ def _kraus_trajectories(
     kraus = CHANNELS[channel].kraus
     assert kraus is not None  # check_kraus_trajectories refuses a channel without
     matrices, q = kraus(p)
+    # One uniform r per sample and site: branch 1 for r < q_1, branch 2 for
+    # q_1 ≤ r < q_1 + q_2, ..., branch 0 for r ≥ Σ q_i.  bucketize counts the
+    # edges at or below r, so branch = (count + 1) mod (number of branches);
+    # with one jump branch this is ``r < q``, as before #419.  The edges are
+    # cast to r's dtype, as the scalar ``q`` was in that comparison, so the
+    # same uniforms give the same branches bit for bit (in float64 a uniform
+    # between q and its float32 rounding would switch branch).
+    edges = torch.tensor(np.cumsum(q), dtype=torch.float64)
+    n_branches = len(q) + 1
 
     def kraus_branch(wires: object) -> None:
-        u = (torch.rand(shape) < q).long()
+        r = torch.rand(shape)
+        u = (torch.bucketize(r, edges.to(r.dtype), right=True) + 1) % n_branches
         qml.QubitUnitary(matrices[u], wires=wires, unitary_check=False)
 
     return qml.noise.insert(tape, kraus_branch, (), position=position)
@@ -438,7 +541,7 @@ def check_kraus_trajectories(channel: str, qnode: qml.QNode) -> None:
     Raise ``ValueError`` if ``channel``'s trajectories cannot run on ``qnode``.
 
     Only channels that are not drawn as Pauli errors are affected: amplitude
-    damping, sampled by weighted Kraus branches.  Their states are
+    damping and atom loss, sampled by weighted Kraus branches.  Their states are
     unnormalised, so the gradient is right only for the methods in
     :data:`KRAUS_DIFF_METHODS` (``adjoint`` was off by 0.17 on a two-qubit
     test circuit, #357; ``diff_method=None`` computes none and is allowed),
@@ -487,8 +590,8 @@ def trajectory_noise_qnode(
     a fresh error pattern per sample (see the module docstring).  The average
     over draws equals :func:`training_noise_qnode`'s output.  The Pauli
     channels -- depolarizing, bit flip, phase flip, and phase damping, which
-    is a phase flip -- are drawn as Pauli errors; amplitude damping as
-    weighted Kraus branches, which rules out ``adjoint``, shots and devices
+    is a phase flip -- are drawn as Pauli errors; amplitude damping and atom
+    loss as weighted Kraus branches, which rules out ``adjoint``, shots and devices
     other than ``default.qubit`` and ``lightning.qubit`` (see
     :func:`check_kraus_trajectories`).
 
@@ -496,7 +599,7 @@ def trajectory_noise_qnode(
     ------
     ValueError
         If ``p`` is 0 or out of range, ``position`` is unknown, or amplitude
-        damping is asked for on a ``qnode`` whose differentiation method,
+        damping or atom loss is asked for on a ``qnode`` whose differentiation method,
         device or shots :func:`check_kraus_trajectories` refuses.
     """
     validate_noise(p, position, channel=channel)
@@ -1100,13 +1203,15 @@ def apply_depolarizing_noise(
         A hybrid classifier or an encoding layer.
     p:
         Strength of each channel: the depolarizing probability in [0, 0.75],
-        or the damping / flip probability in [0, 1].
+        or the damping / flip / loss probability in [0, 1].
     position:
         ``"all"`` or ``"end"``; see the module docstring.
     channel:
         ``"depolarizing"`` (default), ``"amplitude_damping"``,
-        ``"phase_damping"``, ``"bit_flip"`` or ``"phase_flip"``; see the module
-        docstring.
+        ``"phase_damping"``, ``"bit_flip"``, ``"phase_flip"`` or
+        ``"atom_loss"`` (a lost atom read out as ``|1⟩``, so that
+        ``noise_sweep(..., channel="atom_loss")`` sweeps the loss rate); see
+        the module docstring.
 
     Yields
     ------
@@ -1314,7 +1419,7 @@ def apply_shots(model: nn.Module, shots: int | None) -> Iterator[nn.Module]:
     ``noise_method="trajectories"`` training noise samples its train-mode
     trajectories with the block's shots as well; one with ``"density"``
     training noise, which simulates the exact channel, raises in train mode,
-    and so does one with amplitude-damping trajectories, whose unnormalised
+    and so does one with amplitude-damping or atom-loss trajectories, whose unnormalised
     states cannot be sampled (eval mode, where training noise is off, is
     unaffected in both cases).  The original
     QNodes are restored on exit, including when the block raises.
