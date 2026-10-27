@@ -481,7 +481,7 @@ class TestNoiseAwareTraining:
         "params, match",
         [
             ({"noise_level": 0.9}, r"noise_level must lie in \[0, 0.75\]"),
-            ({"noise_position": "middle"}, "noise_position must be 'all' or 'end'"),
+            ({"noise_position": "middle"}, "noise_position must be one of 'all', 'end', 'cz'"),
             ({"noise_method": "kraus"}, "noise_method must be"),
             ({"noise_trajectories": 2}, "needs noise_method='trajectories'"),
         ],

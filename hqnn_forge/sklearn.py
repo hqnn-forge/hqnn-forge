@@ -194,7 +194,7 @@ class HybridClassifierEstimator(ClassifierMixin, BaseEstimator):
         probability ``noise_level`` (in ``[0, 0.75]``) applied to the circuit
         in train mode only, so ``fit`` trains through the noisy circuit and
         ``predict`` / ``predict_proba`` are noiseless.  ``noise_position`` is
-        ``"all"`` or ``"end"``; ``noise_method`` is ``"density"`` (exact,
+        ``"all"``, ``"end"`` or ``"cz"``; ``noise_method`` is ``"density"`` (exact,
         practical up to about 6 qubits) or ``"trajectories"`` (sampled, at
         pure-state cost), with ``noise_trajectories`` draws per sample.  Use
         8 or more draws at noise of a few percent per gate: with fewer, some
