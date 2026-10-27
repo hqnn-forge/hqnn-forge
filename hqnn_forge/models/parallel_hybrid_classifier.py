@@ -273,8 +273,9 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
     noise_channel:
         The channel ``noise_level`` is the strength of: ``"depolarizing"``
         (default), ``"amplitude_damping"``, ``"phase_damping"``,
-        ``"bit_flip"`` or ``"phase_flip"``; see :mod:`hqnn_forge.noise`.  With
-        ``noise_method="trajectories"``, amplitude damping needs
+        ``"bit_flip"``, ``"phase_flip"`` or ``"atom_loss"`` (a lost atom read
+        out as ``|1⟩``); see :mod:`hqnn_forge.noise`.  With
+        ``noise_method="trajectories"``, amplitude damping and atom loss need
         ``diff_method="backprop"``, ``"parameter-shift"`` or ``"finite-diff"``,
         ``default.qubit`` or ``lightning.qubit``, and no ``shots``.
     seed:

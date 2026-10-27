@@ -46,6 +46,7 @@ END_EFFECT = {
     "phase_damping": lambda z, p: z,
     "bit_flip": lambda z, p: (1 - 2 * p) * z,
     "phase_flip": lambda z, p: z,
+    "atom_loss": lambda z, p: (1 - p) * z - p,
 }
 CHANNEL_NAMES: list[Channel] = [
     "depolarizing",
@@ -53,6 +54,7 @@ CHANNEL_NAMES: list[Channel] = [
     "phase_damping",
     "bit_flip",
     "phase_flip",
+    "atom_loss",
 ]
 
 

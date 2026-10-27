@@ -402,6 +402,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[x, y]` lists, older `"rydberg"` checkpoints load as the chain, the options are refused with
   any other entangler, and `CircuitSummary.n_blockade_layers` counts the layer's own register
   (#644, #696)
+- `channel="atom_loss"` (`noise_channel=` on the layers and classifiers): neutral-atom atom
+  loss read out as `|1⟩`, exactly `qml.ResetError(p0=0, p1=p)`, so ⟨Z⟩ → (1 − p)⟨Z⟩ − p at
+  `position="end"`; post hoc through `apply_depolarizing_noise` and `noise_sweep`, for training
+  with `noise_method="density"` or as weighted Kraus trajectories with the amplitude-damping
+  restrictions; loss that imaging detects (an erasure) is derived in the docstring, not a
+  channel (#702) (#419, #701)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
