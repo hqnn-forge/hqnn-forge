@@ -49,11 +49,10 @@ Evolution
     U_k = e^(−i H_k τ),        ψ(T) = U_{K−1} ⋯ U_1 U_0 |g…g⟩,        T = K τ
 
 ``U_k`` is the propagator of :func:`~hqnn_forge.rydberg.evolve`
-(``hqnn_forge.rydberg.lindblad._propagator``): from ``torch.linalg.eigh``
-when no gradient is tracked, and from ``torch.linalg.matrix_exp`` when one
-is, whose backward pass is correct at a degenerate spectrum (#505).
-Forward-mode AD (``torch.func.jvp``, ``jacfwd``) takes the ``eigh`` path and
-is wrong at a degenerate spectrum, as for ``evolve`` (#674).  Each ``U_k``
+(``hqnn_forge.rydberg.lindblad._propagator``): from ``torch.linalg.eigh``,
+differentiated in the eigenbasis rather than through ``eigh``, so reverse
+and forward mode are both correct at a degenerate spectrum (#505, #674).
+Each ``U_k``
 is a dense ``2^N × 2^N`` matrix per sample, built in ``complex128``.
 
 Basis, wires and readout

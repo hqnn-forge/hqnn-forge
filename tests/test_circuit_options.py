@@ -268,12 +268,15 @@ class TestReadoutFeatures:
 
     N = 5
 
-    def _layer(self, entangler: str = "ring", rotation: str = "X", n_layers: int = 1):
+    def _layer(
+        self, entangler: str = "ring", rotation: str = "X", n_layers: int = 1, **options: Any
+    ):
         layer = QuantumEncodingLayer(
             n_qubits=self.N,
             n_layers=n_layers,
             entangler=entangler,  # type: ignore[arg-type]
             rotation=rotation,  # type: ignore[arg-type]
+            **options,
             **CPU,  # type: ignore[arg-type]
         )
         torch.manual_seed(0)
@@ -364,7 +367,74 @@ class TestReadoutFeatures:
         1e-5 where readout i sees feature j (products of cosines can be as
         small as 2e-4 here), below 1e-7 where it is blind.
         """
-        layer = self._layer(entangler, rotation, n_layers)
+        self._assert_sees(self._layer(entangler, rotation, n_layers), seen)
+
+    @pytest.mark.parametrize(
+        ("register", "ccz", "rotation", "n_layers", "seen"),
+        [
+            # A square 0-1-2-3 with atom 4 hanging off atom 1.  Graph distances
+            # from 3: 0 and 2 at 1, 1 at 2, 4 at 3; from 4: 1 at 1, 0 and 2 at 2,
+            # 3 at 3.  ⟨Z_i⟩ sees the ball of radius L around atom i.
+            ("kite", False, "X", 1, [[0, 1, 3], [0, 1, 2, 4], [1, 2, 3], [0, 2, 3], [1, 4]]),
+            ("kite", False, "Y", 1, [[0, 1, 3], [0, 1, 2, 4], [1, 2, 3], [0, 2, 3], [1, 4]]),
+            ("kite", False, "X", 2, [_ALL, _ALL, _ALL, [0, 1, 2, 3], [0, 1, 2, 4]]),
+            ("kite", False, "Y", 2, [_ALL, _ALL, _ALL, [0, 1, 2, 3], [0, 1, 2, 4]]),
+            # A square with atom 4 at its centre, 3.54 µm from every corner: each
+            # corner misses only the opposite one, the centre sees everything.  The
+            # four CCZ triangles (corner, corner, centre) join atoms that are
+            # neighbours already, so they do not widen the ball.
+            (
+                "wheel",
+                False,
+                "X",
+                1,
+                [[0, 1, 3, 4], [0, 1, 2, 4], [1, 2, 3, 4], [0, 2, 3, 4], _ALL],
+            ),
+            (
+                "wheel",
+                True,
+                "X",
+                1,
+                [[0, 1, 3, 4], [0, 1, 2, 4], [1, 2, 3, 4], [0, 2, 3, 4], _ALL],
+            ),
+            (
+                "wheel",
+                True,
+                "Y",
+                1,
+                [[0, 1, 3, 4], [0, 1, 2, 4], [1, 2, 3, 4], [0, 2, 3, 4], _ALL],
+            ),
+            ("wheel", True, "X", 2, [_ALL] * 5),
+        ],
+    )
+    def test_features_each_readout_sees_on_a_custom_register(
+        self, register: str, ccz: bool, rotation: str, n_layers: int, seen: list[list[int]]
+    ) -> None:
+        """
+        ``entangler="rydberg"`` on a register that is not a chain, at R_b = 6 µm
+        with sides of 5 µm (the square's diagonal, 7.07 µm, is not an edge):
+        after L layers ⟨Z_i⟩ sees exactly the features of the atoms within graph
+        distance L of atom i, under RX and RY, as derived in
+        :func:`hqnn_forge.circuits.neutral_atom_layer`.  The centre of the
+        wheel has four neighbours, so its harmonics carry products of up to
+        four cosines and reach 9e-6 here: "sees" is checked above 1e-6, still
+        two orders above the blind entries (below 1e-8).
+        """
+        square = [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 5.0]]
+        extra = [10.0, 0.0] if register == "kite" else [2.5, 2.5]
+        layer = self._layer(
+            "rydberg",
+            rotation,
+            n_layers,
+            atom_register=[*square, extra],
+            blockade_radius=6.0,
+            ccz=ccz,
+        )
+        self._assert_sees(layer, seen, sees_above=1e-6)
+
+    def _assert_sees(
+        self, layer: QuantumEncodingLayer, seen: list[list[int]], sees_above: float = 1e-5
+    ) -> None:
         n_points = 16
         torch.manual_seed(1)
         base = (torch.rand(1, self.N) * 2 - 1) * math.pi
@@ -376,7 +446,7 @@ class TestReadoutFeatures:
             harmonic = torch.fft.rfft(values, dim=0).abs()[1] / n_points
             for i in range(self.N):
                 if j in seen[i]:
-                    assert harmonic[i] > 1e-5, f"⟨Z_{i}⟩ should see x_{j}: {harmonic[i]:.2e}"
+                    assert harmonic[i] > sees_above, f"⟨Z_{i}⟩ should see x_{j}: {harmonic[i]:.2e}"
                 else:
                     assert harmonic[i] < 1e-7, (
                         f"⟨Z_{i}⟩ should be blind to x_{j}: {harmonic[i]:.2e}"

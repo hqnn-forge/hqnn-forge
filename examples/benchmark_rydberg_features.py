@@ -2109,6 +2109,17 @@ def _restore(value: Any) -> float:
     return float(value)
 
 
+@contextlib.contextmanager
+def _open_text(path: str | os.PathLike[str]) -> Iterator[TextIO]:
+    """``path`` opened for reading as UTF-8 text, through :func:`lzma.open` if it ends in ``.xz``."""
+    if os.fspath(path).endswith(".xz"):
+        with lzma.open(path, "rt", encoding="utf-8") as fh:
+            yield fh
+    else:
+        with open(path, encoding="utf-8") as fh:
+            yield fh
+
+
 def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
     """
     The records of a file written by this script, one dict per line.
@@ -2119,9 +2130,13 @@ def read_records(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
     :func:`fit_and_score` records it for probabilities that are not finite.
     Elsewhere a ``null`` stays ``None``, because there it also stands for
     "does not apply" (the grid fields of arm C).
+
+    A path ending in ``.xz`` is read through :func:`lzma.open`: the same
+    lines, xz-compressed, as ``docs/results/rydberg_features_benchmark.jsonl.xz``
+    stores them to stay under the repository's file-size limit (#502).
     """
     records: list[dict[str, Any]] = []
-    with open(path, encoding="utf-8") as fh:
+    with _open_text(path) as fh:
         for line in fh:
             if not line.strip():
                 continue

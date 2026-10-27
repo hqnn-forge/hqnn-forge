@@ -259,6 +259,15 @@ class TestAmplitudeWithoutAnEncoder:
             {"encoding_type": "analog", "init_strategy": "block_local"},
             "init_strategy applies to the gate-based",
         ),
+        (
+            {"encoding_type": "analog", "atom_register": [[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]]},
+            "would be recorded and ignored",
+        ),
+        (
+            {"encoding_type": "analog", "blockade_radius": 8.0},
+            "would be recorded and ignored",
+        ),
+        ({"encoding_type": "analog", "ccz": True}, "would be recorded and ignored"),
         ({"encoding_type": "analog", "shots": 100}, "computes exact expectation values"),
         (
             {"encoding_type": "analog", "device_name": "lightning.qubit"},

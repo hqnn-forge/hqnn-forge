@@ -3409,6 +3409,46 @@ class TestJson:
                 else:
                     assert restored[key] == value, key
 
+    def test_an_xz_file_reads_back_as_the_plain_one(self, tmp_path: Path) -> None:
+        """``read_records`` opens ``.xz`` with ``lzma`` and returns the same records (#502)."""
+        perfect = separation_measures([[0.0], [0.0], [1.0], [1.0]], [0, 0, 1, 1]).to_dict()
+        identical = separation_measures([[0.5], [0.5], [0.5], [0.5]], [0, 0, 1, 1]).to_dict()
+        records: list[dict[str, Any]] = [
+            {
+                "arm": "A",
+                "v_over_omega": 1.0,
+                "pr_auc": 0.75,
+                "mcc": 0.5,
+                "separation": {"train": perfect, "test": identical},
+            },
+            {
+                "arm": "C",
+                "v_over_omega": None,
+                "pr_auc": math.nan,
+                "mcc": -0.25,
+                "separation": {"train": identical, "test": perfect},
+            },
+        ]
+        text = "".join(bench.to_json_line(r) + "\n" for r in records)
+        plain = tmp_path / "records.jsonl"
+        plain.write_text(text, encoding="utf-8")
+        packed = tmp_path / "records.jsonl.xz"
+        packed.write_bytes(lzma.compress(text.encode("utf-8"), preset=9 | lzma.PRESET_EXTREME))
+        assert packed.read_bytes()[:6] == b"\xfd7zXZ\x00"  # really compressed
+        from_plain = bench.read_records(plain)
+        from_xz = bench.read_records(str(packed))
+        assert len(from_xz) == len(records)
+
+        def canonical(rs: list[dict[str, Any]]) -> str:
+            # NaN != NaN, so compare the strict-JSON lines the records write back to.
+            return "".join(bench.to_json_line(r) for r in rs)
+
+        assert canonical(from_xz) == canonical(from_plain) == canonical(records)
+        assert math.isinf(from_xz[0]["separation"]["train"]["fisher_ratio"])
+        assert math.isnan(from_xz[0]["separation"]["test"]["fisher_ratio"])
+        assert math.isnan(from_xz[1]["pr_auc"])
+        assert from_xz[1]["v_over_omega"] is None
+
     def test_a_pr_auc_that_is_nan_survives_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
