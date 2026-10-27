@@ -85,8 +85,8 @@ init_strategy:
     ``"restricted"`` (default) — global restricted-normal init.
     ``"block_local"``           — per-layer decreasing variance.
 encoding_type:
-    ``"angle"`` (default), ``"iqp"``, ``"reuploading"`` or ``"amplitude"``; see
-    the class docstring.
+    ``"angle"`` (default), ``"iqp"``, ``"reuploading"``, ``"amplitude"`` or
+    ``"analog"``; see the class docstring.
 """
 
 from __future__ import annotations
@@ -189,6 +189,14 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
           encoder ``"auto"`` picks ``default.qubit``/backprop at any size, and
           an explicit choice that resolves to another method raises.  Without
           one, 1 to ``2**n_qubits`` raw features are zero-padded.
+        * ``"analog"``: no gates; the atoms of
+          :func:`hqnn_forge.circuits.rydberg_chain` evolve under a trainable
+          piecewise-constant Rydberg pulse with ``n_layers`` segments, each
+          feature setting one atom's local detuning
+          (:class:`~hqnn_forge.encoding.AnalogRydbergLayer`).  It starts from
+          its own pulse, so ``init_strategy`` must stay ``"restricted"``, and
+          ``entangler`` must stay ``"ring"``; it needs ``default.qubit`` with
+          backprop and no ``shots``.
     embedding_rotation:
         Pauli axis of the angle embedding, ``"X"`` (default), ``"Y"`` or ``"Z"``.
         Angle and re-uploading encodings only.  ``"Z"`` raises under angle

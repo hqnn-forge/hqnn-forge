@@ -1,7 +1,8 @@
 """
 tests/test_classifier_encodings.py
 ==================================
-``encoding_type="amplitude"`` and ``"reuploading"`` in every classifier (#307).
+``encoding_type="amplitude"``, ``"reuploading"`` (#307) and ``"analog"`` (#420)
+in every classifier.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from hqnn_forge.encoding import AmplitudeEncodingLayer, DataReuploadingLayer
+from hqnn_forge.encoding import AmplitudeEncodingLayer, AnalogRydbergLayer, DataReuploadingLayer
 from hqnn_forge.models import (
     HybridBinaryClassifier,
     MulticlassHybridClassifier,
@@ -54,6 +55,13 @@ ENCODINGS = [
         N_QUBITS,
         id="reuploading-scaled-y",
     ),
+    pytest.param({"encoding_type": "analog"}, AnalogRydbergLayer, N_QUBITS, id="analog"),
+    pytest.param(
+        {"encoding_type": "analog", "readout": "first"},
+        AnalogRydbergLayer,
+        N_QUBITS,
+        id="analog-first",
+    ),
 ]
 
 
@@ -82,7 +90,13 @@ class TestEveryClassifier:
         assert type(model.quantum_layer) is layer_cls
         layer: Any = model.quantum_layer
         assert model.classical_encoder[0].out_features == width
-        assert layer.entangler == options.get("entangler", "ring")
+        if layer_cls is AnalogRydbergLayer:
+            # n_layers is the number of pulse segments, and the pulse starts
+            # from the layer's stated one (every raw value 0), not from an init.
+            assert layer.n_segments == 2
+            assert torch.equal(layer.qlayer.weights, torch.zeros(2, 3))
+        else:
+            assert layer.entangler == options.get("entangler", "ring")
         assert layer.readout == options.get("readout", "all")
         if layer_cls is DataReuploadingLayer:
             assert layer.rotation == options.get("embedding_rotation", "X")
@@ -155,6 +169,7 @@ class TestEveryClassifier:
             losses.append(loss.item())
         assert losses[-1] < losses[0]
         save_checkpoint(model, tmp_path / "m.pt")
+        assert torch.load(tmp_path / "m.pt", weights_only=True)["config"] == model.get_config()
         loaded = load_checkpoint(tmp_path / "m.pt")
         assert loaded.get_config() == model.get_config()
         with torch.no_grad():
@@ -232,7 +247,37 @@ class TestAmplitudeWithoutAnEncoder:
             {"encoding_type": "reuploading", "use_classical_encoder": False},
             "must equal n_qubits",
         ),
-        ({"encoding_type": "kernel"}, "choose 'angle', 'iqp', 'amplitude' or 'reuploading'"),
+        (
+            {"encoding_type": "analog", "embedding_rotation": "Y"},
+            "analog embedding has no rotation",
+        ),
+        (
+            {"encoding_type": "analog", "entangler": "rydberg"},
+            "entangler applies to the gate-based",
+        ),
+        (
+            {"encoding_type": "analog", "init_strategy": "block_local"},
+            "init_strategy applies to the gate-based",
+        ),
+        (
+            {"encoding_type": "analog", "atom_register": [[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]]},
+            "would be recorded and ignored",
+        ),
+        (
+            {"encoding_type": "analog", "blockade_radius": 8.0},
+            "would be recorded and ignored",
+        ),
+        ({"encoding_type": "analog", "ccz": True}, "would be recorded and ignored"),
+        ({"encoding_type": "analog", "shots": 100}, "computes exact expectation values"),
+        (
+            {"encoding_type": "analog", "device_name": "lightning.qubit"},
+            "backprop on default.qubit only",
+        ),
+        ({"encoding_type": "analog", "trainable_input_scaling": True}, "'reuploading' only"),
+        (
+            {"encoding_type": "kernel"},
+            "choose 'angle', 'iqp', 'amplitude', 'reuploading' or 'analog'",
+        ),
     ],
 )
 def test_inconsistent_options_raise_at_construction(
@@ -243,7 +288,7 @@ def test_inconsistent_options_raise_at_construction(
 
 
 @pytest.mark.parametrize("cls, extra", CLASSIFIERS)
-@pytest.mark.parametrize("encoding_type", ["amplitude", "reuploading"])
+@pytest.mark.parametrize("encoding_type", ["amplitude", "reuploading", "analog"])
 def test_training_noise_reaches_the_layer(
     cls: type, extra: dict[str, Any], encoding_type: str
 ) -> None:
@@ -266,7 +311,7 @@ def test_the_estimator_selects_the_new_encodings() -> None:
     rng = np.random.default_rng(0)
     X = rng.standard_normal((40, 4))
     y = (X[:, 0] > 0).astype(int)
-    for encoding_type in ("amplitude", "reuploading"):
+    for encoding_type in ("amplitude", "reuploading", "analog"):
         est = HybridClassifierEstimator(
             n_qubits=2,
             n_layers=1,

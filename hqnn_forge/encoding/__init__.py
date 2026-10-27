@@ -22,6 +22,9 @@ AmplitudeEncodingLayer  nn.Module: up to 2**n_qubits features as state amplitude
 build_amplitude_qnode   Factory for the amplitude-embedding QNode.
 DataReuploadingLayer    nn.Module: angle embedding repeated before every layer.
 build_data_reuploading_qnode  Factory for the data re-uploading QNode.
+AnalogRydbergLayer      nn.Module: atoms under a trainable piecewise-constant pulse,
+                        inputs in a local detuning (no gates).
+build_analog_rydberg_qnode  Factory for the analog Rydberg QNode.
 
 Backend choice:
 
@@ -68,6 +71,7 @@ from hqnn_forge.encoding.amplitude_embedding import (
     AmplitudeEncodingLayer,
     build_amplitude_qnode,
 )
+from hqnn_forge.encoding.analog_rydberg import AnalogRydbergLayer, build_analog_rydberg_qnode
 from hqnn_forge.encoding.angle_embedding import (
     AngleEmbeddingQNode,
     AtomRegisterLike,
@@ -93,6 +97,7 @@ from hqnn_forge.noise import Position
 __all__: list[str] = [
     "AUTO_BACKPROP_MAX_QUBITS",
     "AmplitudeEncodingLayer",
+    "AnalogRydbergLayer",
     "AngleEmbeddingQNode",
     "AtomRegisterLike",
     "CircuitLayer",
@@ -108,6 +113,7 @@ __all__: list[str] = [
     "RotationAxis",
     "apply_variational_layers",
     "build_amplitude_qnode",
+    "build_analog_rydberg_qnode",
     "build_data_reuploading_qnode",
     "build_encoding_qnode",
     "build_iqp_qnode",

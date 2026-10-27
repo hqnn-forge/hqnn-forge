@@ -323,19 +323,25 @@ def _decompose_logical(tape: qml.tape.QuantumScript) -> qml.tape.QuantumScript:
     not.  It is kept, so it is not decomposed further, then dropped: a global
     phase is not a gate and would otherwise add to ``depth`` and, on two
     wires, to ``n_two_qubit_gates``.
+
+    A ``QubitUnitary`` is kept whole as well: the analog layer
+    (:class:`~hqnn_forge.encoding.AnalogRydbergLayer`) applies one per pulse
+    segment, with a matrix computed from trainable weights.  Its gate
+    decomposition would count a digital compilation of the pulse rather than
+    the device's operations, and cannot run on a matrix that requires grad.
     """
     (decomposed,), _ = _decompose(
         tape,
         gate_set=(LOGICAL_GATE_SET - {"MultiRZ"}) | {"GlobalPhase"},
-        stopping_condition=_is_two_wire_multirz,
+        stopping_condition=_kept_whole,
     )
     return decomposed.copy(
         operations=[op for op in decomposed.operations if op.name != "GlobalPhase"]
     )
 
 
-def _is_two_wire_multirz(op: qml.operation.Operator) -> bool:
-    return op.name == "MultiRZ" and len(op.wires) <= 2
+def _kept_whole(op: qml.operation.Operator) -> bool:
+    return (op.name == "MultiRZ" and len(op.wires) <= 2) or op.name == "QubitUnitary"
 
 
 class _TapeResources(NamedTuple):
@@ -487,6 +493,10 @@ def _is_diagonal_measurement(measurement: qml.measurements.MeasurementProcess) -
     return _off_diagonal_zero(obs)
 
 
+def _scalar_or_unitary(op: qml.operation.Operator) -> bool:
+    return _has_scalar_parameters(op) or op.name == "QubitUnitary"
+
+
 def _inert_slots(tape: qml.tape.QuantumScript) -> list[tuple[Any, bool]]:
     """
     ``(value, inert)`` for every trainable gate-parameter slot of ``tape``,
@@ -501,13 +511,14 @@ def _inert_slots(tape: qml.tape.QuantumScript) -> list[tuple[Any, bool]]:
         )
     # Every gate in the set has scalar parameters, so passing it does not
     # change what stops; graph-based decomposition requires a gate_set, and
-    # emits GlobalPhase (see _decompose_logical).
+    # emits GlobalPhase (see _decompose_logical).  A QubitUnitary (the analog
+    # layer's pulse segments) is kept whole and treated as fully mixing below.
     (tape,), _ = _decompose(
         tape,
         gate_set=LOGICAL_GATE_SET | {"GlobalPhase"},
-        stopping_condition=_has_scalar_parameters,
+        stopping_condition=_scalar_or_unitary,
     )
-    unexpanded = sorted({op.name for op in tape.operations if not _has_scalar_parameters(op)})
+    unexpanded = sorted({op.name for op in tape.operations if not _scalar_or_unitary(op)})
     if unexpanded:
         raise ValueError(
             "count_inert_parameters could not decompose these gates to gates with "
@@ -624,7 +635,8 @@ def count_inert_parameters(tape: qml.tape.QuantumScript) -> int:
     ``CRZ``, ``ControlledPhaseShift``, ``Adjoint(RZ)`` or a conditional
     ``RZ`` count as diagonal.  Gates that are neither diagonal nor ``CNOT``
     nor ``Rot`` are treated as fully mixing, which keeps the count a lower
-    bound for any gate.
+    bound for any gate.  A ``QubitUnitary`` is not decomposed (its matrix
+    parameter may require grad) and is treated as fully mixing too.
 
     Raises
     ------
@@ -669,6 +681,15 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
     for value, inert in _inert_slots(tape):
         if inert or not isinstance(value, torch.Tensor) or not value.requires_grad:
             continue
+        if value.numel() > 1:
+            # A matrix parameter (QubitUnitary): a fixed generic linear
+            # combination of its real entries depends on every weight entry
+            # that some matrix entry depends on, except on a set of measure zero.
+            parts = torch.view_as_real(value) if value.is_complex() else value
+            coefficients = torch.rand(
+                parts.shape, generator=torch.Generator().manual_seed(0), dtype=parts.dtype
+            )
+            value = (parts * (coefficients.to(parts.device) + 0.5)).sum()
         grads = torch.autograd.grad(value, leaves, allow_unused=True, retain_graph=True)
         for k, grad in enumerate(grads):
             if grad is not None:

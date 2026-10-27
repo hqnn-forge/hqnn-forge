@@ -408,6 +408,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `noise_method="density"` or as weighted Kraus trajectories with the amplitude-damping
   restrictions; loss that imaging detects (an erasure) is derived in the docstring, not a
   channel (#702) (#419, #701)
+- `AnalogRydbergLayer` and `encoding_type="analog"` in every classifier: a register evolving
+  under a piecewise-constant global pulse with trainable Rabi frequency, detuning and phase per
+  segment (bounded by reparameterisation), each input in one atom's local detuning, simulated
+  and differentiated in torch; `rydberg_hamiltonian` takes a drive `phase` (default 0)
+  (#420, #698)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;

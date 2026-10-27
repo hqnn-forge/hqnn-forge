@@ -33,6 +33,7 @@ from hqnn_forge import kernels
 from hqnn_forge.diagnostics import fisher_discriminant_ratio
 from hqnn_forge.encoding import (
     AmplitudeEncodingLayer,
+    AnalogRydbergLayer,
     DataReuploadingLayer,
     QuantumEncodingLayer,
 )
@@ -82,6 +83,7 @@ ALL_LAYERS = [
         ),
         id="reuploading",
     ),
+    pytest.param(lambda: AnalogRydbergLayer(n_qubits=N_QUBITS, n_segments=2), id="analog-rydberg"),
 ]
 
 

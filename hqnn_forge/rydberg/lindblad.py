@@ -622,7 +622,7 @@ def evolve(
         return psi @ psi.mH
 
     dt = t / steps
-    propagator = _Propagator.apply(h, dt, False)[0]
+    propagator = _propagator(h, dt)
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
     # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)
@@ -640,6 +640,27 @@ def evolve(
         # two adjacent half steps are one full step; the last step ends on a half
         rho = rho * (full_damping if step < steps - 1 else half_damping)
     return rho
+
+
+def _propagator(h: torch.Tensor, tau: float) -> torch.Tensor:
+    """
+    ``U(τ) = e^(−iHτ)`` of a Hermitian ``complex128`` ``h``, batched over leading axes.
+
+    The unitary step of :func:`evolve`, and the per-segment propagator of the
+    analog encoding layer (:mod:`hqnn_forge.encoding.analog_rydberg`), so a
+    piecewise-constant pulse is propagated exactly as one constant segment
+    is.  ``h`` in rad/µs, ``τ`` in µs.  The caller has checked that ``h`` is
+    Hermitian (``evolve`` symmetrises it; the analog layer builds it with
+    :func:`~hqnn_forge.rydberg.rydberg_hamiltonian`, Hermitian by
+    construction).
+
+    ``U = V e^(−iEτ) V†`` from ``torch.linalg.eigh``, through
+    :class:`_Propagator`, which differentiates it with the Fréchet derivative
+    in the eigenbasis rather than through ``eigh``; reverse and forward mode
+    (``torch.func.jvp``, ``jacfwd``) are both correct at a degenerate spectrum
+    (#505, #674).
+    """
+    return _Propagator.apply(h, tau, False)[0]
 
 
 def _populations_to_features(
