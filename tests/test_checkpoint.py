@@ -719,6 +719,8 @@ CONSTRUCTOR_ARGS = {
         "atom_register",
         "blockade_radius",
         "ccz",
+        "gamma",
+        "n_steps",
     },
     ParallelHybridClassifier: {
         "n_input_features",
@@ -750,6 +752,8 @@ CONSTRUCTOR_ARGS = {
         "atom_register",
         "blockade_radius",
         "ccz",
+        "gamma",
+        "n_steps",
     },
     MulticlassHybridClassifier: {
         "n_input_features",
@@ -783,6 +787,8 @@ CONSTRUCTOR_ARGS = {
         "atom_register",
         "blockade_radius",
         "ccz",
+        "gamma",
+        "n_steps",
     },
     ClassicalBaseline: {
         "n_input_features",

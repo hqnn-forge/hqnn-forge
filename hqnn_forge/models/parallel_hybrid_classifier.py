@@ -319,6 +319,19 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         With ``entangler="rydberg"`` only: also a CCZ on every blockade
         triangle of the register (none on the default chain).  Default
         ``False``.
+    gamma:
+        With ``encoding_type="analog"`` only: the dephasing rate γ in rad/µs,
+        ``>= 0``, of the collapse operators ``√γ n_i`` of
+        ``docs/rydberg-model.md``, acting on every atom during the pulse (a
+        single-atom coherence decays at ``γ/2``).  With ``gamma > 0`` the
+        layer evolves the density matrix and runs on ``default.mixed``, at
+        ``4^n`` instead of ``2^n`` per sample; see
+        :class:`~hqnn_forge.encoding.AnalogRydbergLayer`.  Default ``0.0``.
+    n_steps:
+        With ``encoding_type="analog"`` only: the splitting steps per pulse
+        segment, an integer ``>= 1``, required when ``gamma > 0`` and
+        without a default (see :func:`hqnn_forge.rydberg.evolve`).  Default
+        ``None``.
 
     Attributes
     ----------
@@ -372,6 +385,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
         atom_register: AtomRegisterLike | None = None,
         blockade_radius: float | None = None,
         ccz: bool = False,
+        gamma: float = 0.0,
+        n_steps: int | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
@@ -418,6 +433,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 atom_register=atom_register,
                 blockade_radius=blockade_radius,
                 ccz=ccz,
+                gamma=gamma,
+                n_steps=n_steps,
             )
 
             # Validated before the classical branch is built, as before the shared
@@ -464,6 +481,8 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
                 atom_register=atom_register,
                 blockade_radius=blockade_radius,
                 ccz=ccz,
+                gamma=gamma,
+                n_steps=n_steps,
             )
 
             # ── Classical head ────────────────────────────────────────────────
