@@ -131,7 +131,8 @@ follows from the operators above.  The no-loss operator ``sqrt(1 − p) I``
 does not depend on the state.  Post-selecting on no loss at any of the
 ``k`` sites therefore leaves ``(1 − p)^k U ρ U†``, where ``U`` is the
 noiseless circuit and ``k`` is the number of sites (``n_qubits`` at
-``"end"``, the sum of the gate widths at ``"all"``).  Renormalising by the
+``"end"``, the sum of the gate widths at ``"all"``, ``2·#CZ + 3·#CCZ`` at
+``"cz"``).  Renormalising by the
 no-loss probability ``(1 − p)^k``, which does not depend on θ, gives the
 noiseless state exactly.  A kept sample's ⟨O⟩ and its gradient are the
 noiseless ones, and the kept fraction is ``(1 − p)^k``.  Without the
@@ -245,8 +246,10 @@ Two methods, chosen with ``noise_method``:
     and ``(1, 1)`` is ``Y`` up to a global phase.  Every sample therefore
     runs the same gate sequence with different angles, so parameter
     broadcasting and the per-sample batch split of the adjoint path apply
-    unchanged.  The sites are placed by ``qml.noise.insert`` itself, so they
-    are exactly the sites the ``"density"`` path puts channels on.  The
+    unchanged.  The sites are placed by the same insertion as the
+    ``"density"`` path's channels (``qml.noise.insert``, or for ``"cz"`` the
+    library's own placement after every CZ and CCZ), so they are exactly
+    the sites the ``"density"`` path puts channels on.  The
     draws use torch's global RNG, like dropout, so ``torch.manual_seed``
     makes them reproducible -- on an exact layer.  With ``shots`` the
     readouts are also sampled by the device's own generator, which torch does
