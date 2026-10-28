@@ -356,7 +356,10 @@ class _SampleBySampleTorchLayer(qml.qnn.TorchLayer):  # type: ignore[misc]
         if inputs.ndim < 2:
             return super().forward(inputs)  # type: ignore[no-any-return]
         rows = inputs.reshape(-1, inputs.shape[-1])
-        outputs = torch.stack([super().forward(row) for row in rows])
+        # Bound here: a zero-argument super() inside the comprehension fails
+        # before Python 3.12, which runs a comprehension as a nested function.
+        run = super().forward
+        outputs = torch.stack([run(row) for row in rows])
         return outputs.reshape(*inputs.shape[:-1], *outputs.shape[1:])
 
 
