@@ -417,7 +417,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Markovian dephasing `L_i = √γ n_i` during the pulse, the density matrix evolved segment by
   segment with `evolve`'s splitting (`n_steps` per segment, required with `gamma > 0`) and read
   out on `default.mixed`; `evolve` takes an initial state `rho0`, and
-  `AnalogRydbergLayer.density_matrices` returns the final state (#699, #710)
+  `AnalogRydbergLayer.density_matrices` returns the final state. With `gamma > 0` there is no
+  gate between segments, so noise at position `"all"` (which would act once, as at `"end"`) is
+  refused at construction and by `apply_depolarizing_noise` and `noise_sweep` (#699, #710)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;

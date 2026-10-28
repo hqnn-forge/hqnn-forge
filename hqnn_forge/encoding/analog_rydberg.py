@@ -98,10 +98,13 @@ preparation over a batch (PennyLane 0.45), so ``qlayer`` runs a batch
 sample by sample, whichever QNode it holds.  The gate-model noise options
 act on ``ρ(T)``: at ``noise_position="end"`` once on every atom before
 measurement, and a readout error maps each ``⟨Z_i⟩``, as without dephasing.
-There is no gate between segments, so ``"all"`` with ``noise_level > 0`` is
-refused at construction; a post-hoc
-:func:`~hqnn_forge.noise.apply_depolarizing_noise` at ``"all"`` places its
-channels after the one preparation, where ``"end"`` places them.
+There is no gate between segments, so ``"all"`` has no sites with its
+meaning: inserted into this circuit it would act once, after the one
+preparation, exactly as ``"end"`` does, and so drop the per-segment noise it
+asks for (with ``gamma = 0`` it acts ``K`` times).  ``"all"`` with a
+strength ``> 0`` is therefore refused, at construction with
+``noise_level > 0`` and by :func:`~hqnn_forge.noise.apply_depolarizing_noise`
+and :func:`~hqnn_forge.noise.noise_sweep` with ``p > 0`` (#710).
 
 Basis, wires and readout
 ------------------------
@@ -535,7 +538,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
     noise_level, noise_position, noise_method, noise_trajectories, noise_channel, readout_error:
         Training-time noise as in
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`; a channel at
-        ``"all"`` acts after every pulse segment (see the module docstring).
+        ``"all"`` acts after every pulse segment, and is refused with
+        ``gamma > 0`` (see the module docstring).
     shots:
         Must be ``None``: the layer computes exact expectation values, since
         backprop, the only method that differentiates its propagators,
@@ -579,7 +583,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         ``readout`` or noise option; for ``gamma`` not a finite number
         ``>= 0``, ``n_steps`` not an integer ``>= 1`` or missing with
         ``gamma > 0``, or ``noise_position="all"`` with ``noise_level > 0``
-        and ``gamma > 0``.
+        and ``gamma > 0`` (as :func:`~hqnn_forge.noise.apply_depolarizing_noise`
+        refuses ``position="all"`` on such a layer).
 
     Examples
     --------
@@ -736,14 +741,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             readout_error=readout_error,
         )
         # After _init_training_noise, which validates noise_level and noise_position.
-        if self.gamma > 0 and self.noise_level > 0 and noise_position == "all":
-            raise ValueError(
-                "noise_position='all' places a channel after every pulse segment, and with "
-                "gamma > 0 the segments are evolved outside the circuit, which prepares only "
-                "their final density matrix: there is no gate between segments to put the "
-                "channel after.  Use noise_position='end' (once before measurement), or "
-                "gamma=0."
-            )
+        if self.noise_level > 0:
+            self._noise_position_check(noise_position, "noise_position")
         self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
@@ -851,6 +850,22 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         noise options.  Basis ordering as in the module docstring.
         """
         return _final_density_matrix(self._pulse, self.prepare_inputs(x), self.qlayer.weights)
+
+    def _noise_position_check(self, position: str, name: str) -> None:
+        """
+        Refuse ``"all"`` with ``gamma > 0``, here and in :mod:`hqnn_forge.noise`.
+
+        ``name`` is the argument's name in the caller, for the message.  See
+        *Dephasing during the pulse* in the module docstring.
+        """
+        if self.gamma > 0 and position == "all":
+            raise ValueError(
+                f"{name}='all' places a channel after every pulse segment, and with "
+                f"gamma > 0 the segments are evolved outside the circuit, which prepares only "
+                f"their final density matrix: there is no gate between segments to put the "
+                f"channel after, and the channel would act once, as at 'end'.  Use "
+                f"{name}='end' (once before measurement), or gamma=0."
+            )
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """

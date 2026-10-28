@@ -32,7 +32,7 @@ from hqnn_forge.models import (
     MulticlassHybridClassifier,
     ParallelHybridClassifier,
 )
-from hqnn_forge.noise import apply_depolarizing_noise
+from hqnn_forge.noise import apply_depolarizing_noise, noise_sweep
 from hqnn_forge.rydberg import AtomRegister
 
 F64 = torch.float64
@@ -95,13 +95,22 @@ def _reference_density_matrix(
 ) -> np.ndarray:
     """``ρ(T) = e^(𝓛_{K−1} τ) ⋯ e^(𝓛_0 τ) ρ(0)`` from the layer's pulse, by ``scipy.linalg.expm``."""
     linalg = pytest.importorskip("scipy.linalg")
+    dim = 2**layer.n_qubits
+    rho = np.zeros(dim * dim, dtype=complex)
+    rho[0] = 1.0  # |g…g⟩⟨g…g|
+    for h in _reference_hamiltonians(layer, x):
+        rho = linalg.expm(_liouvillian(h, gamma) * layer.segment_duration) @ rho
+    return rho.reshape(dim, dim)
+
+
+def _reference_hamiltonians(layer: AnalogRydbergLayer, x: np.ndarray) -> list[np.ndarray]:
+    """``H_k(x)`` of every segment, from the layer's pulse and register, built with ``np.kron``."""
     pulse = layer.pulse().numpy()
     local = layer.local_detuning_max / (1 + np.exp(-x))  # Δ_max,loc · σ(x_i)
     positions = layer.register.positions.numpy()
     n = layer.n_qubits
     dim = 2**n
-    rho = np.zeros(dim * dim, dtype=complex)
-    rho[0] = 1.0  # |g…g⟩⟨g…g|
+    hamiltonians = []
     for omega, detuning, phase in pulse:
         h = np.zeros((dim, dim), dtype=complex)
         for i in range(n):
@@ -110,8 +119,8 @@ def _reference_density_matrix(
             for j in range(i + 1, n):
                 v = layer.c6 / np.linalg.norm(positions[i] - positions[j]) ** 6
                 h += v * _on(N_OP, i, n) @ _on(N_OP, j, n)
-        rho = linalg.expm(_liouvillian(h, gamma) * layer.segment_duration) @ rho
-    return rho.reshape(dim, dim)
+        hamiltonians.append(h)
+    return hamiltonians
 
 
 def _central_difference(function: object, x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -376,6 +385,101 @@ class TestOptions:
         layer = _layer(2, 2, gamma=2.0, n_steps=4, readout_error=(0.05, 0.1))
         exact = layer.eval()(x)
         torch.testing.assert_close(layer.train()(x), (1 - 0.15) * exact + (0.1 - 0.05))
+
+
+class TestEveryPulseSegment:
+    """
+    ``position="all"`` means a channel after every pulse segment (#710).
+
+    With ``gamma > 0`` the circuit has one preparation and no gate between
+    segments, so ``"all"`` would act once, as ``"end"`` does, and is refused
+    on every path; with ``gamma = 0`` it acts ``K`` times, as before.
+    """
+
+    MESSAGE = (
+        "position='all' places a channel after every pulse segment, and with gamma > 0 the "
+        "segments are evolved outside the circuit, which prepares only their final density "
+        "matrix: there is no gate between segments to put the channel after, and the channel "
+        "would act once, as at 'end'.  Use position='end' (once before measurement), or gamma=0."
+    )
+
+    def test_gamma_zero_acts_after_every_segment(self) -> None:
+        """The hand-built ``ρ ← D^{⊗N}(U_k ρ U_k†)``, segment by segment, unchanged by #699."""
+        linalg = pytest.importorskip("scipy.linalg")
+        p = 0.1
+        layer = _layer(2, 3, segment_duration=0.2)
+        layer.set_pulse(omega=[6.0, 3.0, 4.5], detuning=[1.0, -2.0, 0.5], phase=[0.0, 1.0, 2.0])
+        x = np.array([0.3, -0.5])
+        n = layer.n_qubits
+        rho = np.zeros((2**n, 2**n), dtype=complex)
+        rho[0, 0] = 1.0
+        for h in _reference_hamiltonians(layer, x):
+            u = linalg.expm(-1j * h * layer.segment_duration)
+            rho = u @ rho @ u.conj().T
+            for i in range(n):
+                paulis = [_on(op, i, n) for op in (X, Y, Z)]
+                rho = (1 - p) * rho + p / 3 * sum(o @ rho @ o for o in paulis)
+        expected = [np.trace(rho @ _on(Z, i, n)).real for i in range(n)]
+        with apply_depolarizing_noise(layer, p, position="all"):
+            every = layer(torch.tensor(x[None], dtype=F64))
+        torch.testing.assert_close(
+            every, torch.tensor([expected], dtype=F64), rtol=1e-10, atol=1e-12
+        )
+
+    def test_post_hoc_all_is_refused_with_dephasing(self) -> None:
+        layer = _layer(2, 3, gamma=0.5, n_steps=4).eval()
+        x = torch.tensor([[0.3, -0.5]], dtype=F64)
+        qnode = layer.qlayer.qnode
+        with (
+            pytest.raises(ValueError) as error,
+            apply_depolarizing_noise(layer, 0.05, position="all"),
+        ):
+            pass
+        assert str(error.value) == self.MESSAGE
+        # Refused before the layer was touched: the same QNode, no block left open.
+        assert layer.qlayer.qnode is qnode
+        assert getattr(layer.qlayer, "_hqnn_noise_depth", 0) == 0
+        exact = layer(x)
+        with apply_depolarizing_noise(layer, 0.05, position="end"):
+            torch.testing.assert_close(layer(x), exact * (1 - 4 * 0.05 / 3), rtol=1e-10, atol=0)
+
+    def test_post_hoc_all_at_p_zero_is_the_noiseless_layer(self) -> None:
+        layer = _layer(2, 2, gamma=0.5, n_steps=4).eval()
+        x = torch.tensor([[0.3, -0.5]], dtype=F64)
+        exact = layer(x)
+        with apply_depolarizing_noise(layer, 0.0, position="all"):
+            assert torch.equal(layer(x), exact)
+
+    def test_noise_sweep_refuses_before_the_first_evaluation(self) -> None:
+        model = HybridBinaryClassifier(
+            n_input_features=2,
+            n_qubits=2,
+            n_layers=2,
+            encoding_type="analog",
+            gamma=0.5,
+            n_steps=4,
+        )
+        calls = []
+        predict = model.predict_proba
+
+        def counting(x: torch.Tensor) -> torch.Tensor:
+            calls.append(x)
+            return predict(x)
+
+        model.predict_proba = counting  # type: ignore[method-assign]
+        x = torch.zeros(1, 2)
+        with pytest.raises(ValueError) as error:
+            noise_sweep(model, x, [0.0, 0.05], position="all")
+        assert str(error.value) == self.MESSAGE
+        assert calls == []
+        points = noise_sweep(model, x, [0.0, 0.05], position="end")
+        assert [point.p for point in points] == [0.0, 0.05]
+        assert len(calls) == 2
+
+    def test_training_noise_names_its_own_argument(self) -> None:
+        with pytest.raises(ValueError) as error:
+            AnalogRydbergLayer(2, 2, gamma=1.0, n_steps=3, noise_level=0.1)
+        assert str(error.value) == self.MESSAGE.replace("position=", "noise_position=")
 
 
 class TestClassifiers:
