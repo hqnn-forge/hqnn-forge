@@ -215,7 +215,8 @@ class HybridBinaryClassifier(QuantumTrunk, BinaryClassifierBase):
         with backprop, whose memory grows as ``batch × 4^n_qubits`` per
         operation: practical up to about 6 qubits.  See :mod:`hqnn_forge.noise`.
     noise_position:
-        ``"all"`` (default) or ``"end"``; where the channel is inserted.
+        ``"all"`` (default), ``"end"`` or ``"cz"`` (after every CZ and CCZ
+        only); where the channel is inserted.
     noise_method:
         ``"density"`` (default, exact) or ``"trajectories"`` (Pauli-trajectory
         sampling on the layer's own device, at pure-state memory; equal to

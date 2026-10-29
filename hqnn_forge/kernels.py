@@ -858,7 +858,8 @@ def encoded_density_matrices(
         inserts no channel, so the result is ``|Φ⟩⟨Φ|`` for the noiseless
         states.
     noise_position:
-        ``"all"`` (after every gate) or ``"end"`` (before measurement), as in
+        ``"all"`` (after every gate), ``"end"`` (before measurement) or
+        ``"cz"`` (after every CZ and CCZ only), as in
         :func:`hqnn_forge.noise.apply_depolarizing_noise`.
 
     Returns

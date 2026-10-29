@@ -573,8 +573,10 @@ class QuantumEncodingLayer(TrainingNoiseMixin, nn.Module):
         matrix per operation, so this is practical up to about 6 qubits.  See
         :mod:`hqnn_forge.noise`.
     noise_position:
-        ``"all"`` (after every gate, default) or ``"end"`` (before
-        measurement), as in :func:`hqnn_forge.noise.apply_depolarizing_noise`.
+        ``"all"`` (after every gate, default), ``"end"`` (before
+        measurement) or ``"cz"`` (after every CZ and CCZ only, such as the
+        blockade gates of ``entangler="rydberg"``), as in
+        :func:`hqnn_forge.noise.apply_depolarizing_noise`.
     noise_method:
         ``"density"`` (default): the exact channel on ``default.mixed``.
         ``"trajectories"``: Pauli-trajectory sampling on this layer's own
