@@ -188,7 +188,8 @@ QNode takes ``inputs`` and ``weights``, and ``forward(x)`` is
 the QNode, so it runs on ``default.qubit`` with backprop only.  Through
 that circuit the library's noise options apply: a channel at
 ``noise_position="all"`` acts after every pulse segment on every atom, at
-``"end"`` once before measurement; a readout error maps each ``⟨Z_i⟩``.
+``"end"`` once before measurement, and ``"cz"`` raises, since the pulse
+has no CZ or CCZ; a readout error maps each ``⟨Z_i⟩``.
 They are gate-model channels placed between segments, not the continuous
 dephasing of ``docs/rydberg-model.md``.
 

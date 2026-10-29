@@ -413,6 +413,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segment (bounded by reparameterisation), each input in one atom's local detuning, simulated
   and differentiated in torch; `rydberg_hamiltonian` takes a drive `phase` (default 0)
   (#420, #698)
+- `position="cz"` (`noise_position="cz"` on the layers, classifiers and estimator): the channel
+  after every CZ and CCZ only, on each wire the gate acts on, for every channel and both
+  `noise_method`s, e.g. atom loss at the blockade gates of `entangler="rydberg"`; a circuit
+  without CZ or CCZ raises (#700, #709)
 - `gamma=` and `n_steps=` on `AnalogRydbergLayer` and with `encoding_type="analog"`:
   Markovian dephasing `L_i = √γ n_i` during the pulse, the density matrix evolved segment by
   segment with `evolve`'s splitting (`n_steps` per segment, required with `gamma > 0`) and read
