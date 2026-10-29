@@ -1268,6 +1268,21 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
         qlayer._hqnn_readout_error = None
 
 
+def _check_noise_position(layer: object, position: str) -> None:
+    """
+    Let ``layer`` refuse a ``position`` it cannot place channels at.
+
+    A layer may define ``_noise_position_check(position, name)``, raising
+    ``ValueError`` where its circuit has no sites with the meaning
+    ``position`` documents: :class:`~hqnn_forge.encoding.AnalogRydbergLayer`
+    with ``gamma > 0`` refuses ``"all"``, which on its circuit would act once,
+    as at ``"end"``, instead of after every pulse segment (#710).
+    """
+    check = getattr(layer, "_noise_position_check", None)
+    if check is not None:
+        check(position, "position")
+
+
 @contextmanager
 def apply_depolarizing_noise(
     model: nn.Module,
@@ -1308,7 +1323,10 @@ def apply_depolarizing_noise(
     TypeError
         If ``model`` has no quantum layer.
     ValueError
-        If ``p`` or ``position`` is out of range.
+        If ``p`` or ``position`` is out of range, or with ``p > 0`` if the
+        layer has no sites for ``position``
+        (:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``
+        at ``"all"``).
     RuntimeError
         If the layer is already running a replaced QNode (nested use).
 
@@ -1319,7 +1337,9 @@ def apply_depolarizing_noise(
     fine-tune under noise.
     """
     validate_noise(p, position, channel=channel)
-    _, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
+    layer, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
+    if p > 0.0:
+        _check_noise_position(layer, position)
     # Two separate markers.  _hqnn_noise_depth counts open blocks of any p and
     # is what tells run_with_training_noise to skip a layer's train-mode
     # channel.  _hqnn_noise_original is set only while a p > 0 block has
@@ -1425,9 +1445,10 @@ def noise_sweep(
     ------
     ValueError
         If only one of ``y`` and ``score_fn`` is given, if ``channel`` is
-        neither a noise channel nor ``"readout"``, or if any level is out
-        of range -- checked before the first evaluation, not as the sweep
-        reaches it.
+        neither a noise channel nor ``"readout"``, if any level is out
+        of range, or if a level is ``> 0`` and the layer has no sites for
+        ``position`` (see :func:`apply_depolarizing_noise`) -- checked before
+        the first evaluation, not as the sweep reaches it.
     TypeError
         If ``model`` has no ``predict_proba``, or with ``channel="readout"``
         if its quantum layer is not a :class:`TrainingNoiseMixin` (see
@@ -1464,6 +1485,9 @@ def noise_sweep(
         invalid = [p for p in levels if not 0.0 <= p <= max_p]
         if invalid:
             raise ValueError(f"every p must lie in [0, {max_p}] for {channel!r}; got {invalid}.")
+        if any(p > 0.0 for p in levels):
+            layer, _, _ = resolve_encoding_layer(model, "noise_sweep")
+            _check_noise_position(layer, position)
         blocks = [
             (
                 p,

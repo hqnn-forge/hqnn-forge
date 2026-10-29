@@ -74,7 +74,7 @@ use_classical_encoder, dropout_p, device_name, diff_method, init_strategy,
 encoding_type, embedding_rotation, entangler, readout, encoder_activation,
 init_std, noise_level, noise_position, noise_method, noise_trajectories,
 trainable_input_scaling, init_seed, classical_encoder, shots, noise_channel, seed,
-readout_error, atom_register, blockade_radius, ccz:
+readout_error, atom_register, blockade_radius, ccz, gamma, n_steps:
     As for :class:`~hqnn_forge.models.HybridBinaryClassifier`.
 """
 
@@ -128,7 +128,7 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
     init_strategy, encoding_type, embedding_rotation, entangler, readout,
     encoder_activation, init_std, noise_level, noise_position, noise_method,
     noise_trajectories, classical_encoder, trainable_input_scaling, shots, noise_channel, seed,
-    readout_error, atom_register, blockade_radius, ccz:
+    readout_error, atom_register, blockade_radius, ccz, gamma, n_steps:
         The trunk's options, exactly as for
         :class:`~hqnn_forge.models.HybridBinaryClassifier`.  With
         ``readout="first"`` every class head reads ⟨Z_0⟩ alone.
@@ -193,6 +193,8 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
         atom_register: AtomRegisterLike | None = None,
         blockade_radius: float | None = None,
         ccz: bool = False,
+        gamma: float = 0.0,
+        n_steps: int | None = None,
     ) -> None:
         super().__init__()
         init_seed = as_seed(init_seed)
@@ -240,6 +242,8 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 atom_register=atom_register,
                 blockade_radius=blockade_radius,
                 ccz=ccz,
+                gamma=gamma,
+                n_steps=n_steps,
             )
 
             if n_classes < 2:
@@ -278,6 +282,8 @@ class MulticlassHybridClassifier(QuantumTrunk, ClassifierBase):
                 atom_register=atom_register,
                 blockade_radius=blockade_radius,
                 ccz=ccz,
+                gamma=gamma,
+                n_steps=n_steps,
             )
 
             # ── Class heads: one row per class ────────────────────────────────

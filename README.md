@@ -391,7 +391,9 @@ Options shared by both models:
   to `2**n_qubits` amplitudes, which needs `diff_method="backprop"`; without the encoder, 1 to
   `2**n_qubits` raw features are zero-padded) or `"analog"` (no gates: a Rydberg atom chain
   under a trainable piecewise-constant pulse of `n_layers` segments, each feature in one atom's
-  local detuning; `AnalogRydbergLayer`).
+  local detuning; `AnalogRydbergLayer`). With `gamma=` (rad/µs) and `n_steps=` (splitting steps
+  per segment, required with `gamma > 0`) the atoms dephase during the pulse, `L_i = √γ n_i`
+  as in `docs/rydberg-model.md`, and the layer evolves the density matrix on `default.mixed`.
 - `init_strategy="restricted"` (one σ for the whole circuit), `"block_local"` (the same σ in
   the first layer, narrowing by up to √2 towards the last) or `"normal"` (plain
   `N(0, init_std²)`, `init_std=0.1` by default); see `hqnn_forge.initializers`.
