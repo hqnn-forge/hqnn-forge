@@ -47,10 +47,15 @@ ONE_ATOM = AtomRegister([[0.0, 0.0]])
 
 
 def checked_evolve(
-    hamiltonian: torch.Tensor, t: float, *, gamma: float = 0.0, n_steps: int | None = None
+    hamiltonian: torch.Tensor,
+    t: float,
+    *,
+    gamma: float = 0.0,
+    n_steps: int | None = None,
+    rho0: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``evolve``, with every returned state checked to be a density matrix."""
-    rho = evolve(hamiltonian, t, gamma=gamma, n_steps=n_steps)
+    rho = evolve(hamiltonian, t, gamma=gamma, n_steps=n_steps, rho0=rho0)
     assert rho.dtype == C128
     assert rho.shape == hamiltonian.shape
     trace = rho.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
@@ -75,7 +80,9 @@ def number_operator(atom: int, n_atoms: int) -> torch.Tensor:
     return op
 
 
-def liouvillian_reference(h: torch.Tensor, t: float, gamma: float) -> torch.Tensor:
+def liouvillian_reference(
+    h: torch.Tensor, t: float, gamma: float, rho0: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     ``ρ(t) = exp(𝓛 t) ρ(0)`` from the full generator, for one Hamiltonian.
 
@@ -85,7 +92,7 @@ def liouvillian_reference(h: torch.Tensor, t: float, gamma: float) -> torch.Tens
 
     which is ``−i[H, ρ] + Σ_i (L_i ρ L_i† − ½ {L_i† L_i, ρ})`` for
     ``L_i = √γ n_i`` (``n_i`` is real and diagonal, so ``n_iᵀ = n_i`` and
-    ``n_i² = n_i``).  ``ρ(0)`` is all atoms in ``|g⟩``.
+    ``n_i² = n_i``).  ``ρ(0)`` is ``rho0``, or all atoms in ``|g⟩`` without it.
     """
     dim = h.shape[-1]
     n_atoms = dim.bit_length() - 1
@@ -97,9 +104,12 @@ def liouvillian_reference(h: torch.Tensor, t: float, gamma: float) -> torch.Tens
         generator = generator + gamma * (
             torch.kron(n, n) - 0.5 * torch.kron(n, eye) - 0.5 * torch.kron(eye, n)
         )
-    rho0 = torch.zeros(dim * dim, dtype=C128)
-    rho0[0] = 1.0
-    return (torch.linalg.matrix_exp(generator * t) @ rho0).reshape(dim, dim)
+    if rho0 is None:
+        start = torch.zeros(dim * dim, dtype=C128)
+        start[0] = 1.0
+    else:
+        start = rho0.to(C128).reshape(dim * dim)
+    return (torch.linalg.matrix_exp(generator * t) @ start).reshape(dim, dim)
 
 
 def single_atom(omega: float, delta: float) -> torch.Tensor:
@@ -837,6 +847,173 @@ class TestChoosingTheStepCount:
         # the smallest error at these points is 1.7e-8
         assert error > 1e-9
         assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+
+def random_density_matrix(n_atoms: int, seed: int) -> torch.Tensor:
+    """``A A† / Tr(A A†)`` for a complex Gaussian ``A``: a full-rank mixed state, nothing symmetric."""
+    generator = torch.Generator().manual_seed(seed)
+    dim = 2**n_atoms
+    a = torch.randn(dim, dim, generator=generator, dtype=F64) + 1j * torch.randn(
+        dim, dim, generator=generator, dtype=F64
+    )
+    rho = a @ a.mH
+    return rho / rho.diagonal().sum()
+
+
+class TestInitialState:
+    """
+    ``rho0``: the evolution starts from a given ``ρ(0)``, so a piecewise-constant
+    pulse is a chain of calls, each starting from the previous segment's state.
+    """
+
+    REGISTER = AtomRegister([[0.0, 0.0], [1.0, 0.1], [0.4, 1.3]])
+    OMEGA = 2.0
+
+    def hamiltonian(self, delta: list[float], n_atoms: int = 3) -> torch.Tensor:
+        register = AtomRegister(self.REGISTER.positions[:n_atoms].tolist())
+        return rydberg_hamiltonian(register, self.OMEGA, delta[:n_atoms], c6=1.5 * self.OMEGA)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.6, 40)])
+    def test_the_ground_state_given_explicitly_is_the_default(
+        self, gamma: float, n_steps: int | None
+    ) -> None:
+        h = self.hamiltonian([0.5, -1.2, 2.1])
+        ground = torch.zeros(8, 8, dtype=C128)
+        ground[0, 0] = 1.0
+        default = checked_evolve(h, 1.3, gamma=gamma, n_steps=n_steps)
+        given = checked_evolve(h, 1.3, gamma=gamma, n_steps=n_steps, rho0=ground)
+        assert torch.allclose(given, default, rtol=0, atol=1e-13)
+
+    @pytest.mark.parametrize("gamma_over_omega", [0.0, 0.3, 2.0])
+    @pytest.mark.parametrize("n_atoms", [1, 2, 3])
+    def test_a_mixed_initial_state_matches_the_exponential_of_the_generator(
+        self, n_atoms: int, gamma_over_omega: float
+    ) -> None:
+        """A full-rank random ``ρ(0)``: every element of it is evolved, not only ``ρ_00``."""
+        h = self.hamiltonian([0.5, -1.2, 2.1], n_atoms)
+        rho0 = random_density_matrix(n_atoms, seed=n_atoms)
+        t = 2.5 / self.OMEGA
+        gamma = gamma_over_omega * self.OMEGA
+        rho = checked_evolve(h, t, gamma=gamma, n_steps=4000 if gamma > 0 else None, rho0=rho0)
+        expected = liouvillian_reference(h, t, gamma, rho0)
+        assert torch.allclose(rho, expected, rtol=0, atol=1e-6 if gamma > 0 else 1e-12)
+
+    @pytest.mark.parametrize("gamma_over_omega", [0.0, 0.3, 2.0])
+    def test_two_segments_match_the_product_of_their_generators(
+        self, gamma_over_omega: float
+    ) -> None:
+        """``ρ = e^(𝓛₂ τ₂) e^(𝓛₁ τ₁) ρ(0)``: the piecewise-constant pulse the analog layer runs."""
+        first = self.hamiltonian([0.5, -1.2, 2.1])
+        second = rydberg_hamiltonian(
+            AtomRegister(self.REGISTER.positions.tolist()),
+            0.7 * self.OMEGA,
+            [-0.3, 0.8, 0.1],
+            c6=1.5 * self.OMEGA,
+            phase=1.1,
+        )
+        gamma = gamma_over_omega * self.OMEGA
+        steps = 4000 if gamma > 0 else None
+        middle = checked_evolve(first, 0.6, gamma=gamma, n_steps=steps)
+        rho = checked_evolve(second, 0.9, gamma=gamma, n_steps=steps, rho0=middle)
+        expected = liouvillian_reference(
+            second, 0.9, gamma, liouvillian_reference(first, 0.6, gamma)
+        )
+        assert torch.allclose(rho, expected, rtol=0, atol=2e-6 if gamma > 0 else 1e-12)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.6, 7)])
+    def test_two_calls_with_the_same_step_are_one_call(
+        self, gamma: float, n_steps: int | None
+    ) -> None:
+        """
+        With the same ``dt``, the half steps where the calls meet merge into
+        one full step, so ``S(dt)^7 S(dt)^7 = S(dt)^14`` term by term; without
+        dephasing ``U(t₂) U(t₁) = U(t₁ + t₂)`` exactly.
+        """
+        h = self.hamiltonian([0.5, -1.2, 2.1])
+        middle = checked_evolve(h, 0.7, gamma=gamma, n_steps=n_steps)
+        chained = checked_evolve(h, 0.7, gamma=gamma, n_steps=n_steps, rho0=middle)
+        whole = checked_evolve(h, 1.4, gamma=gamma, n_steps=None if n_steps is None else 14)
+        assert torch.allclose(chained, whole, rtol=0, atol=1e-13)
+
+    def test_a_batch_of_initial_states_is_evolved_sample_by_sample(self) -> None:
+        h = torch.stack([self.hamiltonian([0.5, -1.2, 2.1]), self.hamiltonian([0.1, 0.2, 0.3])])
+        rho0 = torch.stack([random_density_matrix(3, seed=1), random_density_matrix(3, seed=2)])
+        rho = checked_evolve(h, 0.8, gamma=0.6, n_steps=9, rho0=rho0)
+        for b in range(2):
+            alone = checked_evolve(h[b], 0.8, gamma=0.6, n_steps=9, rho0=rho0[b])
+            assert torch.allclose(rho[b], alone, rtol=0, atol=1e-14)
+
+    def test_one_initial_state_is_shared_by_a_batch(self) -> None:
+        h = torch.stack([self.hamiltonian([0.5, -1.2, 2.1]), self.hamiltonian([0.1, 0.2, 0.3])])
+        rho0 = random_density_matrix(3, seed=1)
+        rho = checked_evolve(h, 0.8, gamma=0.6, n_steps=9, rho0=rho0)
+        for b in range(2):
+            alone = checked_evolve(h[b], 0.8, gamma=0.6, n_steps=9, rho0=rho0)
+            assert torch.allclose(rho[b], alone, rtol=0, atol=1e-14)
+
+    @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.6, 5)])
+    def test_gradients_reach_the_initial_state(self, gamma: float, n_steps: int | None) -> None:
+        """
+        ``⟨n_i⟩(t)`` is linear in ``ρ(0)``; its derivative along a traceless
+        Hermitian direction matches central differences.
+        """
+        h = self.hamiltonian([0.5, -1.2], n_atoms=2)
+        base = random_density_matrix(2, seed=3)
+        direction = random_density_matrix(2, seed=4) - torch.eye(4, dtype=C128) / 4
+
+        def features(s: torch.Tensor) -> torch.Tensor:
+            return readout(evolve(h, 0.9, gamma=gamma, n_steps=n_steps, rho0=base + s * direction))
+
+        s = torch.zeros((), dtype=F64, requires_grad=True)
+        jacobian = torch.autograd.functional.jacobian(features, s)
+        expected = central_differences(features, s)
+        assert torch.allclose(jacobian, expected, rtol=0, atol=1e-9)
+        assert jacobian.abs().max().item() > 1e-2
+
+    def test_without_it_the_hamiltonian_alone_fixes_the_shape(self) -> None:
+        """``rho0=None`` is the old call: ``|g…g⟩⟨g…g|``, batch from ``hamiltonian``."""
+        h = torch.stack([self.hamiltonian([0.5, -1.2, 2.1])] * 2)
+        assert checked_evolve(h, 0.3, rho0=None).shape == (2, 8, 8)
+
+
+class TestInitialStateValidation:
+    H = rydberg_hamiltonian(AtomRegister.chain(2, 1.0), 2.0, [0.1, 0.2], c6=1.0)
+
+    def test_rejects_something_that_is_not_a_tensor(self) -> None:
+        with pytest.raises(TypeError, match="rho0 must be a torch.Tensor"):
+            evolve(self.H, 1.0, rho0=[[1.0, 0.0], [0.0, 0.0]])  # type: ignore[arg-type]
+
+    def test_rejects_an_integer_matrix(self) -> None:
+        with pytest.raises(TypeError, match="rho0 must be a real or complex floating"):
+            evolve(self.H, 1.0, rho0=torch.eye(4, dtype=torch.int64))
+
+    @pytest.mark.parametrize("shape", [(2, 2), (8, 8), (3, 4, 4), (1, 4, 4), (4,)])
+    def test_rejects_a_state_of_another_shape(self, shape: tuple[int, ...]) -> None:
+        with pytest.raises(ValueError, match="rho0 must have shape"):
+            evolve(self.H, 1.0, rho0=torch.zeros(shape, dtype=C128))
+
+    def test_a_batched_state_needs_a_batch_of_hamiltonians_of_its_size(self) -> None:
+        batch = torch.stack([self.H, self.H])
+        with pytest.raises(ValueError, match=r"rho0 must have shape \(4, 4\) or \(2, 4, 4\)"):
+            evolve(batch, 1.0, rho0=torch.zeros(3, 4, 4, dtype=C128))
+        with pytest.raises(
+            ValueError, match=r"rho0 must have shape \(4, 4\), that of hamiltonian"
+        ):
+            evolve(self.H, 1.0, rho0=torch.zeros(2, 4, 4, dtype=C128))
+
+    def test_rejects_a_non_finite_state(self) -> None:
+        rho0 = torch.eye(4, dtype=C128) / 4
+        rho0[1, 2] = math.nan
+        with pytest.raises(ValueError, match="rho0 must be finite"):
+            evolve(self.H, 1.0, rho0=rho0)
+
+    def test_a_real_initial_state_is_accepted(self) -> None:
+        rho0 = torch.eye(4, dtype=F64) / 4
+        assert torch.equal(evolve(self.H, 0.4, rho0=rho0), evolve(self.H, 0.4, rho0=rho0.to(C128)))
+
+    def test_rho0_is_keyword_only(self) -> None:
+        with pytest.raises(TypeError, match="positional"):
+            evolve(self.H, 1.0, 0.5, 10, torch.eye(4))  # type: ignore[misc]
 
 
 class TestBatch:

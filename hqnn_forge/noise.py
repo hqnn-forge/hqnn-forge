@@ -28,6 +28,25 @@ depolarizing, and ``p`` is restricted to [0, 3/4].
   simple gate-noise model whose effect grows with circuit size.
 * ``"end"`` -- once on every wire before measurement: readout-style noise that
   damps each ⟨Z_i⟩ by exactly ``1 − 4p/3``.
+* ``"cz"`` -- after every CZ and CCZ, on every wire the gate acts on, and
+  nowhere else (#700): gate-dependent noise for the blockade gates of
+  ``entangler="rydberg"``, such as atom loss (see *Atom loss*).
+
+``"cz"`` matches every ``qml.CZ`` and ``qml.CCZ`` on the tape, whichever
+part of the circuit recorded it: a tape holds a CZ as a ``qml.CZ`` and
+nothing else, so the channel cannot be confined to one entangler's gates.
+In this library the two entanglers that emit them are ``"rydberg"`` (CZ on
+the blockade edges, CCZ on the blockade triangles with ``ccz=True``) and
+``"hardware_efficient"`` (its CZ ladder); the other entanglers and the IQP
+embedding entangle with CNOT, which ``"cz"`` does not match.  The tape is
+first decomposed exactly as ``qml.noise.insert`` decomposes it for
+``"all"`` (templates and adjoints are expanded), so a CZ inside a template
+is a site as well, and the sites are a subset of the ``"all"`` sites.  A
+circuit with no CZ or CCZ on its tape raises ``ValueError`` when the noisy
+circuit is first run, rather than running noiseless under a noise setting.
+``qml.noise.insert`` cannot place these sites itself: it takes operation
+classes as ``position`` only when ``Operation`` is a direct base, which
+``qml.CZ`` and ``qml.CCZ``, controlled operations, are not.
 
 Other channels
 --------------
@@ -96,8 +115,10 @@ on the other wires alone.  Hence, with loss on the measured wires:
 Like a readout error's ``p10 − p01``, the offset ``−p`` shifts every output,
 and a head trained under loss learns it: evaluate such a model under the same
 loss.  The sites are those of ``position``, as for every channel: after
-every gate on each wire it acts on (``"all"``), or once per wire before
-measurement (``"end"``); loss after the Rydberg gates only is #700.  As
+every gate on each wire it acts on (``"all"``), once per wire before
+measurement (``"end"``), or after every CZ and CCZ only (``"cz"``, #700),
+which with ``entangler="rydberg"`` puts the loss where neutral-atom
+hardware mostly has it, during the blockade gates.  As
 trajectories the channel is sampled by weighted Kraus branches, like
 amplitude damping (see *Damping channels as trajectories* below), with the
 same restrictions: branch 0 is the identity, drawn with ``1 − p``, so a draw
@@ -110,7 +131,8 @@ follows from the operators above.  The no-loss operator ``sqrt(1 − p) I``
 does not depend on the state.  Post-selecting on no loss at any of the
 ``k`` sites therefore leaves ``(1 − p)^k U ρ U†``, where ``U`` is the
 noiseless circuit and ``k`` is the number of sites (``n_qubits`` at
-``"end"``, the sum of the gate widths at ``"all"``).  Renormalising by the
+``"end"``, the sum of the gate widths at ``"all"``, ``2·#CZ + 3·#CCZ`` at
+``"cz"``).  Renormalising by the
 no-loss probability ``(1 − p)^k``, which does not depend on θ, gives the
 noiseless state exactly.  A kept sample's ⟨O⟩ and its gradient are the
 noiseless ones, and the kept fraction is ``(1 − p)^k``.  Without the
@@ -224,8 +246,10 @@ Two methods, chosen with ``noise_method``:
     and ``(1, 1)`` is ``Y`` up to a global phase.  Every sample therefore
     runs the same gate sequence with different angles, so parameter
     broadcasting and the per-sample batch split of the adjoint path apply
-    unchanged.  The sites are placed by ``qml.noise.insert`` itself, so they
-    are exactly the sites the ``"density"`` path puts channels on.  The
+    unchanged.  The sites are placed by the same insertion as the
+    ``"density"`` path's channels (``qml.noise.insert``, or for ``"cz"`` the
+    library's own placement after every CZ and CCZ), so they are exactly
+    the sites the ``"density"`` path puts channels on.  The
     draws use torch's global RNG, like dropout, so ``torch.manual_seed``
     makes them reproducible -- on an exact layer.  With ``shots`` the
     readouts are also sampled by the device's own generator, which torch does
@@ -247,10 +271,10 @@ from __future__ import annotations
 import functools
 import math
 import warnings
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import AbstractContextManager, contextmanager
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, get_args
 
 import numpy as np
 import pennylane as qml
@@ -263,6 +287,7 @@ from hqnn_forge.utils.rng import device_generator
 
 __all__: list[str] = [
     "CHANNELS",
+    "CZ_GATES",
     "KRAUS_DEVICES",
     "KRAUS_DIFF_METHODS",
     "MAX_P",
@@ -289,7 +314,7 @@ __all__: list[str] = [
     "validate_readout_error",
 ]
 
-Position = Literal["all", "end"]
+Position = Literal["all", "end", "cz"]
 NoiseMethod = Literal["density", "trajectories"]
 Channel = Literal[
     "depolarizing", "amplitude_damping", "phase_damping", "bit_flip", "phase_flip", "atom_loss"
@@ -411,8 +436,67 @@ def validate_noise(
     max_p = CHANNELS[channel].max_p
     if not 0.0 <= p <= max_p:
         raise ValueError(f"{p_name} must lie in [0, {max_p}] for {channel!r}; got {p}.")
-    if position not in ("all", "end"):
-        raise ValueError(f"{position_name} must be 'all' or 'end'; got {position!r}.")
+    positions = get_args(Position)
+    if position not in positions:
+        raise ValueError(
+            f"{position_name} must be one of {', '.join(map(repr, positions))}; got {position!r}."
+        )
+
+
+#: The gates ``position="cz"`` places a channel after: the blockade CZ and CCZ
+#: of ``entangler="rydberg"`` (and the CZ ladder of ``"hardware_efficient"``).
+CZ_GATES: tuple[type[qml.operation.Operation], ...] = (qml.CZ, qml.CCZ)
+
+
+def _record_nothing(wires: object) -> None:
+    """A noise "operation" that records no gate (see ``_insert_noise``)."""
+
+
+@qml.transform
+def _insert_noise(
+    tape: qml.tape.QuantumScript, op: Callable[..., object], op_args: object, position: Position
+) -> tuple[qml.tape.QuantumScriptBatch, Callable[..., object]]:
+    """
+    ``qml.noise.insert(tape, op, op_args, position=position)``, plus ``"cz"``.
+
+    ``"all"`` and ``"end"`` go to ``qml.noise.insert`` unchanged.  ``"cz"``
+    places ``op(*op_args, wires=w)`` right after every operation in
+    :data:`CZ_GATES`, once for each of its wires ``w`` in the gate's own wire
+    order, as ``"all"`` does after every gate.  The tape is first decomposed
+    by ``qml.noise.insert`` itself, run with ``_record_nothing`` at
+    ``"start"``, so ``"cz"`` sees the operations ``"all"`` sees and its sites
+    are those of ``"all"`` that follow a CZ or CCZ.
+
+    Raises
+    ------
+    ValueError
+        At ``"cz"``, if the decomposed tape has no CZ or CCZ.
+    """
+    if position != "cz":
+        return qml.noise.insert(tape, op, op_args, position=position)
+    [decomposed], _ = qml.noise.insert(tape, _record_nothing, (), position="start")
+    args = op_args if isinstance(op_args, Sequence) else (op_args,)
+    operations: list[qml.operation.Operator] = []
+    n_gates = 0
+    for gate in decomposed.operations:
+        operations.append(gate)
+        if isinstance(gate, CZ_GATES):
+            n_gates += 1
+            for wire in gate.wires:
+                operations.extend(qml.tape.make_qscript(op)(*args, wires=wire).operations)
+    if n_gates == 0:
+        raise ValueError(
+            "position='cz' places the channel after every CZ and CCZ, and this circuit has "
+            "no CZ or CCZ, so it would run without noise.  entangler='rydberg' and "
+            "'hardware_efficient' emit them; for gate noise on another circuit use "
+            "position='all'."
+        )
+    new_tape = decomposed.copy(operations=operations)
+
+    def null_postprocessing(results: Sequence[object]) -> object:
+        return results[0]
+
+    return [new_tape], null_postprocessing
 
 
 def _noisy_qnode(
@@ -425,7 +509,7 @@ def _noisy_qnode(
     # (TrainingNoiseMixin._init_training_noise); revisit this if that ever changes.
     device = qml.device("default.mixed", wires=n_qubits, seed=None)
     base = qml.QNode(qnode.func, device, diff_method="backprop", interface="torch")
-    return qml.noise.insert(base, CHANNELS[channel].op, p, position=position)
+    return _insert_noise(base, CHANNELS[channel].op, p, position=position)
 
 
 def training_noise_qnode(
@@ -481,7 +565,7 @@ def _pauli_trajectories(
         qml.RZ(torch.pi * ((u == 2) | (u == 3)).to(torch.float64), wires=wires)
         qml.RX(torch.pi * ((u == 1) | (u == 2)).to(torch.float64), wires=wires)
 
-    return qml.noise.insert(tape, pauli_error, (), position=position)
+    return _insert_noise(tape, pauli_error, (), position=position)
 
 
 @qml.transform
@@ -516,7 +600,7 @@ def _kraus_trajectories(
         u = (torch.bucketize(r, edges.to(r.dtype), right=True) + 1) % n_branches
         qml.QubitUnitary(matrices[u], wires=wires, unitary_check=False)
 
-    return qml.noise.insert(tape, kraus_branch, (), position=position)
+    return _insert_noise(tape, kraus_branch, (), position=position)
 
 
 #: Differentiation methods whose gradient through the weighted Kraus branches
@@ -1184,6 +1268,21 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
         qlayer._hqnn_readout_error = None
 
 
+def _check_noise_position(layer: object, position: str) -> None:
+    """
+    Let ``layer`` refuse a ``position`` it cannot place channels at.
+
+    A layer may define ``_noise_position_check(position, name)``, raising
+    ``ValueError`` where its circuit has no sites with the meaning
+    ``position`` documents: :class:`~hqnn_forge.encoding.AnalogRydbergLayer`
+    with ``gamma > 0`` refuses ``"all"``, which on its circuit would act once,
+    as at ``"end"``, instead of after every pulse segment (#710).
+    """
+    check = getattr(layer, "_noise_position_check", None)
+    if check is not None:
+        check(position, "position")
+
+
 @contextmanager
 def apply_depolarizing_noise(
     model: nn.Module,
@@ -1205,7 +1304,8 @@ def apply_depolarizing_noise(
         Strength of each channel: the depolarizing probability in [0, 0.75],
         or the damping / flip / loss probability in [0, 1].
     position:
-        ``"all"`` or ``"end"``; see the module docstring.
+        ``"all"``, ``"end"`` or ``"cz"`` (after every CZ and CCZ only); see
+        the module docstring.
     channel:
         ``"depolarizing"`` (default), ``"amplitude_damping"``,
         ``"phase_damping"``, ``"bit_flip"``, ``"phase_flip"`` or
@@ -1223,7 +1323,10 @@ def apply_depolarizing_noise(
     TypeError
         If ``model`` has no quantum layer.
     ValueError
-        If ``p`` or ``position`` is out of range.
+        If ``p`` or ``position`` is out of range, or with ``p > 0`` if the
+        layer has no sites for ``position``
+        (:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``
+        at ``"all"``).
     RuntimeError
         If the layer is already running a replaced QNode (nested use).
 
@@ -1234,7 +1337,9 @@ def apply_depolarizing_noise(
     fine-tune under noise.
     """
     validate_noise(p, position, channel=channel)
-    _, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
+    layer, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
+    if p > 0.0:
+        _check_noise_position(layer, position)
     # Two separate markers.  _hqnn_noise_depth counts open blocks of any p and
     # is what tells run_with_training_noise to skip a layer's train-mode
     # channel.  _hqnn_noise_original is set only while a p > 0 block has
@@ -1340,9 +1445,10 @@ def noise_sweep(
     ------
     ValueError
         If only one of ``y`` and ``score_fn`` is given, if ``channel`` is
-        neither a noise channel nor ``"readout"``, or if any level is out
-        of range -- checked before the first evaluation, not as the sweep
-        reaches it.
+        neither a noise channel nor ``"readout"``, if any level is out
+        of range, or if a level is ``> 0`` and the layer has no sites for
+        ``position`` (see :func:`apply_depolarizing_noise`) -- checked before
+        the first evaluation, not as the sweep reaches it.
     TypeError
         If ``model`` has no ``predict_proba``, or with ``channel="readout"``
         if its quantum layer is not a :class:`TrainingNoiseMixin` (see
@@ -1379,6 +1485,9 @@ def noise_sweep(
         invalid = [p for p in levels if not 0.0 <= p <= max_p]
         if invalid:
             raise ValueError(f"every p must lie in [0, {max_p}] for {channel!r}; got {invalid}.")
+        if any(p > 0.0 for p in levels):
+            layer, _, _ = resolve_encoding_layer(model, "noise_sweep")
+            _check_noise_position(layer, position)
         blocks = [
             (
                 p,

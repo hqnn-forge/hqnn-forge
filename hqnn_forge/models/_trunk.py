@@ -272,6 +272,8 @@ class QuantumTrunk(nn.Module):
         atom_register: AtomRegisterLike | None = None,
         blockade_radius: float | None = None,
         ccz: bool = False,
+        gamma: float = 0.0,
+        n_steps: int | None = None,
     ) -> int:
         """
         Build ``classical_encoder``, ``quantum_layer`` and ``dropout`` on ``self``.
@@ -286,6 +288,12 @@ class QuantumTrunk(nn.Module):
         validate_dropout_p(dropout_p)
         validate_encoder_activation(encoder_activation)
         validate_init(init_strategy, init_std)
+        if encoding_type != "analog" and (gamma != 0 or n_steps is not None):
+            raise ValueError(
+                f"gamma and n_steps apply to encoding_type='analog' only, the dephasing of its "
+                f"atoms during the pulse; the {encoding_type} encoding has no pulse, so "
+                f"gamma={gamma!r}, n_steps={n_steps!r} would be recorded and ignored."
+            )
         if encoding_type == "analog":
             # The analog layer has no gates: no entangler to choose, and its
             # weights are a pulse that starts from the layer's stated one.
@@ -446,6 +454,8 @@ class QuantumTrunk(nn.Module):
                 noise_channel=noise_channel,
                 seed=seed,
                 readout_error=readout_error,
+                gamma=gamma,
+                n_steps=n_steps,
             )
         else:
             self.quantum_layer = DataReuploadingLayer(
