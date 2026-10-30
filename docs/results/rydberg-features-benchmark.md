@@ -54,9 +54,9 @@ all. It also checks that the model (#495), the solver (#496–#498, #507), the f
 - **Noise:** Markovian dephasing during the pulse, collapse operators `√γ n_i` (a single-atom
   coherence decays at `γ/2`), at `γ/Ω` = 0, 0.1, 1, 10; no Rydberg decay, no detection error.
   With `γ > 0` the solver takes 200 Strang steps; at `ΩT = π` that left the features within
-  `2.8e-6` of a reference at `γ = Ω` and `1.0e-4` at `γ = 10 Ω` (#507). The features were
-  computed under `torch.no_grad()`, so `evolve` took its exact `eigh` propagator, not the
-  `matrix_exp` path it uses when gradients are needed.
+  `2.8e-6` of a reference at `γ = Ω` and `1.0e-4` at `γ = 10 Ω` (#507). The features come
+  from `evolve`'s exact `eigh` propagator, the same one it uses with or without gradients
+  (#697), so the results do not depend on whether they were computed under `torch.no_grad()`.
 - **Arms**, all on the same folds, validation splits, SMOTE rows and seeds:
     - **A**: interacting Rydberg features → head;
     - **B**: the same map with `interactions=False` → the same head. B is a classical model

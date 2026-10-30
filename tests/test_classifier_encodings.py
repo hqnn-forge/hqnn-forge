@@ -62,6 +62,12 @@ ENCODINGS = [
         N_QUBITS,
         id="analog-first",
     ),
+    pytest.param(
+        {"encoding_type": "analog", "gamma": 2.0, "n_steps": 3},
+        AnalogRydbergLayer,
+        N_QUBITS,
+        id="analog-dephased",
+    ),
 ]
 
 
