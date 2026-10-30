@@ -214,6 +214,8 @@ _HERMITIAN_RTOL = 1e-12
 #: The epsilon is that of single precision at most: with a half-precision
 #: one (``bfloat16``: 100 ε = 0.78) the bound would accept nearly any matrix.
 _HERMITIAN_EPS = 100
+from hqnn_forge._validation import check_int
+
 
 
 def _non_negative_number(value: Any, name: str) -> float:
@@ -230,6 +232,7 @@ def _non_negative_number(value: Any, name: str) -> float:
 
 
 def _step_count(n_steps: Any) -> int:
+    n_steps = check_int(n_steps, "n_steps", minimum=1)
     if isinstance(n_steps, bool) or not isinstance(n_steps, numbers.Integral) or n_steps < 1:
         raise ValueError(f"n_steps must be an integer >= 1; got {n_steps!r}.")
     return int(n_steps)

@@ -125,6 +125,9 @@ from hqnn_forge.rydberg.lindblad import (
     readout,
 )
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
+from hqnn_forge._validation import check_int
+
+
 
 __all__ = ["PulseEncoding", "RydbergFeatureMap"]
 
@@ -134,12 +137,9 @@ __all__ = ["PulseEncoding", "RydbergFeatureMap"]
 #: least 1): 4096 at 4 atoms, 256 at 6, 1 at 10.
 _CHUNK_ENTRIES = 2**20
 
+def _positive_integer(value: Any, name: str, *, or_none: bool = False) -> int | None:
+    return check_int(value, name, minimum=1, allow_none=or_none)
 
-def _positive_integer(value: Any, name: str, *, or_none: bool = False) -> int:
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 1:
-        suffix = " or None" if or_none else ""
-        raise ValueError(f"{name} must be an integer >= 1{suffix}; got {value!r}.")
-    return int(value)
 
 
 def _flag(value: Any, name: str) -> bool:

@@ -50,6 +50,7 @@ import torch.nn as nn
 
 from hqnn_forge.models.base import BinaryClassifierBase
 from hqnn_forge.utils.rng import as_seed, seeded_rng
+from hqnn_forge._validation import check_int
 
 
 class LinearClassifier(BinaryClassifierBase):
@@ -108,6 +109,7 @@ class LinearClassifier(BinaryClassifierBase):
         # the check below raises.
         with seeded_rng(init_seed) as reseed:
             self._config = dict(n_input_features=n_input_features, init_seed=init_seed)
+            n_input_features = check_int(n_input_features, "n_input_features", minimum=1)
             if (
                 isinstance(n_input_features, bool)
                 or not isinstance(n_input_features, numbers.Integral)

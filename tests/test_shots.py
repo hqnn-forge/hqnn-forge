@@ -11,11 +11,13 @@ errors, and the variance against the binomial ``(1 − ⟨Z⟩²) / shots``.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pennylane as qml
 import pytest
 import torch
@@ -111,8 +113,17 @@ class TestValidation:
 
     @pytest.mark.parametrize("shots", [0, -5, True, 2.5])
     def test_shots_must_be_a_positive_int(self, shots: Any) -> None:
-        with pytest.raises(ValueError, match="shots must be None or a positive int"):
+        match = rf"shots must be an integer >= 1 or None; got {re.escape(repr(shots))}\."
+        with pytest.raises(ValueError, match=match):
             QuantumEncodingLayer(n_qubits=3, n_layers=1, shots=shots, **SHIFT)
+
+    def test_numpy_integer_shots_are_accepted_and_stored_as_int(self) -> None:
+        layer = QuantumEncodingLayer(n_qubits=3, n_layers=1, shots=np.int64(100), **SHIFT)
+        assert layer.shots == 100
+        assert type(layer.shots) is int
+        assert "shots=100" in repr(layer)
+        layer.train()
+        assert layer(torch.rand(2, 3)).shape == (2, 3)
 
     @pytest.mark.parametrize(
         "cls", [HybridBinaryClassifier, ParallelHybridClassifier, MulticlassHybridClassifier]
@@ -289,14 +300,27 @@ class TestApplyShots:
             assert "shots=40" in repr(model.quantum_layer)
         assert model.quantum_layer.shots is None
 
+    def test_numpy_integer_shots_are_accepted(self) -> None:
+        model = self._model()
+        with apply_shots(model, np.int64(40)):
+            assert model.quantum_layer.shots == 40
+            assert type(model.quantum_layer.shots) is int
+        assert model.quantum_layer.shots is None
+
+    @pytest.mark.parametrize("shots", [True, False])
+    def test_boolean_shots_are_refused(self, shots: bool) -> None:
+        match = rf"shots must be an integer >= 1( or None)?; got {shots!r}\."
+        with pytest.raises(ValueError, match=match):
+            apply_shots(self._model(), shots)
+
     def test_errors_name_apply_shots(self) -> None:
         with (
             pytest.raises(TypeError, match="apply_shots expects"),
             apply_shots(torch.nn.Linear(2, 1), 5),
         ):
             pass
-        with pytest.raises(ValueError, match="positive int"), apply_shots(self._model(), 0):
-            pass
+        with pytest.raises(ValueError, match=r"shots must be an integer >= 1( or None)?; got 0\."):
+            apply_shots(self._model(), 0)
 
 
 class TestShotSweep:
@@ -388,10 +412,18 @@ class TestShotSweep:
             score_fn=lambda y, p: float((p > 0.5).eq(y).float().mean()),
         )
         assert point.scores is not None and len(point.scores) == 3
-        with pytest.raises(ValueError, match="positive int"):
+        with pytest.raises(ValueError, match=r"shots must be an integer >= 1( or None)?; got 0\."):
             shot_sweep(model, x, [100, 0])
         with pytest.raises(ValueError, match="both y and score_fn"):
             shot_sweep(model, x, [100], y=y)
+
+    def test_numpy_integer_shot_counts_are_accepted(self) -> None:
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(n_input_features=4, n_qubits=3, n_layers=1, **EXACT)
+        x = torch.randn(6, 4)
+        (point,) = shot_sweep(model, x, [np.int64(100)], n_repeats=2)
+        assert point.shots == 100
+        assert point.probabilities.shape == (2, 6)
 
 
 def test_any_pennylane_device_runs_a_layer() -> None:
