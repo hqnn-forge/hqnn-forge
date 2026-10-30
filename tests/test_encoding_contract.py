@@ -94,6 +94,13 @@ def _analog_rydberg() -> EncodingLayer:
     return layer
 
 
+def _analog_rydberg_dephased() -> EncodingLayer:
+    # gamma > 0: a density-matrix circuit on default.mixed, run sample by sample.
+    layer = AnalogRydbergLayer(n_qubits=N_QUBITS, n_segments=2, gamma=2.0, n_steps=3)
+    layer.set_pulse(omega=[3.0, 9.0], detuning=[-2.0, 4.0], phase=[0.0, 1.2])
+    return layer
+
+
 ENCODERS: dict[str, Callable[[], EncodingLayer]] = {
     "angle": _angle,
     "angle-y-first": _angle_y_first,
@@ -101,6 +108,7 @@ ENCODERS: dict[str, Callable[[], EncodingLayer]] = {
     "amplitude-padded": _amplitude_padded,
     "reuploading-scaled": _reuploading_scaled,
     "analog-rydberg": _analog_rydberg,
+    "analog-rydberg-dephased": _analog_rydberg_dephased,
 }
 
 

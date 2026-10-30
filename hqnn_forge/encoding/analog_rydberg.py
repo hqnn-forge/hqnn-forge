@@ -55,6 +55,57 @@ and forward mode are both correct at a degenerate spectrum (#505, #674).
 Each ``U_k``
 is a dense ``2^N × 2^N`` matrix per sample, built in ``complex128``.
 
+Dephasing during the pulse
+--------------------------
+With ``gamma = γ > 0`` the atoms also dephase while the pulse drives them:
+the state is a density matrix and follows, in segment ``k``, the Lindblad
+equation of ``docs/rydberg-model.md`` (#699)::
+
+    dρ/dt = −i [H_k(x), ρ] + Σ_i ( L_i ρ L_i† − ½ {L_i† L_i, ρ} ),        L_i = √γ n_i
+
+with γ in rad/µs, the same for every atom and segment.  A single-atom
+coherence decays at ``γ/2`` (``T₂ = 2/γ``) and the dissipator alone leaves
+the populations alone, so γ reaches ``⟨Z_i⟩`` only through its competition
+with the drive: one resonant atom gives the damped Rabi oscillation of the
+model page.  Each segment is evolved by
+:func:`~hqnn_forge.rydberg.evolve`, starting from the state the previous one
+ended in::
+
+    ρ_0 = |g…g⟩⟨g…g|,    ρ_(k+1) = evolve(H_k(x), τ, gamma=γ, n_steps=n, rho0=ρ_k),    ρ(T) = ρ_K
+
+that is, ``n`` steps of ``dt = τ/n`` of its symmetric splitting
+``e^(𝓛_D dt/2) e^(𝓛_(H_k) dt) e^(𝓛_D dt/2)`` per segment, with ``U(dt)``
+from the eigendecomposition of ``H_k`` and the dissipator applied exactly,
+as the elementwise factor ``exp(−γ dt d_H(a, b)/2)``.  The error is of
+second order in ``dt``; ``evolve`` derives it and the condition under which
+two step counts estimate it (*Choosing* ``n_steps``, per segment with
+``t = τ``).  ``n_steps`` is therefore required with ``gamma > 0`` and has no
+default, as in ``evolve`` and :class:`~hqnn_forge.rydberg.RydbergFeatureMap`
+(#506, #507).  The readout is the diagonal of ``ρ(T)``::
+
+    ⟨Z_i⟩ = 1 − 2 Tr[ρ(T) n_i] = 1 − 2 Σ_k b_i(k) ρ(T)_kk
+
+with ``b_i(k)`` the bit of atom ``i`` in basis index ``k`` (atom 0 the most
+significant).  ``gamma = 0`` is the unitary evolution above, unchanged.
+
+The circuit with ``gamma > 0`` computes ``ρ(T)`` in torch inside the QNode
+and prepares it with one ``qml.QubitDensityMatrix`` on ``default.mixed``,
+differentiated by backprop, before the same ``⟨Z_i⟩``.  That costs ``4^N``
+entries per sample instead of ``2^N``, and training keeps the state of every
+splitting step for the backward pass, ``K · n_steps`` matrices of ``4^N``
+entries per sample.  ``default.mixed`` does not broadcast a density-matrix
+preparation over a batch (PennyLane 0.45), so ``qlayer`` runs a batch
+sample by sample, whichever QNode it holds.  The gate-model noise options
+act on ``ρ(T)``: at ``noise_position="end"`` once on every atom before
+measurement, and a readout error maps each ``⟨Z_i⟩``, as without dephasing.
+There is no gate between segments, so ``"all"`` has no sites with its
+meaning: inserted into this circuit it would act once, after the one
+preparation, exactly as ``"end"`` does, and so drop the per-segment noise it
+asks for (with ``gamma = 0`` it acts ``K`` times).  ``"all"`` with a
+strength ``> 0`` is therefore refused, at construction with
+``noise_level > 0`` and by :func:`~hqnn_forge.noise.apply_depolarizing_noise`
+and :func:`~hqnn_forge.noise.noise_sweep` with ``p > 0`` (#710).
+
 Basis, wires and readout
 ------------------------
 Atom ``i`` is row ``i`` of the register's positions, tensor factor ``i`` from
@@ -137,7 +188,8 @@ QNode takes ``inputs`` and ``weights``, and ``forward(x)`` is
 the QNode, so it runs on ``default.qubit`` with backprop only.  Through
 that circuit the library's noise options apply: a channel at
 ``noise_position="all"`` acts after every pulse segment on every atom, at
-``"end"`` once before measurement; a readout error maps each ``⟨Z_i⟩``.
+``"end"`` once before measurement, and ``"cz"`` raises, since the pulse
+has no CZ or CCZ; a readout error maps each ``⟨Z_i⟩``.
 They are gate-model channels placed between segments, not the continuous
 dephasing of ``docs/rydberg-model.md``.
 
@@ -175,7 +227,7 @@ from hqnn_forge.encoding._common import (
 )
 from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
 from hqnn_forge.rydberg.hamiltonian import DEFAULT_C6, MAX_ATOMS, rydberg_hamiltonian
-from hqnn_forge.rydberg.lindblad import _propagator
+from hqnn_forge.rydberg.lindblad import _non_negative_number, _propagator, _step_count, evolve
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 
 __all__ = ["AnalogRydbergLayer", "build_analog_rydberg_qnode"]
@@ -195,6 +247,8 @@ class _AnalogPulse(NamedTuple):
     detuning_max: float
     local_detuning_max: float
     segment_duration: float
+    gamma: float
+    n_steps: int | None
 
 
 def _bounded_pulse(
@@ -211,11 +265,22 @@ def _segment_unitaries(
     pulse: _AnalogPulse, inputs: torch.Tensor, weights: torch.Tensor
 ) -> torch.Tensor:
     """``U_k = e^(−i H_k(x) τ)`` for every segment: shape ``(K, *batch, 2^N, 2^N)``."""
+    return torch.stack(
+        [
+            _propagator(h, pulse.segment_duration)
+            for h in _segment_hamiltonians(pulse, inputs, weights)
+        ]
+    )
+
+
+def _segment_hamiltonians(
+    pulse: _AnalogPulse, inputs: torch.Tensor, weights: torch.Tensor
+) -> list[torch.Tensor]:
+    """``H_k(x)`` for every segment, each of shape ``(*batch, 2^N, 2^N)``."""
     omega, detuning, phase = _bounded_pulse(weights, pulse.omega_max, pulse.detuning_max)
     local = pulse.local_detuning_max * torch.sigmoid(inputs.to(torch.float64))
-    unitaries = []
-    for k in range(weights.shape[0]):
-        h = rydberg_hamiltonian(
+    return [
+        rydberg_hamiltonian(
             pulse.register,
             omega[k],
             detuning[k] + local,
@@ -223,8 +288,24 @@ def _segment_unitaries(
             interactions=pulse.interactions,
             phase=phase[k],
         )
-        unitaries.append(_propagator(h, pulse.segment_duration))
-    return torch.stack(unitaries)
+        for k in range(weights.shape[0])
+    ]
+
+
+def _final_density_matrix(
+    pulse: _AnalogPulse, inputs: torch.Tensor, weights: torch.Tensor
+) -> torch.Tensor:
+    """
+    ``ρ(T)``: every segment evolved by :func:`~hqnn_forge.rydberg.evolve` from the last one's state.
+
+    Shape ``(*batch, 2^N, 2^N)``, ``complex128``; segment 0 starts from
+    ``|g…g⟩⟨g…g|``.  See *Dephasing during the pulse* in the module docstring.
+    """
+    first, *rest = _segment_hamiltonians(pulse, inputs, weights)  # K >= 1
+    rho = evolve(first, pulse.segment_duration, gamma=pulse.gamma, n_steps=pulse.n_steps)
+    for h in rest:
+        rho = evolve(h, pulse.segment_duration, gamma=pulse.gamma, n_steps=pulse.n_steps, rho0=rho)
+    return rho
 
 
 def _make_analog_circuit(
@@ -245,7 +326,45 @@ def _make_analog_circuit(
             qml.QubitUnitary(unitary, wires=wires)
         return measure_z(len(wires), readout)
 
-    return circuit
+    def dephased_circuit(
+        inputs: torch.Tensor, weights: torch.Tensor
+    ) -> list[qml.measurements.ExpectationMP]:
+        if inputs.ndim > 1:
+            # default.mixed does not broadcast QubitDensityMatrix (PennyLane 0.45);
+            # the layer's qlayer runs a batch sample by sample instead.
+            raise ValueError(
+                f"The circuit of AnalogRydbergLayer with gamma > 0 prepares one density "
+                f"matrix and takes one sample of shape ({len(wires)},) at a time; got inputs "
+                f"of shape {tuple(inputs.shape)}."
+            )
+        qml.QubitDensityMatrix(_final_density_matrix(pulse, inputs, weights), wires=wires)
+        return measure_z(len(wires), readout)
+
+    return dephased_circuit if pulse.gamma > 0 else circuit
+
+
+class _SampleBySampleTorchLayer(qml.qnn.TorchLayer):  # type: ignore[misc]
+    """
+    A ``TorchLayer`` that runs its QNode once per sample of a batch.
+
+    The circuit with ``gamma > 0`` starts from ``qml.QubitDensityMatrix``, which
+    ``default.mixed`` does not broadcast over a batch; every QNode the layer
+    runs (its own, the training-noise one, one swapped in by
+    :func:`~hqnn_forge.noise.apply_depolarizing_noise` or
+    :func:`~hqnn_forge.noise.apply_shots`) goes through ``forward``, so the
+    loop applies to all of them.  The result equals what one broadcast call
+    would return.
+    """
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim < 2:
+            return super().forward(inputs)  # type: ignore[no-any-return]
+        rows = inputs.reshape(-1, inputs.shape[-1])
+        # Bound here: a zero-argument super() inside the comprehension fails
+        # before Python 3.12, which runs a comprehension as a nested function.
+        run = super().forward
+        outputs = torch.stack([run(row) for row in rows])
+        return outputs.reshape(*inputs.shape[:-1], *outputs.shape[1:])
 
 
 def build_analog_rydberg_qnode(
@@ -259,13 +378,18 @@ def build_analog_rydberg_qnode(
     segment_duration: float | None = None,
     readout: Readout = "all",
     seed: int | None = None,
+    gamma: float = 0.0,
+    n_steps: int | None = None,
 ) -> qml.QNode:
     """
-    The QNode of :class:`AnalogRydbergLayer`, on ``default.qubit`` with backprop.
+    The QNode of :class:`AnalogRydbergLayer`, with backprop.
 
-    Its arguments are ``inputs`` and ``weights`` (shape ``(K, 3)``, any
-    ``K ≥ 1``); the keyword options are those of the layer, which documents
-    them and their defaults.
+    On ``default.qubit`` with one ``QubitUnitary`` per segment; with
+    ``gamma > 0`` on ``default.mixed``, preparing ``ρ(T)`` with one
+    ``QubitDensityMatrix``, for one sample at a time (see the module
+    docstring).  Its arguments are ``inputs`` and ``weights`` (shape
+    ``(K, 3)``, any ``K ≥ 1``); the keyword options are those of the layer,
+    which documents them and their defaults.
 
     Raises
     ------
@@ -273,10 +397,19 @@ def build_analog_rydberg_qnode(
         As :class:`AnalogRydbergLayer` for the same options.
     """
     pulse = _pulse_settings(
-        register, c6, interactions, omega_max, detuning_max, local_detuning_max, segment_duration
+        register,
+        c6,
+        interactions,
+        omega_max,
+        detuning_max,
+        local_detuning_max,
+        segment_duration,
+        gamma,
+        n_steps,
     )
     readout_wires(register.n_atoms, readout)  # validates readout
-    device = resolve_device("default.qubit", register.n_atoms, seed=seed)
+    device_name = "default.mixed" if pulse.gamma > 0 else "default.qubit"
+    device = resolve_device(device_name, register.n_atoms, seed=seed)
     return qml.QNode(
         func=_make_analog_circuit(pulse, readout),
         device=device,
@@ -293,6 +426,8 @@ def _pulse_settings(
     detuning_max: float | None,
     local_detuning_max: float | None,
     segment_duration: float | None,
+    gamma: float = 0.0,
+    n_steps: int | None = None,
 ) -> _AnalogPulse:
     """Validate the fixed settings and fill in the defaults of the module docstring."""
     if not isinstance(register, AtomRegister):
@@ -305,6 +440,14 @@ def _pulse_settings(
         )
     omega_max = _finite_number(omega_max, "omega_max", positive=True)
     default_detuning = math.sqrt(3) * omega_max
+    gamma = _non_negative_number(gamma, "gamma")
+    steps = None if n_steps is None else _step_count(n_steps)
+    if gamma > 0 and steps is None:
+        raise ValueError(
+            "n_steps is required when gamma > 0: each segment is evolved by evolve's "
+            "splitting, whose error is of order (segment_duration / n_steps)^2, and no step "
+            "count is assumed (see hqnn_forge.rydberg.evolve)."
+        )
     return _AnalogPulse(
         register=register,
         c6=_finite_number(c6, "c6"),
@@ -325,6 +468,8 @@ def _pulse_settings(
             if segment_duration is None
             else _finite_number(segment_duration, "segment_duration", positive=True)
         ),
+        gamma=gamma,
+        n_steps=steps,
     )
 
 
@@ -394,13 +539,26 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
     noise_level, noise_position, noise_method, noise_trajectories, noise_channel, readout_error:
         Training-time noise as in
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`; a channel at
-        ``"all"`` acts after every pulse segment (see the module docstring).
+        ``"all"`` acts after every pulse segment, and is refused with
+        ``gamma > 0`` (see the module docstring).
     shots:
         Must be ``None``: the layer computes exact expectation values, since
         backprop, the only method that differentiates its propagators,
         cannot run on samples.
     seed:
         Seed of the device, as for the other layers.
+    gamma:
+        Dephasing rate γ in rad/µs, ``>= 0``, of the collapse operators
+        ``√γ n_i`` acting on every atom during the whole pulse (a single-atom
+        coherence decays at ``γ/2``).  Default ``0.0``: the unitary circuit.
+        With ``gamma > 0`` the layer evolves the density matrix segment by
+        segment and runs on ``default.mixed`` whatever ``device_name`` says;
+        see *Dephasing during the pulse* in the module docstring.
+    n_steps:
+        Splitting steps of :func:`~hqnn_forge.rydberg.evolve` per segment, an
+        integer ``>= 1``.  Required when ``gamma > 0``, without a default:
+        the step that is small enough depends on γ and on the spread of the
+        energies of every ``H_k``.  Not used when ``gamma = 0``.
 
     Attributes
     ----------
@@ -411,6 +569,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
     c6, omega_max, detuning_max, local_detuning_max, segment_duration, duration : float
         ``duration = n_segments · segment_duration``, in µs.
     interactions : bool
+    gamma : float
+    n_steps : int or None
 
     Raises
     ------
@@ -421,7 +581,11 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         of another size than ``n_qubits``, a bound or duration that is not a
         finite number ``> 0``, ``n_segments < 1``, ``shots``, a device or
         differentiation method other than the above, or an unknown
-        ``readout`` or noise option.
+        ``readout`` or noise option; for ``gamma`` not a finite number
+        ``>= 0``, ``n_steps`` not an integer ``>= 1`` or missing with
+        ``gamma > 0``, or ``noise_position="all"`` with ``noise_level > 0``
+        and ``gamma > 0`` (as :func:`~hqnn_forge.noise.apply_depolarizing_noise`
+        refuses ``position="all"`` on such a layer).
 
     Examples
     --------
@@ -448,6 +612,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
     local_detuning_max: float
     segment_duration: float
     duration: float
+    gamma: float
+    n_steps: int | None
     seed: int | None
     _pulse: _AnalogPulse
 
@@ -474,6 +640,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         noise_channel: Channel = "depolarizing",
         seed: int | None = None,
         readout_error: tuple[float, float] | None = None,
+        gamma: float = 0.0,
+        n_steps: int | None = None,
     ) -> None:
         super().__init__()
         if (
@@ -523,8 +691,9 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             detuning_max,
             local_detuning_max,
             segment_duration,
+            gamma,
+            n_steps,
         )
-
         self.n_qubits = int(n_qubits)
         self.n_features = self.n_qubits
         self.n_segments = int(n_segments)
@@ -539,6 +708,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         self.local_detuning_max = pulse.local_detuning_max
         self.segment_duration = pulse.segment_duration
         self.duration = self.n_segments * self.segment_duration
+        self.gamma = pulse.gamma
+        self.n_steps = pulse.n_steps
         self._pulse = pulse
 
         qnode = build_analog_rydberg_qnode(
@@ -551,8 +722,11 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             segment_duration=pulse.segment_duration,
             readout=readout,
             seed=seed,
+            gamma=pulse.gamma,
+            n_steps=pulse.n_steps,
         )
-        self.qlayer = qml.qnn.TorchLayer(qnode, {"weights": (self.n_segments, 3)})
+        torch_layer = _SampleBySampleTorchLayer if pulse.gamma > 0 else qml.qnn.TorchLayer
+        self.qlayer = torch_layer(qnode, {"weights": (self.n_segments, 3)})
         # The constructor's pulse: every raw value 0, i.e. Ω_k = Ω_max/2, Δ_k = 0, φ_k = 0.
         with torch.no_grad():
             self.qlayer.weights.zero_()
@@ -567,6 +741,9 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             noise_channel=noise_channel,
             readout_error=readout_error,
         )
+        # After _init_training_noise, which validates noise_level and noise_position.
+        if self.noise_level > 0:
+            self._noise_position_check(noise_position, "noise_position")
         self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
@@ -650,7 +827,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         """
         ``ψ(T) = U_{K−1} ⋯ U_0 |g…g⟩`` in torch, shape ``(*batch, 2^N)``, ``complex128``.
 
-        The state the circuit prepares before its readout, without noise;
+        The state the circuit prepares before its readout, without noise and
+        without the dephasing ``gamma`` (see :meth:`density_matrices`);
         basis ordering as in the module docstring (atom 0 the most
         significant bit).
         """
@@ -659,6 +837,36 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         for unitary in unitaries[1:]:
             psi = (unitary @ psi.unsqueeze(-1)).squeeze(-1)
         return psi
+
+    def density_matrices(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        ``ρ(T)`` under the pulse and the dephasing ``gamma``, shape ``(*batch, 2^N, 2^N)``.
+
+        ``complex128``, with gradients to the weights and ``x``.  Each segment
+        is evolved by :func:`~hqnn_forge.rydberg.evolve` from the previous
+        segment's state, with ``n_steps`` steps of its splitting (module
+        docstring, *Dephasing during the pulse*); with ``gamma = 0`` it is
+        ``ψψ†`` of :meth:`states` to rounding.  With ``gamma > 0`` it is the
+        state the circuit prepares before its readout, without the gate-model
+        noise options.  Basis ordering as in the module docstring.
+        """
+        return _final_density_matrix(self._pulse, self.prepare_inputs(x), self.qlayer.weights)
+
+    def _noise_position_check(self, position: str, name: str) -> None:
+        """
+        Refuse ``"all"`` with ``gamma > 0``, here and in :mod:`hqnn_forge.noise`.
+
+        ``name`` is the argument's name in the caller, for the message.  See
+        *Dephasing during the pulse* in the module docstring.
+        """
+        if self.gamma > 0 and position == "all":
+            raise ValueError(
+                f"{name}='all' places a channel after every pulse segment, and with "
+                f"gamma > 0 the segments are evolved outside the circuit, which prepares only "
+                f"their final density matrix: there is no gate between segments to put the "
+                f"channel after, and the channel would act once, as at 'end'.  Use "
+                f"{name}='end' (once before measurement), or gamma=0."
+            )
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -677,6 +885,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
 
     def extra_repr(self) -> str:
         options = ""
+        if self.gamma:
+            options += f", gamma={self.gamma:.4g}, n_steps={self.n_steps}"
         if not self.interactions:
             options += ", interactions=False"
         if self.readout != "all":

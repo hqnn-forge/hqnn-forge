@@ -22,8 +22,8 @@ Master equation
     𝓛_D ρ = Σ_i ( L_i ρ L_i† − ½ { L_i† L_i , ρ } ),        L_i = √γ n_i
 
 with one collapse operator per atom, ``n_i = |r⟩⟨r|_i``, and
-``ρ(0) = |g…g⟩⟨g…g|``.  There is no global variant of the operator and no
-decay term.
+``ρ(0) = |g…g⟩⟨g…g|`` unless :func:`evolve` is given another ``rho0``.  There
+is no global variant of the operator and no decay term.
 
 The dissipator, elementwise
 ---------------------------
@@ -73,6 +73,8 @@ Without dephasing the state stays pure, ``ρ(t) = ψ(t) ψ(t)†`` with::
     ψ(t) = U(t) e_0,        ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m)
 
 ``e_0`` being the basis vector of ``|g…g⟩``.  This is exact at any ``t``.
+From another initial state ``ρ(0)``, which may be mixed, it is
+``ρ(t) = U(t) ρ(0) U(t)†``, exact as well.
 
 Derivatives of the propagator
 -----------------------------
@@ -159,6 +161,21 @@ Both factors are exact, so the only error is that of the splitting.
   steps multiply, ``e^(𝓛_D dt/2) e^(𝓛_D dt/2) = e^(𝓛_D dt)``, exactly.  The
   loop applies one half step at the start, a full step between rotations and
   one half step at the end, which is ``S(dt)^n`` term by term.
+
+Piecewise-constant Hamiltonians
+-------------------------------
+A Hamiltonian that is constant on each of several segments, ``H_k`` for a
+time ``τ_k``, is evolved by one call per segment, each starting from the
+state the previous one returned (``rho0``)::
+
+    ρ_(k+1) = S_k(τ_k / n_k)^(n_k) ρ_k,        S_k(dt) = e^(𝓛_D dt/2) e^(𝓛_(H_k) dt) e^(𝓛_D dt/2)
+
+The splitting of each segment is that of a constant ``H`` and keeps its
+second order; the segment boundaries add no error of their own, since the
+exact evolution is that same product of the exact segment maps.  Two calls
+with the same ``H`` and the same ``dt`` are one call with the steps added
+up: the half step that ends the first and the half step that starts the
+second are one full step, as inside a call.
 
 Readout
 -------
@@ -247,6 +264,31 @@ def _atom_count(matrix: Any, name: str) -> int:
     if not bool(torch.isfinite(matrix).all()):
         raise ValueError(f"{name} must be finite; got a NaN or an infinity.")
     return n
+
+
+def _initial_state(rho0: Any, shape: torch.Size) -> torch.Tensor:
+    """
+    ``rho0`` as ``complex128``, after checking it against the Hamiltonian's ``shape``.
+
+    Accepted: ``(2^N, 2^N)``, shared by the batch, or ``shape`` itself.
+    ``TypeError`` for anything but a real or complex floating tensor,
+    ``ValueError`` for another shape or a NaN or an infinity.
+    """
+    if not isinstance(rho0, torch.Tensor):
+        raise TypeError(f"rho0 must be a torch.Tensor; got {type(rho0).__name__}.")
+    if not (rho0.is_complex() or rho0.is_floating_point()):
+        raise TypeError(f"rho0 must be a real or complex floating tensor; got dtype {rho0.dtype}.")
+    single = tuple(shape[-2:])
+    if rho0.shape not in (shape, single):
+        allowed = (
+            f"{single}, that of hamiltonian"
+            if len(shape) == 2
+            else f"{single} or {tuple(shape)}: one state for every sample, or one per sample"
+        )
+        raise ValueError(f"rho0 must have shape {allowed}; got shape {tuple(rho0.shape)}.")
+    if not bool(torch.isfinite(rho0).all()):
+        raise ValueError("rho0 must be finite; got a NaN or an infinity.")
+    return rho0.to(torch.complex128)
 
 
 def _divided_differences(energies: torch.Tensor, tau: float) -> torch.Tensor:
@@ -429,9 +471,10 @@ def evolve(
     *,
     gamma: float = 0.0,
     n_steps: int | None = None,
+    rho0: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    The state ``ρ(t)`` of an array that starts with every atom in ``|g⟩``.
+    The state ``ρ(t)`` of an array that starts in ``rho0``, by default every atom in ``|g⟩``.
 
     Solves, for one or a batch of time-independent Hamiltonians::
 
@@ -443,7 +486,8 @@ def evolve(
 
     * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, exact up to
       floating-point rounding, from one eigendecomposition per sample and
-      without time stepping.
+      without time stepping; from a given ``rho0``, ``U ρ(0) U†`` with
+      ``U = e^(−iHt)``, exact as well.
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
       ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``.  The unitary step is
@@ -480,13 +524,24 @@ def evolve(
         function does not guess (see "Choosing ``n_steps``" below).  Not
         used when ``gamma = 0``, where the result is exact up to
         floating-point rounding.
+    rho0:
+        The state ``ρ(0)``, in the basis of ``hamiltonian``: shape
+        ``(2^N, 2^N)``, shared by every sample, or the shape of a batched
+        ``hamiltonian``, one state per sample.  Real or complex; converted to
+        ``complex128``.  ``None`` (default) is ``|g…g⟩⟨g…g|``.  It is not
+        checked to be a density matrix: the evolution is linear and evolves
+        whatever matrix it is given.  Gradients reach it.  A
+        piecewise-constant Hamiltonian is one call per segment with ``rho0``
+        the previous segment's result (module docstring, *Piecewise-constant
+        Hamiltonians*).
 
     Returns
     -------
     torch.Tensor
         ``ρ(t)``, ``complex128``, with the shape and device of
         ``hamiltonian``.  Entry ``[..., a, b]`` is ``⟨a|ρ|b⟩``.  Trace 1,
-        Hermitian and positive semidefinite up to rounding, at any step size;
+        Hermitian and positive semidefinite up to rounding, at any step size,
+        when ``rho0`` is (as the default is);
         the rounding error of the trace grows by about ``1e-16`` to ``1e-15``
         per step (``1.4e-15`` per step for 6 atoms 0.6 µm apart,
         ``‖H‖₂ ≈ 6e8`` rad/µs).
@@ -494,11 +549,13 @@ def evolve(
     Raises
     ------
     TypeError
-        If ``hamiltonian`` is not a real or complex floating tensor.
+        If ``hamiltonian`` or ``rho0`` is not a real or complex floating
+        tensor.
     ValueError
         If ``hamiltonian`` has another shape, is for more than
         :data:`~hqnn_forge.rydberg.MAX_ATOMS` atoms, holds a NaN or an
-        infinity, or is not Hermitian; if ``t`` or ``gamma`` is not a finite
+        infinity, or is not Hermitian; if ``rho0`` has a shape other than
+        the two above or is not finite; if ``t`` or ``gamma`` is not a finite
         number ``>= 0``; if ``n_steps`` is not an integer ``>= 1``, or is
         missing with ``gamma > 0``.
 
@@ -564,9 +621,8 @@ def evolve(
       through ``torch.linalg.matrix_exp`` of four times the size of ``H``.
       ``torch.func.vmap`` over ``evolve`` is not supported: its argument
       checks read values.
-    * **Time-dependent pulses** are out of scope.  A piecewise-constant one
-      would repeat the loop below per segment, starting from the previous
-      segment's state.
+    * **Time-dependent pulses** are out of scope beyond piecewise-constant
+      ones, which are one call per segment chained through ``rho0``.
 
     Examples
     --------
@@ -582,6 +638,7 @@ def evolve(
     0.962
     """
     n = _atom_count(hamiltonian, "hamiltonian")
+    start = None if rho0 is None else _initial_state(rho0, hamiltonian.shape)
     t = _non_negative_number(t, "t")
     gamma = _non_negative_number(gamma, "gamma")
     steps = None if n_steps is None else _step_count(n_steps)
@@ -618,6 +675,10 @@ def evolve(
     h = (h + h.mH) / 2
 
     if gamma == 0 or steps is None:  # no steps only without dephasing, see above
+        if start is not None:
+            # U ρ(0) U†, exact; broadcast when one ρ(0) is shared by a batch
+            unitary = _propagator(h, t)
+            return unitary @ start @ unitary.mH
         psi = _Propagator.apply(h, t, True)[0]
         return psi @ psi.mH
 
@@ -632,8 +693,11 @@ def evolve(
     half_damping = torch.exp(-gamma * (dt / 2) * distance / 2)
     full_damping = torch.exp(-gamma * dt * distance / 2)
 
-    rho = torch.zeros_like(h)
-    rho[..., 0, 0] = 1.0  # |g…g⟩⟨g…g|
+    if start is None:
+        rho = torch.zeros_like(h)
+        rho[..., 0, 0] = 1.0  # |g…g⟩⟨g…g|
+    else:
+        rho = start  # the first rotation broadcasts a shared ρ(0) over the batch
     rho = rho * half_damping
     for step in range(steps):
         rho = propagator @ rho @ propagator.mH

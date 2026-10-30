@@ -423,7 +423,8 @@ class DataReuploadingLayer(TrainingNoiseMixin, nn.Module):
         is the strength of ``noise_channel`` (default ``"depolarizing"``), in
         ``[0, 0.75]`` for depolarizing and ``[0, 1]`` for the damping, flip and loss
         channels (default 0, noiseless), applied in train mode only, at
-        ``"all"`` gates or at the ``"end"``, simulated exactly (``"density"``)
+        ``"all"`` gates, at the ``"end"`` or after every CZ and CCZ (``"cz"``),
+        simulated exactly (``"density"``)
         or by trajectories (amplitude damping and atom loss with restrictions).  See
         :mod:`hqnn_forge.noise`.
     readout_error:

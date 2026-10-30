@@ -154,6 +154,8 @@ _LEGACY_DEFAULTS: dict[str, Any] = {
     "atom_register": None,  # entangler="rydberg" ran on rydberg_chain(n_qubits)
     "blockade_radius": None,  # at RYDBERG_BLOCKADE_RADIUS, without CCZ, before
     "ccz": False,  # #644; the three are inert under every other entangler
+    "gamma": 0.0,  # no dephasing during the analog pulse before #699
+    "n_steps": None,
 }
 
 #: Constructor arguments added deliberately without a legacy default: no value

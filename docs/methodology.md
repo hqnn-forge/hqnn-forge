@@ -163,8 +163,9 @@ A hybrid model tuned carefully against an untuned control proves nothing. With
 ## Noise
 
 `run_benchmark(noise_levels=...)` re-scores each trained hybrid model on its test rows with a
-`DepolarizingChannel(p)` inserted after every gate (`noise_position="all"`) or before the
-measurements (`"end"`), at the fold's threshold, and compares it per level with the noise-free
+`DepolarizingChannel(p)` inserted after every gate (`noise_position="all"`), before the
+measurements (`"end"`) or after every CZ and CCZ only (`"cz"`), at the fold's threshold, and
+compares it per level with the noise-free
 control. The report states the first level at which the hybrid is no longer significantly
 better, if it ever was.
 
