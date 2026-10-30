@@ -4,7 +4,8 @@ Thanks for your interest in contributing. This document summarizes the workflow 
 changes stay easy to review and the history stays easy to read.
 
 Participation in issues, pull requests, and reviews is covered by
-our [Code of Conduct](CODE_OF_CONDUCT.md).
+our [Code of Conduct](CODE_OF_CONDUCT.md). Contributors should also
+review the project's [Ethical Notice](ETHICAL_NOTICE.md).
 
 ## Language
 
