@@ -285,20 +285,31 @@ def _written_tape(
     The weight tensors keep their ``requires_grad`` flag, so the gate
     parameters that come from trainable weights can be told apart from the
     (non-trainable) inputs by :func:`count_inert_parameters`.
+
+    The tape is built with grad mode on and inference mode off, whatever the
+    caller's mode, so it is the same under ``torch.no_grad()`` and
+    ``torch.inference_mode()`` as outside them: the gate parameters keep their
+    autograd graph to the weights (:func:`count_inert_weights` reads it), and
+    a backprop amplitude sample keeps ``requires_grad``, which decides which
+    state-preparation gates PennyLane emits (#707).
     """
     qlayer = getattr(layer, "qlayer", None)
     if not isinstance(qlayer, qml.qnn.TorchLayer):
         raise TypeError(f"{type(layer).__name__} has no qlayer TorchLayer.")
-    raw = sample_input(layer) if inputs is None else torch.as_tensor(inputs, dtype=torch.float64)
-    if raw.ndim != 1 or raw.shape[0] != input_width(layer):
-        raise ValueError(
-            f"inputs must be one sample of shape ({input_width(layer)},); got {tuple(raw.shape)}."
+    with torch.inference_mode(False), torch.enable_grad():
+        raw = (
+            sample_input(layer) if inputs is None else torch.as_tensor(inputs, dtype=torch.float64)
         )
-    inputs = _prepare(layer, raw[None, :])[0]
-    weights = dict(qlayer.qnode_weights.items())
-    # level="top": the circuit as written, before the QNode's own transforms
-    # (batch expansion) and before the device rewrites gates it cannot run.
-    return qml.workflow.construct_tape(qlayer.qnode, level="top")(inputs, **weights)
+        if raw.ndim != 1 or raw.shape[0] != input_width(layer):
+            raise ValueError(
+                f"inputs must be one sample of shape ({input_width(layer)},); "
+                f"got {tuple(raw.shape)}."
+            )
+        inputs = _prepare(layer, raw[None, :])[0]
+        weights = dict(qlayer.qnode_weights.items())
+        # level="top": the circuit as written, before the QNode's own transforms
+        # (batch expansion) and before the device rewrites gates it cannot run.
+        return qml.workflow.construct_tape(qlayer.qnode, level="top")(inputs, **weights)
 
 
 def _logical_tape(
