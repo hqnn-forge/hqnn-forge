@@ -36,12 +36,18 @@ def test_iqp_is_importable_from_the_package() -> None:
 
 
 def test_every_encoder_layer_and_factory_is_exported() -> None:
-    """The convention for future encoders: every layer and ``build_*_qnode`` factory."""
+    """
+    The convention for future encoders: every layer and ``build_*_qnode`` factory.
+
+    A private module (``_SampleBySampleTorchLayer`` of the analog layer, a
+    ``TorchLayer`` it builds its ``qlayer`` from) is a helper, not an encoder.
+    """
     missing = [
         f"{module.__name__}.{name}"
         for module in SUBMODULES
         for name, obj in vars(module).items()
         if getattr(obj, "__module__", None) == module.__name__
+        and not name.startswith("_")
         and (
             (inspect.isclass(obj) and issubclass(obj, nn.Module))
             or (inspect.isfunction(obj) and re.fullmatch(r"build_\w+_qnode", name))
