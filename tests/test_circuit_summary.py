@@ -39,6 +39,7 @@ from hqnn_forge.diagnostics.circuit import (
 )
 from hqnn_forge.encoding import AmplitudeEncodingLayer, QuantumEncodingLayer, is_circuit_layer
 from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
+from hqnn_forge.encoding.data_reuploading import DataReuploadingLayer
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 
@@ -658,13 +659,28 @@ def _angle_backprop() -> QuantumEncodingLayer:
     )
 
 
+def _reuploading_scaled() -> DataReuploadingLayer:
+    # The input meets a trainable weight inside the QNode (input scaling), so
+    # an inference tensor there would have to be saved for backward.
+    torch.manual_seed(0)
+    return DataReuploadingLayer(
+        n_qubits=3,
+        n_layers=2,
+        trainable_input_scaling=True,
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
+
+
 _GRAD_MODES = {"no_grad": torch.no_grad, "inference_mode": torch.inference_mode}
 
 
 class TestGradModeIndependence:
     @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
     @pytest.mark.parametrize(
-        "make_layer", [_angle_backprop, _amplitude], ids=["angle", "amplitude"]
+        "make_layer",
+        [_angle_backprop, _amplitude, _reuploading_scaled],
+        ids=["angle", "amplitude", "reuploading-scaled"],
     )
     def test_summary_and_drawing_match_grad_mode(
         self, make_layer: Callable[[], torch.nn.Module], mode: str
@@ -683,8 +699,16 @@ class TestGradModeIndependence:
         assert summary.gate_counts["RY"] == 7
         assert summary.gate_counts["RZ"] == 7
 
-    def test_inference_tensor_input_is_drawn(self) -> None:
-        layer = _angle_backprop()
+    @pytest.mark.parametrize(
+        "make_layer",
+        [_angle_backprop, _reuploading_scaled],
+        ids=["angle", "reuploading-scaled"],
+    )
+    def test_inference_tensor_input_is_drawn(
+        self, make_layer: Callable[[], torch.nn.Module]
+    ) -> None:
+        # float64, so as_tensor does not copy the inference tensor on the way in.
+        layer = make_layer()
         expected = draw_circuit(layer, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64))
         with torch.inference_mode():
             x = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64)
