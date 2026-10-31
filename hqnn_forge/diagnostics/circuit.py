@@ -285,20 +285,36 @@ def _written_tape(
     The weight tensors keep their ``requires_grad`` flag, so the gate
     parameters that come from trainable weights can be told apart from the
     (non-trainable) inputs by :func:`count_inert_parameters`.
+
+    The tape is built with grad mode on and inference mode off, whatever the
+    caller's mode, so it is the same under ``torch.no_grad()`` and
+    ``torch.inference_mode()`` as outside them: the gate parameters keep their
+    autograd graph to the weights (:func:`count_inert_weights` reads it), and
+    a backprop amplitude sample keeps ``requires_grad``, which decides which
+    state-preparation gates PennyLane emits (#707).
     """
     qlayer = getattr(layer, "qlayer", None)
     if not isinstance(qlayer, qml.qnn.TorchLayer):
         raise TypeError(f"{type(layer).__name__} has no qlayer TorchLayer.")
-    raw = sample_input(layer) if inputs is None else torch.as_tensor(inputs, dtype=torch.float64)
-    if raw.ndim != 1 or raw.shape[0] != input_width(layer):
-        raise ValueError(
-            f"inputs must be one sample of shape ({input_width(layer)},); got {tuple(raw.shape)}."
+    with torch.inference_mode(False), torch.enable_grad():
+        raw = (
+            sample_input(layer) if inputs is None else torch.as_tensor(inputs, dtype=torch.float64)
         )
-    inputs = _prepare(layer, raw[None, :])[0]
-    weights = dict(qlayer.qnode_weights.items())
-    # level="top": the circuit as written, before the QNode's own transforms
-    # (batch expansion) and before the device rewrites gates it cannot run.
-    return qml.workflow.construct_tape(qlayer.qnode, level="top")(inputs, **weights)
+        if raw.is_inference():
+            # A sample made under inference_mode (as_tensor copies it only to
+            # change dtype) cannot be saved for backward where the QNode
+            # multiplies it by a trainable weight; a clone made here can.
+            raw = raw.clone()
+        if raw.ndim != 1 or raw.shape[0] != input_width(layer):
+            raise ValueError(
+                f"inputs must be one sample of shape ({input_width(layer)},); "
+                f"got {tuple(raw.shape)}."
+            )
+        inputs = _prepare(layer, raw[None, :])[0]
+        weights = dict(qlayer.qnode_weights.items())
+        # level="top": the circuit as written, before the QNode's own transforms
+        # (batch expansion) and before the device rewrites gates it cannot run.
+        return qml.workflow.construct_tape(qlayer.qnode, level="top")(inputs, **weights)
 
 
 def _logical_tape(
@@ -749,13 +765,17 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
     # state preparation avoids accidental zero-angle rotation omissions
     # (generic has no requires_grad; count_inert_weights only tracks weight
     # gradients, and state preparation contains no trainable weights).
-    generic = 0.5 + torch.rand(
-        input_width(layer), generator=torch.Generator().manual_seed(0), dtype=torch.float64
-    )
-    generic[0] = -generic[0]
-    n_inert = count_inert_weights(
-        _written_tape(layer, generic), list(qlayer.qnode_weights.values())
-    )
+    # Built, and differentiated, under the same mode override as _written_tape:
+    # a generic tensor made under the caller's inference_mode could not be
+    # saved for backward next to a trainable weight (#707).
+    with torch.inference_mode(False), torch.enable_grad():
+        generic = 0.5 + torch.rand(
+            input_width(layer), generator=torch.Generator().manual_seed(0), dtype=torch.float64
+        )
+        generic[0] = -generic[0]
+        n_inert = count_inert_weights(
+            _written_tape(layer, generic), list(qlayer.qnode_weights.values())
+        )
     return CircuitSummary(
         layer_type=type(layer).__name__,
         n_qubits=n_qubits,

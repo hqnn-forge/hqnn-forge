@@ -732,6 +732,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rounding noise as an input (#580, #600)
 - `evolve`: gradients through it were silently wrong where the Hamiltonian has
   degenerate eigenvalues (#505, #668)
+- `circuit_summary` raised `RuntimeError` under `torch.no_grad()` and
+  `torch.inference_mode()`, and the default `draw_circuit` of a backprop amplitude layer
+  dropped its `RZ` blocks there. Both now build the circuit with grad mode on, so the result
+  no longer depends on the caller's mode (#707, #720)
 - `evolve`: forward-mode derivatives (`torch.func.jacfwd`, `jvp`, `torch.autograd.forward_ad`)
   were still wrong at degenerate eigenvalues, and with gradients on, the state came from
   `torch.linalg.matrix_exp` and differed from the one without, by up to `3.6e-8` at a large

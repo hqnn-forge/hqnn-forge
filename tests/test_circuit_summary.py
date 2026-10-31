@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Callable
 from math import comb
 from types import MappingProxyType
 from typing import TypedDict
@@ -38,6 +39,7 @@ from hqnn_forge.diagnostics.circuit import (
 )
 from hqnn_forge.encoding import AmplitudeEncodingLayer, QuantumEncodingLayer, is_circuit_layer
 from hqnn_forge.encoding.angle_embedding import DeviceName, DiffMethod
+from hqnn_forge.encoding.data_reuploading import DataReuploadingLayer
 from hqnn_forge.encoding.iqp_embedding import IQPEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier, ParallelHybridClassifier
 
@@ -643,3 +645,72 @@ class TestAmplitudeEmbedding:
         assert prepared.requires_grad
 
         self._assert_summary_matches_training_tape(summary, layer.qlayer, prepared)
+
+
+# ---------------------------------------------------------------------------
+# Independence from the caller's grad mode (#707)
+# ---------------------------------------------------------------------------
+
+
+def _angle_backprop() -> QuantumEncodingLayer:
+    torch.manual_seed(0)
+    return QuantumEncodingLayer(
+        n_qubits=3, n_layers=1, device_name="default.qubit", diff_method="backprop"
+    )
+
+
+def _reuploading_scaled() -> DataReuploadingLayer:
+    # The input meets a trainable weight inside the QNode (input scaling), so
+    # an inference tensor there would have to be saved for backward.
+    torch.manual_seed(0)
+    return DataReuploadingLayer(
+        n_qubits=3,
+        n_layers=2,
+        trainable_input_scaling=True,
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
+
+
+_GRAD_MODES = {"no_grad": torch.no_grad, "inference_mode": torch.inference_mode}
+
+
+class TestGradModeIndependence:
+    @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
+    @pytest.mark.parametrize(
+        "make_layer",
+        [_angle_backprop, _amplitude, _reuploading_scaled],
+        ids=["angle", "amplitude", "reuploading-scaled"],
+    )
+    def test_summary_and_drawing_match_grad_mode(
+        self, make_layer: Callable[[], torch.nn.Module], mode: str
+    ) -> None:
+        layer = make_layer()
+        summary, drawing = circuit_summary(layer), draw_circuit(layer)
+        with _GRAD_MODES[mode]():
+            assert circuit_summary(layer) == summary
+            assert draw_circuit(layer) == drawing
+
+    def test_amplitude_keeps_the_gradient_decomposition_under_no_grad(self) -> None:
+        # The backprop amplitude sample requires grad, so every RZ block of the
+        # state preparation stays, also when the caller has grad mode off.
+        with torch.no_grad():
+            summary = circuit_summary(_amplitude(3))
+        assert summary.gate_counts["RY"] == 7
+        assert summary.gate_counts["RZ"] == 7
+
+    @pytest.mark.parametrize(
+        "make_layer",
+        [_angle_backprop, _reuploading_scaled],
+        ids=["angle", "reuploading-scaled"],
+    )
+    def test_inference_tensor_input_is_drawn(
+        self, make_layer: Callable[[], torch.nn.Module]
+    ) -> None:
+        # float64, so as_tensor does not copy the inference tensor on the way in.
+        layer = make_layer()
+        expected = draw_circuit(layer, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64))
+        with torch.inference_mode():
+            x = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64)
+            assert draw_circuit(layer, x) == expected
+        assert draw_circuit(layer, x) == expected
