@@ -430,7 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `noise_position="all"` refused as on the layer), and the summary counts the one
   `QubitDensityMatrix` and the `3K` pulse values; `encoded_states` and
   `overlap_kernel_matrix`, which need a pure state, refuse the layer with a message naming the
-  reason (#711)
+  reason (#711, #722)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
