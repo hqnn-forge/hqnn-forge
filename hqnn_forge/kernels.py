@@ -64,6 +64,23 @@ the estimate is ``⟨0|N(U(x)†U(y)|0⟩⟨0|U(y)†U(x))|0⟩`` for the device
 Mixed-state simulation needs ``4^n`` entries per sample instead of ``2^n``,
 and ``default.mixed`` stops at 23 wires.
 
+The dephased analog layer
+-------------------------
+:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0`` prepares
+a mixed state ``ρ(x)`` even without ``noise_level``: its circuit is one
+``qml.QubitDensityMatrix`` of the state the dephased pulse leaves, for one
+sample at a time (#710).  There is no state vector, so
+:func:`quantum_kernel_matrix` gives the Hilbert–Schmidt kernel
+``Tr[ρ(x) ρ(y)]`` of these states at every ``noise_level``, its diagonal the
+purity ``Tr[ρ(x)²]``, and :func:`encoded_density_matrices` returns them,
+replayed one sample at a time.  At ``gamma → 0`` ``ρ(x)`` tends to
+``|Φ(x)⟩⟨Φ(x)|`` and the kernel to the fidelity kernel of the unitary layer.
+With ``noise_level > 0`` the channels act on ``ρ(T)`` at ``"end"``, as in the
+layer's own training noise; ``"all"`` is refused, as the layer refuses it
+(#717), and ``"cz"`` finds no CZ to act after.  :func:`encoded_states` and
+:func:`overlap_kernel_matrix` need a pure state or a unitary to invert, and
+refuse the layer (#711).
+
 Scaling: O(M²) against the VQC
 ------------------------------
 A kernel matrix over ``M`` training points has ``M(M+1)/2`` distinct entries,
@@ -120,6 +137,7 @@ from torch import nn
 
 from hqnn_forge._encoding_contract import EncodingLayer
 from hqnn_forge._resolve import require_prepare_inputs, resolve_encoding_layer
+from hqnn_forge.encoding.analog_rydberg import _SampleBySampleTorchLayer
 from hqnn_forge.noise import Position, _noisy_qnode, validate_noise
 
 __all__ = [
@@ -163,6 +181,37 @@ def _resolve_layer(layer: nn.Module, caller: str) -> EncodingLayer:
             f"for the kernel under the same depolarising noise."
         )
     return encoder
+
+
+def _prepares_density_matrix(qlayer: qml.qnn.TorchLayer) -> bool:
+    """
+    Whether the circuit prepares a mixed ``ρ`` for one sample at a time.
+
+    True for :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with
+    ``gamma > 0``, whose circuit is one ``qml.QubitDensityMatrix`` on
+    ``default.mixed`` and whose ``qlayer`` runs a batch sample by sample.
+    """
+    return isinstance(qlayer, _SampleBySampleTorchLayer)
+
+
+def _refuse_mixed(qlayer: qml.qnn.TorchLayer, caller: str) -> None:
+    """Raise for a circuit without a state vector (see "The dephased analog layer")."""
+    if _prepares_density_matrix(qlayer):
+        raise ValueError(
+            f"{caller} needs the pure state |Φ(x)⟩ of a unitary circuit, but "
+            f"AnalogRydbergLayer with gamma > 0 prepares a mixed state ρ(x) (dephasing during "
+            f"the pulse).  Use quantum_kernel_matrix, which gives Tr[ρ(x) ρ(y)] for this "
+            f"layer, or encoded_density_matrices and kernel_from_density_matrices."
+        )
+
+
+def _check_layer_noise_position(
+    encoder: EncodingLayer, noise_level: float, noise_position: Position
+) -> None:
+    """Let the layer refuse ``noise_position`` as its own training noise does (#710)."""
+    check = getattr(encoder, "_noise_position_check", None)
+    if noise_level > 0.0 and check is not None:
+        check(noise_position, "noise_position")
 
 
 def _prepare(X: torch.Tensor, encoder: EncodingLayer, name: str) -> torch.Tensor:
@@ -286,6 +335,9 @@ def encoded_states(
         If ``X`` is not a non-empty 2-D tensor, contains NaN or ±inf, or
         ``prepare_inputs`` rejects it (wrong number of features, an all-zero
         amplitude vector), or if ``batch_size`` is not a positive integer.
+        Also for :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with
+        ``gamma > 0``, which prepares mixed states (module docstring, "The
+        dephased analog layer").
     RuntimeError
         If the layer's QNode carries a transform other than
         ``broadcast_expand``, for example inside
@@ -295,6 +347,7 @@ def encoded_states(
     _check_batch_size(batch_size)
     encoder = _resolve_layer(layer, "encoded_states")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
+    _refuse_mixed(qlayer, "encoded_states")
     return _simulate(_prepare(X, encoder, "X"), qlayer, n_qubits, differentiable, batch_size)
 
 
@@ -411,7 +464,11 @@ def quantum_kernel_matrix(
         ``Tr[ρ(x_i) ρ(y_j)]`` of the states under depolarising noise (see the
         module docstring and :func:`encoded_density_matrices`); its diagonal
         is the purity, below 1.  ``0`` (default) is the noiseless kernel,
-        computed from state vectors as before.
+        computed from state vectors as before.  For
+        :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``
+        the kernel is ``Tr[ρ(x_i) ρ(y_j)]`` at every ``noise_level``, and
+        ``noise_position="all"`` with ``noise_level > 0`` is refused (module
+        docstring, "The dephased analog layer").
 
     Returns
     -------
@@ -419,7 +476,8 @@ def quantum_kernel_matrix(
         ``float64`` tensor of shape ``(n_samples_x, n_samples_y)`` (or
         ``(n_samples_x, n_samples_x)``), entries in ``[0, 1]`` up to rounding
         of order 1e-15.  The square matrix is symmetric, positive
-        semi-definite, and has ones on the diagonal.
+        semi-definite, and has ones on the diagonal (the purities, below 1,
+        under noise or dephasing).
 
     Raises
     ------
@@ -471,9 +529,10 @@ def quantum_kernel_matrix(
     )
     encoder = _resolve_layer(layer, "quantum_kernel_matrix")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
+    _check_layer_noise_position(encoder, noise_level, noise_position)
     # Validate both input sets before simulating either.
     prepared_x = _prepare(X, encoder, "X")
-    if noise_level > 0.0:
+    if noise_level > 0.0 or _prepares_density_matrix(qlayer):
         prepared_y = None if Y is None else _prepare(Y, encoder, "Y")
         both = prepared_x if prepared_y is None else torch.cat([prepared_x, prepared_y])
         rho = _simulate_density(
@@ -730,7 +789,9 @@ def overlap_kernel_matrix(
     ------
     TypeError, ValueError, RuntimeError
         As :func:`quantum_kernel_matrix`; also ``ValueError`` for
-        ``shots < 1`` or ``project_psd`` with ``Y``.
+        ``shots < 1``, ``project_psd`` with ``Y``, or
+        :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``,
+        whose circuit has no unitary to invert.
     """
     if shots is not None and shots < 1:
         raise ValueError(f"shots must be a positive integer or None; got {shots}.")
@@ -738,6 +799,7 @@ def overlap_kernel_matrix(
         raise ValueError("project_psd applies to the square matrix only; pass Y=None.")
     encoder = _resolve_layer(layer, "overlap_kernel_matrix")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
+    _refuse_mixed(qlayer, "overlap_kernel_matrix")
     prepared_x = _prepare(X, encoder, "X")
     prepared_y = None if Y is None else _prepare(Y, encoder, "Y")
     ops_x = _operations(prepared_x, qlayer)
@@ -822,14 +884,25 @@ def _simulate_density(
     # apply_depolarizing_noise leaves the circuit untouched at p = 0.
     if noise_level > 0.0:
         qnode = _noisy_qnode(qlayer.qnode, n_qubits, noise_level, noise_position, "depolarizing")
-        tape = qml.workflow.construct_tape(qnode, level="user")(prepared, **weights)
+        level: str | int = "user"
     else:
-        tape = qml.workflow.construct_tape(qlayer.qnode, level=0)(prepared, **weights)
-    tape = tape.copy(measurements=[qml.density_matrix(wires=range(n_qubits))])
+        qnode, level = qlayer.qnode, 0
+    # A circuit that prepares one density matrix per sample (the dephased
+    # analog layer) cannot be broadcast: one tape per row, run together.
+    rows = list(prepared) if _prepares_density_matrix(qlayer) else [prepared]
+    measurement = qml.density_matrix(wires=range(n_qubits))
+    tapes = [
+        qml.workflow.construct_tape(qnode, level=level)(row, **weights).copy(
+            measurements=[measurement]
+        )
+        for row in rows
+    ]
     # seed=None: the default ("global") would draw from np.random (#417).
     device = qml.device("default.mixed", wires=n_qubits, seed=None)
-    (result,) = qml.execute([tape], device, diff_method="backprop" if differentiable else None)
-    return torch.as_tensor(result).to(torch.complex128).reshape(n_rows, dim, dim)
+    results = qml.execute(tapes, device, diff_method="backprop" if differentiable else None)
+    return torch.cat(
+        [torch.as_tensor(r).to(torch.complex128).reshape(-1, dim, dim) for r in results]
+    )
 
 
 def encoded_density_matrices(
@@ -847,7 +920,11 @@ def encoded_density_matrices(
     The circuit is replayed as by :func:`encoded_states`, on ``default.mixed``
     with ``DepolarizingChannel(noise_level)`` inserted at ``noise_position``
     as :mod:`hqnn_forge.noise` does for the models; see "Under depolarising
-    noise" in the module docstring.
+    noise" in the module docstring.  For
+    :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0`` it
+    is replayed one sample at a time, and at ``noise_level = 0`` the result
+    is the layer's :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.density_matrices`
+    (see "The dephased analog layer" in the module docstring).
 
     Parameters
     ----------
@@ -871,8 +948,10 @@ def encoded_density_matrices(
     Raises
     ------
     TypeError, ValueError, RuntimeError
-        As :func:`encoded_states`; also ``ValueError`` for a ``noise_level``
-        or ``noise_position`` out of range.
+        As :func:`encoded_states` (which the dephased analog layer passes
+        here); also ``ValueError`` for a ``noise_level`` or
+        ``noise_position`` out of range, or one the layer refuses
+        (``"all"`` with ``gamma > 0``).
     """
     validate_noise(
         noise_level, noise_position, p_name="noise_level", position_name="noise_position"
@@ -880,6 +959,7 @@ def encoded_density_matrices(
     _check_batch_size(batch_size)
     encoder = _resolve_layer(layer, "encoded_density_matrices")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
+    _check_layer_noise_position(encoder, noise_level, noise_position)
     return _simulate_density(
         _prepare(X, encoder, "X"),
         qlayer,
