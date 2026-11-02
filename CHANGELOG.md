@@ -383,7 +383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loads Iranian Churn without the 300 rows that repeat an earlier one, so no record sits in
   both the training and the test rows of a fold; recorded in `settings` and reflected in each
   line's `data_sha256` and `n_samples`. The default keeps the file as published, so earlier
-  records stay comparable (#704)
+  records stay comparable (#704, #723)
 - `AtomRegister.interaction_graph` and `blockade_triangles` (pairs and triples strictly within the
   blockade radius), `hqnn_forge.circuits.blockade_schedule` (blockade CZ/CCZ gates in parallel
   layers, refusing a disconnected register) and `neutral_atom_layer` (those gates, then `Rot` on
