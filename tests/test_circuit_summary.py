@@ -35,6 +35,7 @@ from hqnn_forge.diagnostics.circuit import (
     _decompose_logical,
     _logical_tape,
     _written_tape,
+    count_inert_weights,
     sample_input,
 )
 from hqnn_forge.encoding import AmplitudeEncodingLayer, QuantumEncodingLayer, is_circuit_layer
@@ -714,3 +715,51 @@ class TestGradModeIndependence:
             x = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64)
             assert draw_circuit(layer, x) == expected
         assert draw_circuit(layer, x) == expected
+
+
+def _analog() -> torch.nn.Module:
+    from hqnn_forge.encoding import AnalogRydbergLayer
+
+    torch.manual_seed(0)
+    return AnalogRydbergLayer(3, 2)
+
+
+def _tape_of(layer: torch.nn.Module) -> qml.tape.QuantumScript:
+    x = torch.tensor([0.6, -0.9, 1.3], dtype=torch.float64)
+    qlayer = layer.qlayer  # type: ignore[union-attr]
+    return qml.workflow.construct_tape(qlayer.qnode, level=0)(x, **qlayer.qnode_weights)
+
+
+_TAPE_LAYERS = [_angle_backprop, _reuploading_scaled, _analog]
+_TAPE_IDS = ["angle", "reuploading-scaled", "analog"]
+
+
+class TestCountInertWeightsGradMode:
+    """#721: a tape built without grad is refused, a tape built with it counts in any mode."""
+
+    @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
+    @pytest.mark.parametrize("make_layer", _TAPE_LAYERS, ids=_TAPE_IDS)
+    def test_a_tape_built_without_grad_is_refused(
+        self, make_layer: Callable[[], torch.nn.Module], mode: str
+    ) -> None:
+        # The analog layer's QubitUnitary is computed from the weights, so without grad
+        # it does not require grad: it used to be skipped and all 6 weights counted inert.
+        layer = make_layer()
+        weights = list(layer.qlayer.qnode_weights.values())  # type: ignore[union-attr]
+        with _GRAD_MODES[mode]():
+            tape = _tape_of(layer)
+        with pytest.raises(ValueError, match="no graph to the weights.*grad mode on"):
+            count_inert_weights(tape, weights)
+
+    @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
+    @pytest.mark.parametrize("make_layer", _TAPE_LAYERS, ids=_TAPE_IDS)
+    def test_a_tape_built_with_grad_counts_the_same_in_any_mode(
+        self, make_layer: Callable[[], torch.nn.Module], mode: str
+    ) -> None:
+        layer = make_layer()
+        weights = list(layer.qlayer.qnode_weights.values())  # type: ignore[union-attr]
+        tape = _tape_of(layer)
+        expected = count_inert_weights(tape, weights)
+        with _GRAD_MODES[mode]():
+            assert count_inert_weights(tape, weights) == expected
+        assert expected == circuit_summary(layer).n_inert_params

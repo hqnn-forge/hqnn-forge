@@ -684,6 +684,12 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
     entry, so both are counted inert.  Only weights with ``requires_grad``
     are counted.
 
+    The tape has to be built with grad mode on and inference mode off, so its
+    gate parameters keep their graph to ``weights`` (:func:`circuit_summary`
+    builds its tape that way whatever the caller's mode).  The count itself
+    may be called under ``torch.no_grad()`` or ``torch.inference_mode()``: it
+    turns grad mode on for its own autograd calls.
+
     Parameters
     ----------
     tape:
@@ -691,26 +697,80 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
         from ``weights`` by torch operations.
     weights:
         The weight tensors the gate parameters are computed from.
+
+    Raises
+    ------
+    ValueError
+        As :func:`count_inert_parameters`, and if the gate parameters have no
+        graph to ``weights``, as for a tape built under ``torch.no_grad()`` or
+        ``torch.inference_mode()`` (#721): no gate parameter requires grad
+        while some of ``weights`` do, or one is a slice of a weight without a
+        graph.  A tape whose gates take no tensor that requires grad is refused
+        for that reason too, although its weights would all be inert: from the
+        tape alone it cannot be told apart from one built without grad.
     """
     leaves = [w for w in weights if w.requires_grad]
-    live = [torch.zeros(w.shape, dtype=torch.bool) for w in leaves]
-    for value, inert in _inert_slots(tape):
-        if inert or not isinstance(value, torch.Tensor) or not value.requires_grad:
-            continue
-        if value.numel() > 1:
-            # A matrix parameter (QubitUnitary): a fixed generic linear
-            # combination of its real entries depends on every weight entry
-            # that some matrix entry depends on, except on a set of measure zero.
-            parts = torch.view_as_real(value) if value.is_complex() else value
-            coefficients = torch.rand(
-                parts.shape, generator=torch.Generator().manual_seed(0), dtype=parts.dtype
-            )
-            value = (parts * (coefficients.to(parts.device) + 0.5)).sum()
-        grads = torch.autograd.grad(value, leaves, allow_unused=True, retain_graph=True)
-        for k, grad in enumerate(grads):
-            if grad is not None:
-                live[k] |= grad.detach().cpu() != 0
+    if leaves and not _has_graph(tape):
+        # Built without grad, a parameter computed from the weights (x · w, the analog
+        # layer's QubitUnitary) does not require grad and would be skipped below, so
+        # every weight would be counted inert without a word.
+        raise ValueError(_NO_GRAPH)
+    # Grad mode for the combination of a matrix parameter below and for autograd.grad,
+    # so that a tape built correctly can be counted inside no_grad or inference_mode.
+    # The masks are made here too: made under inference_mode, they could not be updated in place.
+    with torch.inference_mode(False), torch.enable_grad():
+        live = [torch.zeros(w.shape, dtype=torch.bool) for w in leaves]
+        for value, inert in _inert_slots(tape):
+            if inert or not isinstance(value, torch.Tensor) or not value.requires_grad:
+                continue
+            if value.grad_fn is None and _detached_view_of(value, leaves):
+                # Built without grad, a slice of a weight (the angle of a Rot) keeps
+                # requires_grad but has no graph, and autograd.grad fails on it.
+                raise ValueError(_NO_GRAPH)
+            _mark_live(value, leaves, live)
     return sum(int((~mask).sum()) for mask in live)
+
+
+_NO_GRAPH = (
+    "count_inert_weights reads which weight entries feed each gate parameter off autograd, but "
+    "the gate parameters of this tape have no graph to the weights.  Build the tape with grad "
+    "mode on and inference mode off (outside torch.no_grad() and torch.inference_mode()), as "
+    "circuit_summary does."
+)
+
+
+def _has_graph(tape: qml.tape.QuantumScript) -> bool:
+    """Whether some gate parameter of ``tape`` is a tensor that requires grad."""
+    return any(
+        isinstance(value, torch.Tensor) and value.requires_grad
+        for op in tape.operations
+        for value in op.data
+    )
+
+
+def _detached_view_of(value: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
+    """Whether ``value`` shares the storage of a leaf without being that leaf."""
+    pointer = value.untyped_storage().data_ptr()
+    return any(
+        value is not leaf and leaf.untyped_storage().data_ptr() == pointer for leaf in leaves
+    )
+
+
+def _mark_live(value: torch.Tensor, leaves: list[torch.Tensor], live: list[torch.Tensor]) -> None:
+    """Mark in ``live`` the entries of ``leaves`` that ``value``'s gradient reaches (nonzero)."""
+    if value.numel() > 1:
+        # A matrix parameter (QubitUnitary): a fixed generic linear
+        # combination of its real entries depends on every weight entry
+        # that some matrix entry depends on, except on a set of measure zero.
+        parts = torch.view_as_real(value) if value.is_complex() else value
+        coefficients = torch.rand(
+            parts.shape, generator=torch.Generator().manual_seed(0), dtype=parts.dtype
+        )
+        value = (parts * (coefficients.to(parts.device) + 0.5)).sum()
+    grads = torch.autograd.grad(value, leaves, allow_unused=True, retain_graph=True)
+    for k, grad in enumerate(grads):
+        if grad is not None:
+            live[k] |= grad.detach().cpu() != 0
 
 
 # ---------------------------------------------------------------------------
