@@ -94,9 +94,17 @@ def _gates(tape: qml.tape.QuantumScript) -> Iterator[qml.operation.Operator]:
             yield op
 
 
-# At least two qubits: the library refuses fewer, and the ring's CNOT needs a partner.
-@pytest.mark.parametrize("entangler", ENTANGLERS)
-@pytest.mark.parametrize(("n_qubits", "n_layers"), [(2, 1), (2, 3), (3, 2), (4, 3), (5, 1)])
+# One qubit too, for the blocks that run there through apply_variational_layers (the
+# ring's CNOT needs a partner); the encoders themselves refuse fewer than two.
+WEIGHT_CASES = [
+    (entangler, n_qubits, n_layers)
+    for entangler in ENTANGLERS
+    for n_qubits, n_layers in [(1, 1), (1, 2), (2, 1), (2, 3), (3, 2), (4, 3), (5, 1)]
+    if not (n_qubits == 1 and entangler == "ring")
+]
+
+
+@pytest.mark.parametrize(("entangler", "n_qubits", "n_layers"), WEIGHT_CASES)
 def test_every_weight_reaches_exactly_one_gate_angle(
     entangler: Entangler, n_qubits: int, n_layers: int
 ) -> None:
