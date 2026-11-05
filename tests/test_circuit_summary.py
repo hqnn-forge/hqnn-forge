@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Callable
 from math import comb
 from types import MappingProxyType
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pennylane as qml
 import pytest
@@ -724,9 +724,14 @@ def _analog() -> torch.nn.Module:
     return AnalogRydbergLayer(3, 2)
 
 
+def _qlayer(layer: torch.nn.Module) -> Any:
+    # nn.Module's __getattr__ is typed as Tensor | Module; the qlayer is a TorchLayer.
+    return layer.qlayer
+
+
 def _tape_of(layer: torch.nn.Module) -> qml.tape.QuantumScript:
     x = torch.tensor([0.6, -0.9, 1.3], dtype=torch.float64)
-    qlayer = layer.qlayer  # type: ignore[union-attr]
+    qlayer = _qlayer(layer)
     return qml.workflow.construct_tape(qlayer.qnode, level=0)(x, **qlayer.qnode_weights)
 
 
@@ -745,7 +750,7 @@ class TestCountInertWeightsGradMode:
         # The analog layer's QubitUnitary is computed from the weights, so without grad
         # it does not require grad: it used to be skipped and all 6 weights counted inert.
         layer = make_layer()
-        weights = list(layer.qlayer.qnode_weights.values())  # type: ignore[union-attr]
+        weights = list(_qlayer(layer).qnode_weights.values())
         with _GRAD_MODES[mode]():
             tape = _tape_of(layer)
         with pytest.raises(ValueError, match="no graph to the weights.*grad mode on"):
@@ -757,7 +762,7 @@ class TestCountInertWeightsGradMode:
         self, make_layer: Callable[[], torch.nn.Module], mode: str
     ) -> None:
         layer = make_layer()
-        weights = list(layer.qlayer.qnode_weights.values())  # type: ignore[union-attr]
+        weights = list(_qlayer(layer).qnode_weights.values())
         tape = _tape_of(layer)
         expected = count_inert_weights(tape, weights)
         with _GRAD_MODES[mode]():
