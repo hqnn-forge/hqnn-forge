@@ -749,7 +749,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `count_inert_weights` refuses a tape built under `torch.no_grad()` or
   `torch.inference_mode()` with a `ValueError` saying to build it with grad mode on. Such a
   tape used to fail inside `torch.autograd.grad` with an opaque error or, for the analog
-  layer, whose `QubitUnitary` is computed from the weights, to count every weight as inert. A
+  layer, whose `QubitUnitary` is computed from the weights, and for the variational blocks of
+  `DataReuploadingLayer(entangler="strongly_entangling")`, to count every weight as inert. A
   tape built correctly is now counted the same when the call itself is made under either mode,
   where the analog layer's matrix parameters used to fail (#721, #725)
 

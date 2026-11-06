@@ -735,8 +735,26 @@ def _tape_of(layer: torch.nn.Module) -> qml.tape.QuantumScript:
     return qml.workflow.construct_tape(qlayer.qnode, level=0)(x, **qlayer.qnode_weights)
 
 
-_TAPE_LAYERS = [_angle_backprop, _reuploading_scaled, _analog]
-_TAPE_IDS = ["angle", "reuploading-scaled", "analog"]
+def _reuploading_strongly() -> DataReuploadingLayer:
+    # Each layer's weights[l : l + 1] go to StronglyEntanglingLayers whole, so without
+    # grad the template takes a graphless view of the weight, not a Rot angle of it.
+    torch.manual_seed(0)
+    return DataReuploadingLayer(
+        n_qubits=3,
+        n_layers=2,
+        trainable_input_scaling=True,
+        entangler="strongly_entangling",
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
+
+
+_TAPE_LAYERS = [_angle_backprop, _reuploading_scaled, _reuploading_strongly, _analog]
+_TAPE_IDS = ["angle", "reuploading-scaled", "reuploading-strongly", "analog"]
+# The last layer's trailing RZ (the ω of each qubit's Rot) commutes with the Z readout,
+# through the CNOTs after it too, so 3 entries are inert; the analog layer's generic
+# QubitUnitary leaves none inert.
+_TAPE_INERT = {"angle": 3, "reuploading-scaled": 3, "reuploading-strongly": 3, "analog": 0}
 
 
 class TestCountInertWeightsGradMode:
@@ -757,14 +775,18 @@ class TestCountInertWeightsGradMode:
             count_inert_weights(tape, weights)
 
     @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
-    @pytest.mark.parametrize("make_layer", _TAPE_LAYERS, ids=_TAPE_IDS)
+    @pytest.mark.parametrize(
+        ("make_layer", "expected"),
+        [(make, _TAPE_INERT[name]) for make, name in zip(_TAPE_LAYERS, _TAPE_IDS, strict=True)],
+        ids=_TAPE_IDS,
+    )
     def test_a_tape_built_with_grad_counts_the_same_in_any_mode(
-        self, make_layer: Callable[[], torch.nn.Module], mode: str
+        self, make_layer: Callable[[], torch.nn.Module], expected: int, mode: str
     ) -> None:
         layer = make_layer()
         weights = list(_qlayer(layer).qnode_weights.values())
         tape = _tape_of(layer)
-        expected = count_inert_weights(tape, weights)
+        assert count_inert_weights(tape, weights) == expected
         with _GRAD_MODES[mode]():
             assert count_inert_weights(tape, weights) == expected
-        assert expected == circuit_summary(layer).n_inert_params
+        assert circuit_summary(layer).n_inert_params == expected

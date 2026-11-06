@@ -705,7 +705,7 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
         graph to ``weights``, as for a tape built under ``torch.no_grad()`` or
         ``torch.inference_mode()`` (#721): no gate parameter requires grad
         while some of ``weights`` do, or one is a slice of a weight without a
-        graph.  A tape whose gates take no tensor that requires grad is refused
+        graph (a ``Rot`` angle, or the per-layer block a template takes).  A tape whose gates take no tensor that requires grad is refused
         for that reason too, although its weights would all be inert: from the
         tape alone it cannot be told apart from one built without grad.
     """
@@ -715,6 +715,21 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
         # layer's QubitUnitary) does not require grad and would be skipped below, so
         # every weight would be counted inert without a word.
         raise ValueError(_NO_GRAPH)
+    if any(
+        isinstance(value, torch.Tensor)
+        and value.requires_grad
+        and value.grad_fn is None
+        and _detached_view_of(value, leaves)
+        for op in tape.operations
+        for value in op.data
+    ):
+        # Built without grad, a slice of a weight keeps requires_grad but has no graph.
+        # Checked on the tape as built, before _inert_slots decomposes it under grad mode
+        # below: a template's per-layer block (weights[l : l + 1]) would otherwise be
+        # sliced into Rot angles whose graph ends at that block, not at the weight, and
+        # every one of its entries would be counted inert without a word.  A Rot angle
+        # taken directly makes autograd.grad fail instead.
+        raise ValueError(_NO_GRAPH)
     # Grad mode for the combination of a matrix parameter below and for autograd.grad,
     # so that a tape built correctly can be counted inside no_grad or inference_mode.
     # The masks are made here too: made under inference_mode, they could not be updated in place.
@@ -723,10 +738,6 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
         for value, inert in _inert_slots(tape):
             if inert or not isinstance(value, torch.Tensor) or not value.requires_grad:
                 continue
-            if value.grad_fn is None and _detached_view_of(value, leaves):
-                # Built without grad, a slice of a weight (the angle of a Rot) keeps
-                # requires_grad but has no graph, and autograd.grad fails on it.
-                raise ValueError(_NO_GRAPH)
             _mark_live(value, leaves, live)
     return sum(int((~mask).sum()) for mask in live)
 
