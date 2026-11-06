@@ -324,6 +324,12 @@ def _logical_tape(
     return _decompose_logical(_written_tape(layer, inputs))
 
 
+#: Operations with one matrix parameter that are kept whole and counted as
+#: they are: the analog layer's pulse segments and, with ``gamma > 0``, its
+#: dephased final state (see _decompose_logical).
+_MATRIX_OPS = frozenset({"QubitUnitary", "QubitDensityMatrix"})
+
+
 def _decompose_logical(tape: qml.tape.QuantumScript) -> qml.tape.QuantumScript:
     """
     ``tape`` decomposed to ``LOGICAL_GATE_SET``, with ``MultiRZ`` kept only on
@@ -345,6 +351,9 @@ def _decompose_logical(tape: qml.tape.QuantumScript) -> qml.tape.QuantumScript:
     segment, with a matrix computed from trainable weights.  Its gate
     decomposition would count a digital compilation of the pulse rather than
     the device's operations, and cannot run on a matrix that requires grad.
+    So is a ``QubitDensityMatrix``, which the analog layer with ``gamma > 0``
+    prepares in place of its segments (the state the dephased pulse leaves),
+    and which has no decomposition to gates at all.
     """
     (decomposed,), _ = _decompose(
         tape,
@@ -357,7 +366,7 @@ def _decompose_logical(tape: qml.tape.QuantumScript) -> qml.tape.QuantumScript:
 
 
 def _kept_whole(op: qml.operation.Operator) -> bool:
-    return (op.name == "MultiRZ" and len(op.wires) <= 2) or op.name == "QubitUnitary"
+    return (op.name == "MultiRZ" and len(op.wires) <= 2) or op.name in _MATRIX_OPS
 
 
 class _TapeResources(NamedTuple):
@@ -510,7 +519,7 @@ def _is_diagonal_measurement(measurement: qml.measurements.MeasurementProcess) -
 
 
 def _scalar_or_unitary(op: qml.operation.Operator) -> bool:
-    return _has_scalar_parameters(op) or op.name == "QubitUnitary"
+    return _has_scalar_parameters(op) or op.name in _MATRIX_OPS
 
 
 def _inert_slots(tape: qml.tape.QuantumScript) -> list[tuple[Any, bool]]:
@@ -527,8 +536,9 @@ def _inert_slots(tape: qml.tape.QuantumScript) -> list[tuple[Any, bool]]:
         )
     # Every gate in the set has scalar parameters, so passing it does not
     # change what stops; graph-based decomposition requires a gate_set, and
-    # emits GlobalPhase (see _decompose_logical).  A QubitUnitary (the analog
-    # layer's pulse segments) is kept whole and treated as fully mixing below.
+    # emits GlobalPhase (see _decompose_logical).  A QubitUnitary or
+    # QubitDensityMatrix (the analog layer's pulse segments, or its dephased
+    # final state) is kept whole and treated as fully mixing below.
     (tape,), _ = _decompose(
         tape,
         gate_set=LOGICAL_GATE_SET | {"GlobalPhase"},
@@ -652,7 +662,8 @@ def count_inert_parameters(tape: qml.tape.QuantumScript) -> int:
     ``RZ`` count as diagonal.  Gates that are neither diagonal nor ``CNOT``
     nor ``Rot`` are treated as fully mixing, which keeps the count a lower
     bound for any gate.  A ``QubitUnitary`` is not decomposed (its matrix
-    parameter may require grad) and is treated as fully mixing too.
+    parameter may require grad) and is treated as fully mixing too, as is a
+    ``QubitDensityMatrix``, whose matrix has no gate decomposition.
 
     Raises
     ------
@@ -810,6 +821,15 @@ def circuit_summary(target: nn.Module) -> CircuitSummary:
         logical circuit.  The result does not depend on the device: the same
         layer configuration gives the same summary on ``default.qubit`` and
         ``lightning.qubit``.
+
+        For :class:`~hqnn_forge.encoding.AnalogRydbergLayer` the gates are its
+        ``K = n_segments`` pulse segments, one ``QubitUnitary`` each, and the
+        trainable parameters its ``3K`` pulse values.  With ``gamma > 0`` the
+        circuit has no gate per segment: it prepares the state the dephased
+        pulse leaves with one ``QubitDensityMatrix``, so ``gate_counts`` is
+        ``{"QubitDensityMatrix": 1}`` and ``depth`` 1 (``n_two_qubit_gates``
+        1 from two atoms on), while the parameters are still the ``3K``
+        pulse values, none inert; the segment count is ``layer.n_segments``.
 
     Examples
     --------

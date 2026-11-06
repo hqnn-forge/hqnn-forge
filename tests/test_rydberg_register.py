@@ -110,6 +110,54 @@ class TestPositions:
         with torch.no_grad(), pytest.raises(ValueError, match="must not require grad"):
             AtomRegister(positions)
 
+    def test_rejects_positions_with_a_forward_mode_tangent(self) -> None:
+        """#531: a dual tensor does not require grad, and ``.detach()`` drops its tangent."""
+        positions = torch.tensor([[0.0, 0.0], [5.0, 0.0]], dtype=torch.float64)
+
+        def total(pos: torch.Tensor) -> torch.Tensor:
+            return AtomRegister(pos).interaction_matrix(15625.0).sum()
+
+        with pytest.raises(ValueError, match="must not require grad or carry a forward-mode"):
+            torch.func.jacfwd(total)(positions)
+        with pytest.raises(ValueError, match="must not require grad or carry a forward-mode"):
+            torch.func.jvp(total, (positions,), (torch.ones_like(positions),))
+        with torch.autograd.forward_ad.dual_level():
+            dual = torch.autograd.forward_ad.make_dual(positions, torch.ones_like(positions))
+            with pytest.raises(ValueError, match="must not require grad or carry a forward-mode"):
+                AtomRegister(dual)
+            # Inside a dual level a tensor without a tangent is still a constant.
+            assert AtomRegister(positions).positions.tolist() == positions.tolist()
+        with pytest.raises(ValueError, match="must not require grad"):
+            torch.func.jacrev(total)(positions)  # reverse mode, refused as before
+
+    @pytest.mark.parametrize("mode", [torch.enable_grad, torch.no_grad, torch.inference_mode])
+    @pytest.mark.parametrize("container", [list, tuple])
+    def test_rejects_a_list_of_rows_that_require_grad(self, mode: object, container: type) -> None:
+        """#531: under no_grad the rows used to be converted and their gradient dropped."""
+        p = torch.tensor([[0.0, 0.0], [5.0, 0.0]], dtype=torch.float64, requires_grad=True)
+        rows = container([p[0], p[1]])
+        nested = container([[p[0, 0], 0.0], [5.0, 0.0]])  # one entry deep inside a row
+        with mode():  # type: ignore[operator]
+            for positions in (rows, nested):
+                with pytest.raises(ValueError, match="must not require grad"):
+                    AtomRegister(positions)
+
+    def test_constant_inputs_are_accepted_as_before(self) -> None:
+        expected = [[0.0, 0.0], [5.0, 0.0]]
+        tensor = torch.tensor(expected, requires_grad=True)
+        for positions in (
+            expected,
+            tuple(map(tuple, expected)),
+            np.array(expected),
+            tensor.detach(),
+            [tensor[0].detach(), tensor[1].detach()],
+        ):
+            assert AtomRegister(positions).positions.tolist() == expected
+        with torch.no_grad():
+            assert AtomRegister([tensor[0] * 1, tensor[1] * 1]).positions.tolist() == expected
+        assert AtomRegister.chain(2, 5.0).positions.tolist() == expected
+        assert AtomRegister.ring(3, 5.0).n_atoms == 3
+
     def test_repr_shows_the_positions(self) -> None:
         assert repr(AtomRegister([[0, 0], [5.5, 0]])) == (
             "AtomRegister(positions=[[0.0, 0.0], [5.5, 0.0]])"
