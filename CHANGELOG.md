@@ -379,6 +379,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes cache entries computed under another code digest or key environment and
   reports the removed files and bytes, leaving unreadable, legacy and partial files
   untouched (#575, #618)
+- `--drop-duplicates` on `examples/benchmark_rydberg_features.py` (`Settings.drop_duplicates`):
+  loads Iranian Churn without the 300 rows that repeat an earlier one, so no record sits in
+  both the training and the test rows of a fold; recorded in `settings` and reflected in each
+  line's `data_sha256` and `n_samples`. The default keeps the file as published, so earlier
+  records stay comparable (#704, #723)
 - `AtomRegister.interaction_graph` and `blockade_triangles` (pairs and triples strictly within the
   blockade radius), `hqnn_forge.circuits.blockade_schedule` (blockade CZ/CCZ gates in parallel
   layers, refusing a disconnected register) and `neutral_atom_layer` (those gates, then `Rot` on
@@ -424,8 +429,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AnalogRydbergLayer.density_matrices` returns the final state. With `gamma > 0` there is no
   gate between segments, so noise at position `"all"` (which would act once, as at `"end"`) is
   refused at construction and by `apply_depolarizing_noise` and `noise_sweep` (#699, #710)
+- `quantum_kernel_matrix`, `encoded_density_matrices` and `circuit_summary` on
+  `AnalogRydbergLayer` with `gamma > 0`: the kernel is the Hilbert–Schmidt kernel
+  `Tr[ρ(x) ρ(y)]` of the dephased states at every `noise_level` (purities on the diagonal,
+  `noise_position="all"` refused as on the layer), and the summary counts the one
+  `QubitDensityMatrix` and the `3K` pulse values; `encoded_states` and
+  `overlap_kernel_matrix`, which need a pure state, refuse the layer with a message naming the
+  reason (#711, #722)
 
 ### Changed
+- `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
+  that requires grad while some of the weights do, where it used to count every weight entry as
+  inert. From the tape alone this cannot be told apart from a tape built under
+  `torch.no_grad()` or `torch.inference_mode()`, for which that count was silently wrong (6 of 6
+  for the analog layer, 24 of 24 for strongly-entangling re-uploading, against 0 and 3). A
+  weight the tape does not use is inert entry for entry, so count it directly (#721, #725)
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
   passing a non-`None` seed warns and directs users to the device's own seeding option (#659)
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
@@ -746,6 +764,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
+- `count_inert_weights` refuses a tape built under `torch.no_grad()` or
+  `torch.inference_mode()` with a `ValueError` saying to build it with grad mode on. Such a
+  tape used to fail inside `torch.autograd.grad` with an opaque error or, for the analog
+  layer, whose `QubitUnitary` is computed from the weights, and for the variational blocks of
+  `DataReuploadingLayer(entangler="strongly_entangling")`, to count every weight as inert. A
+  tape built correctly is now counted the same when the call itself is made under either mode,
+  where the analog layer's matrix parameters used to fail (#721, #725)
+- `AtomRegister` refuses positions with a forward-mode tangent (`torch.func.jvp`, `jacfwd`,
+  `torch.autograd.forward_ad`), which it used to accept and store without their derivative, so
+  `jacfwd` through a register returned zeros; a list or tuple holding a tensor that requires
+  grad is refused whatever the grad mode, where `no_grad` and `inference_mode` used to let it
+  through (#531, #724)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
