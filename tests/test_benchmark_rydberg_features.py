@@ -974,13 +974,23 @@ CHURN_HEADER = [
 ]
 
 
-def _write_churn(directory: Path, n: int = 96, n_pos: int = 24) -> Path:
-    """A small file in the format of UCI's ``Customer Churn.csv``; the dataset is not fetched."""
+def _write_churn(
+    directory: Path, n: int = 96, n_pos: int = 24, repeated: slice | None = None
+) -> Path:
+    """
+    A small file in the format of UCI's ``Customer Churn.csv``; the dataset is not fetched.
+
+    ``repeated`` appends an exact copy of those rows at the end, as the published
+    file repeats 300 earlier rows.
+    """
     rng = np.random.default_rng(7)
     data = rng.integers(0, 500, (n, 13)).astype(float)
     labels = np.zeros(n, dtype=int)
     labels[:n_pos] = 1
     data[labels == 1, :3] += 150.0  # churners differ, so there is something to learn
+    if repeated is not None:
+        data = np.concatenate([data, data[repeated]])
+        labels = np.concatenate([labels, labels[repeated]])
     lines = [",".join(CHURN_HEADER)]
     lines += [",".join(f"{v:g}" for v in row) + f",{label}" for row, label in zip(data, labels)]
     path = directory / "Customer Churn.csv"
@@ -1016,6 +1026,42 @@ class TestUciData:
                 fold.inputs[fold.test_idx], data.y[fold.test_idx]
             ).to_dict()
             assert record["separation"]["test"] == pytest.approx(by_hand, rel=1e-9)
+
+    def test_drop_duplicates_reaches_the_churn_loader_only(self, tmp_path: Path) -> None:
+        """#704: rows 20 to 27 (4 churners, 4 not) are repeated at the end of the file."""
+        _write_churn(tmp_path, repeated=slice(20, 28))
+        X, y, _ = bench.load_dataset("iranian-churn", bench.Settings(), path=tmp_path)
+        assert (y.size, int(y.sum())) == (104, 28)
+        settings = bench.Settings(drop_duplicates=True)
+        X, y, _ = bench.load_dataset("iranian-churn", settings, path=tmp_path)
+        assert (y.size, int(y.sum())) == (96, 24)
+        unique = load_iranian_churn(tmp_path, drop_duplicates=True)
+        np.testing.assert_array_equal(X, unique.X)
+        np.testing.assert_array_equal(y, unique.y)
+        # The positive control has no duplicates to drop and is drawn as before.
+        control, _, _ = bench.load_dataset("positive-control", settings)
+        default_control, _, _ = bench.load_dataset("positive-control", bench.Settings())
+        np.testing.assert_array_equal(control, default_control)
+
+    @pytest.mark.parametrize("drop", [False, True])
+    def test_drop_duplicates_on_the_command_line_changes_the_lines(
+        self, tmp_path: Path, drop: bool
+    ) -> None:
+        _write_churn(tmp_path, repeated=slice(20, 28))
+        out = tmp_path / "churn.jsonl"
+        arguments = ["--dataset", "iranian-churn", "--data-path", str(tmp_path), "--no-cache"]
+        arguments += ["--arms", "C", "--folds", "3", "--max-folds", "1", "--trials", "0"]
+        arguments += ["--epochs", "2", "--out", str(out)]
+        bench.main(arguments + (["--drop-duplicates"] if drop else []))
+        data = load_iranian_churn(tmp_path, drop_duplicates=drop)
+        records = bench.read_records(out)
+        assert records
+        for record in records:
+            assert record["settings"]["drop_duplicates"] is drop
+            assert (record["n_samples"], record["n_positives"]) == (
+                (96, 24) if drop else (104, 28)
+            )
+            assert record["data_sha256"] == fingerprint(data.X, data.y)
 
     def test_a_dataset_name_outside_datasets_is_refused_with_the_names_allowed(self) -> None:
         """#540: it used to raise ``tuple.index(x): x not in tuple`` from the seeds."""
