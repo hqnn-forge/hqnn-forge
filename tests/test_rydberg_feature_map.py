@@ -1003,6 +1003,9 @@ class TestConfig:
             "interactions": False,
             "correlations": True,
             "readout_error": None,
+            "position_jitter": 0.0,
+            "jitter_samples": None,
+            "jitter_seed": None,
         }
 
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.7 * OMEGA, 35)])
@@ -1050,6 +1053,7 @@ class TestConfig:
             {"n_steps": 3},
             {"interactions": False},
             {"readout_error": [0.01, 0.08]},
+            {"position_jitter": 0.5, "jitter_samples": 2, "jitter_seed": 0},
         ]
         for change in changes:
             changed = RydbergFeatureMap(**{**base, **change}).transform(x)
@@ -1569,3 +1573,324 @@ class TestReadoutError:
     def test_rejects_a_bad_pair_naming_the_argument(self, readout_error: Any) -> None:
         with pytest.raises(ValueError, match="readout_error"):
             self.build(2, readout_error)
+
+
+def jittered_registers(
+    register: AtomRegister, sigma: float, samples: int, seed: int
+) -> list[AtomRegister]:
+    """
+    The displaced registers in the order the feature map documents, drawn by hand.
+
+    One ``torch.randn((K, N, 2), float64)`` from a CPU generator seeded with
+    ``seed``: entry ``[k, i, c]`` displaces coordinate ``c`` (0 = x, 1 = y) of
+    atom ``i`` in realisation ``k`` by ``σ`` times it.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    z = torch.randn((samples, register.n_atoms, 2), generator=generator, dtype=F64)
+    return [AtomRegister(register.positions + sigma * z[k]) for k in range(samples)]
+
+
+class TestPositionJitter:
+    """
+    ``position_jitter=σ``: ``K`` displaced registers, drawn once, mixed (#731).
+
+    The features are checked against the mean of maps built by hand on the
+    displaced registers, the spread of the drawn couplings against its
+    linearisation, and the shot estimates against the exact features.
+    """
+
+    def build(
+        self,
+        n: int = 3,
+        sigma: Any = 0.4,
+        samples: Any = 5,
+        seed: Any = 3,
+        *,
+        register: AtomRegister | None = None,
+        gamma: float = 0.0,
+        interactions: bool = True,
+        correlations: bool = True,
+        readout_error: Any = None,
+    ) -> RydbergFeatureMap:
+        return RydbergFeatureMap(
+            chain(n) if register is None else register,
+            PulseEncoding(n, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=gamma,
+            n_steps=None if gamma == 0 else 20,
+            interactions=interactions,
+            correlations=correlations,
+            readout_error=readout_error,
+            position_jitter=sigma,
+            jitter_samples=samples,
+            jitter_seed=seed,
+        )
+
+    def by_hand(self, feature_map: RydbergFeatureMap, register: AtomRegister) -> RydbergFeatureMap:
+        """The same map without jitter, on ``register``."""
+        config = feature_map.get_config()
+        config.update(
+            register=register.positions.tolist(),
+            position_jitter=0.0,
+            jitter_samples=None,
+            jitter_seed=None,
+        )
+        return RydbergFeatureMap(**config)
+
+    @pytest.mark.parametrize("gamma", [0.0, 0.5 * OMEGA])
+    @pytest.mark.parametrize("correlations", [False, True])
+    def test_without_interactions_the_jitter_changes_nothing_bit_for_bit(
+        self, gamma: float, correlations: bool
+    ) -> None:
+        """Positions enter only through ``V_ij``: exact, states and shots, and the generator."""
+        jittered = self.build(
+            3, 1.5, 4, gamma=gamma, interactions=False, correlations=correlations
+        )
+        plain = self.build(
+            3, 0.0, None, None, gamma=gamma, interactions=False, correlations=correlations
+        )
+        x = inputs(6, 3, seed=30)
+        assert torch.equal(jittered.transform(x), plain.transform(x))
+        assert torch.equal(jittered.states(x), plain.states(x))
+        generator = torch.Generator().manual_seed(2)
+        reference_generator = torch.Generator().manual_seed(2)
+        assert torch.equal(
+            jittered.transform(x, shots=50, generator=generator),
+            plain.transform(x, shots=50, generator=reference_generator),
+        )
+        assert torch.equal(generator.get_state(), reference_generator.get_state())
+
+    @pytest.mark.parametrize("n", [2, 3])
+    @pytest.mark.parametrize("gamma", [0.0, 0.5 * OMEGA])
+    def test_features_are_the_mean_of_maps_on_the_displaced_registers(
+        self, n: int, gamma: float
+    ) -> None:
+        """
+        The mean over the same ``K`` draws of maps built by hand on each
+        displaced :class:`AtomRegister`, atoms and pairs, to rounding; and far
+        from the map without jitter, so the agreement is not trivial.
+        """
+        feature_map = self.build(n, 0.6, 5, 3, gamma=gamma)
+        x = inputs(4, n, seed=31)
+        registers = jittered_registers(chain(n), 0.6, 5, 3)
+        expected = torch.stack(
+            [self.by_hand(feature_map, register).transform(x) for register in registers]
+        ).mean(dim=0)
+        features = feature_map.transform(x)
+        assert torch.allclose(features, expected, rtol=0, atol=1e-14)
+        plain = self.build(n, 0.0, None, None, gamma=gamma).transform(x)
+        assert (features - plain).abs().max().item() > 1e-3
+
+    def test_states_are_the_mixture_of_the_displaced_states(self) -> None:
+        """``states`` returns ``ρ̄ = (1/K) Σ_k ρ_k``, and the features are read from it."""
+        feature_map = self.build(3, 0.6, 4, 9, gamma=0.5 * OMEGA)
+        x = inputs(3, 3, seed=32)
+        registers = jittered_registers(chain(3), 0.6, 4, 9)
+        expected = torch.stack(
+            [self.by_hand(feature_map, register).states(x) for register in registers]
+        ).mean(dim=0)
+        states = feature_map.states(x)
+        assert (states - expected).abs().max().item() < 1e-14
+        assert torch.equal(feature_map.transform(x), readout(states, pairs=True))
+
+    def test_one_realisation_is_the_map_on_its_register_bit_for_bit(self) -> None:
+        """``K = 1``: ``ρ̄ = ρ_0``, with no division."""
+        feature_map = self.build(3, 0.6, 1, 5)
+        (register,) = jittered_registers(chain(3), 0.6, 1, 5)
+        x = inputs(4, 3, seed=33)
+        expected = self.by_hand(feature_map, register).transform(x)
+        assert torch.equal(feature_map.transform(x), expected)
+
+    @pytest.mark.parametrize("v_over_omega", [1.0, 100.0])
+    def test_the_spread_of_the_nearest_neighbour_coupling_is_the_linearised_one(
+        self, v_over_omega: float
+    ) -> None:
+        """
+        ``sd(V) = 6 √2 σ V / a`` to first order in ``σ/a``.
+
+        At ``σ = 0.01 µm`` (``σ/a`` of 1.2e-3 at ``a = R_b`` and 2.5e-3 at
+        4.03 µm) the second-order terms are below 1e-2 relative.  The sample
+        standard deviation of ``K = 4000`` draws has a relative standard error
+        of ``1/√(2(K − 1)) = 1.1 %``; the band is 5 of them.  The draws are
+        those of a map built with these settings.
+        """
+        sigma, samples = 0.01, 4000
+        register = chain(2, v_over_omega)
+        self.build(2, sigma, samples, 12, register=register)  # accepted and drawn
+        a = float(register.positions[1, 0])
+        v = DEFAULT_C6 / a**6
+        couplings = torch.tensor(
+            [
+                float(r.interaction_matrix(DEFAULT_C6)[0, 1])
+                for r in jittered_registers(register, sigma, samples, 12)
+            ],
+            dtype=F64,
+        )
+        expected = 6 * math.sqrt(2) * sigma * v / a
+        tolerance = 5 / math.sqrt(2 * (samples - 1))
+        assert couplings.std().item() / expected == pytest.approx(1.0, abs=tolerance)
+
+    def test_the_same_seed_repeats_the_features_and_another_does_not(self) -> None:
+        x = inputs(4, 3, seed=34)
+        first = self.build(3, 0.6, 3, 21).transform(x)
+        again = self.build(3, 0.6, 3, 21).transform(x)
+        other = self.build(3, 0.6, 3, 22).transform(x)
+        assert torch.equal(first, again)
+        assert (first - other).abs().max().item() > 1e-4
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, None])
+    def test_chunk_sizes_change_the_features_by_rounding_only(
+        self, chunk_size: int | None
+    ) -> None:
+        """
+        The draws are made at construction and shared by every sample, so the
+        chunk changes the rounding only (``TestChunks.ROUNDING``), and the
+        shot estimates not at all.
+        """
+        feature_map = self.build(3, 0.6, 3, 8, gamma=OMEGA)
+        x = inputs(7, 3, seed=35)
+        whole = feature_map.transform(x, chunk_size=7)
+        chunked = feature_map.transform(x, chunk_size=chunk_size)
+        assert (chunked - whole).abs().max().item() <= TestChunks.ROUNDING
+        shots_whole = feature_map.transform(
+            x, shots=80, generator=torch.Generator().manual_seed(6), chunk_size=7
+        )
+        shots_chunked = feature_map.transform(
+            x, shots=80, generator=torch.Generator().manual_seed(6), chunk_size=chunk_size
+        )
+        assert torch.equal(shots_chunked, shots_whole)
+
+    def test_the_mean_of_shot_estimates_is_the_exact_jittered_feature(self) -> None:
+        """
+        400 estimates of 25 shots of each of 4 inputs average to the exact
+        jittered features within 6 standard errors ``√(F(1 − F)/(400 · 25))``,
+        atoms and pairs.  The features without jitter lie further off than
+        that, so the test can tell the two apart.
+        """
+        register = chain(3, 10.0)
+        feature_map = self.build(3, 0.5, 8, 4, register=register)
+        x = inputs(4, 3, seed=36)
+        exact = feature_map.transform(x)
+        repeats, shots = 400, 25
+        estimates = feature_map.transform(
+            x.repeat(repeats, 1), shots=shots, generator=torch.Generator().manual_seed(13)
+        )
+        mean = estimates.reshape(repeats, 4, -1).mean(dim=0)
+        standard_error = (exact * (1 - exact) / (repeats * shots)).sqrt()
+        assert bool(((mean - exact).abs() <= 6 * standard_error).all())
+        plain = self.build(3, 0.0, None, None, register=register).transform(x)
+        assert bool(((mean - plain).abs() > 6 * standard_error).any())
+
+    @pytest.mark.parametrize("readout_error", [None, (0.01, 0.08)])
+    def test_shots_are_drawn_from_the_mixture_in_the_documented_order(
+        self, readout_error: tuple[float, float] | None
+    ) -> None:
+        """Bit for bit the bitstrings drawn by hand from the diagonal of ``ρ̄``, then the flips."""
+        feature_map = self.build(3, 0.6, 3, 2, readout_error=readout_error)
+        x = inputs(5, 3, seed=37)
+        estimates = feature_map.transform(x, shots=60, generator=torch.Generator().manual_seed(11))
+        expected = flipped_shots_reference(feature_map, x, 60, 11, readout_error)
+        assert torch.equal(estimates, expected)
+
+    def test_the_detection_error_acts_after_the_mixture(self) -> None:
+        """The formulas of #730 applied to the jittered features."""
+        p01, p10 = 0.2, 0.05
+        x = inputs(4, 3, seed=38)
+        clean = self.build(3, 0.6, 4, 6).transform(x)
+        noisy = self.build(3, 0.6, 4, 6, readout_error=(p01, p10)).transform(x)
+        c = 1 - p01 - p10
+        assert torch.allclose(noisy[:, :3], p01 + c * clean[:, :3], rtol=0, atol=1e-15)
+        for column, (i, j) in enumerate([(0, 1), (0, 2), (1, 2)], start=3):
+            expected = p01**2 + p01 * c * (clean[:, i] + clean[:, j]) + c**2 * clean[:, column]
+            assert torch.allclose(noisy[:, column], expected, rtol=0, atol=1e-15)
+
+    def test_a_displacement_that_breaks_the_coupling_names_its_realisation(self) -> None:
+        """
+        ``C6 = 1.7e308`` at 1 µm is finite; a realisation that brings the two
+        atoms closer than ``(1.7e308 / 1.798e308)^(1/6) = 0.9907`` µm is not.
+        The seed is one for which realisation 0 is fine and a later one is not.
+        """
+        c6 = 1.7e308
+        register = AtomRegister.chain(2, 1.0)
+        failing = []
+        for k, displaced in enumerate(jittered_registers(register, 0.05, 6, 11)):
+            try:
+                displaced.interaction_matrix(c6)
+            except ValueError:
+                failing.append(k)
+        assert failing
+        assert failing[0] > 0
+        with pytest.raises(
+            ValueError, match=rf"realisation {failing[0]} .*not finite for atoms 0 and 1"
+        ):
+            RydbergFeatureMap(
+                register,
+                PulseEncoding(2, omega=OMEGA),
+                c6=c6,
+                gamma=0.0,
+                position_jitter=0.05,
+                jitter_samples=6,
+                jitter_seed=11,
+            )
+        # Without interactions the positions do not matter, and nothing is refused.
+        RydbergFeatureMap(
+            register,
+            PulseEncoding(2, omega=OMEGA),
+            c6=c6,
+            gamma=0.0,
+            interactions=False,
+            position_jitter=0.05,
+            jitter_samples=6,
+            jitter_seed=11,
+        )
+
+    def test_config_records_the_jitter_and_rebuilds_the_map_through_json(self) -> None:
+        feature_map = self.build(3, 0.25, np.int64(3), np.int64(17), gamma=0.5 * OMEGA)
+        assert feature_map.position_jitter == 0.25
+        assert type(feature_map.jitter_samples) is int
+        assert type(feature_map.jitter_seed) is int
+        config = feature_map.get_config()
+        assert config["position_jitter"] == 0.25
+        assert config["jitter_samples"] == 3
+        assert config["jitter_seed"] == 17
+        assert json.loads(json.dumps(config)) == config
+        rebuilt = RydbergFeatureMap(**json.loads(json.dumps(config)))
+        assert rebuilt.get_config() == config
+        x = inputs(4, 3, seed=39)
+        assert torch.equal(rebuilt.transform(x), feature_map.transform(x))
+        assert "position_jitter=0.25, jitter_samples=3, jitter_seed=17" in repr(feature_map)
+        plain = self.build(3, 0.0, None, None)
+        assert plain.position_jitter == 0.0
+        assert plain.jitter_samples is None
+        assert plain.jitter_seed is None
+
+    @pytest.mark.parametrize("sigma", [-0.1, math.nan, math.inf, "0.1", True, None])
+    def test_rejects_a_bad_jitter_naming_the_argument(self, sigma: Any) -> None:
+        with pytest.raises(ValueError, match="position_jitter must be a finite number >= 0"):
+            self.build(2, sigma, 3, 0)
+
+    @pytest.mark.parametrize("samples", [0, -2, 1.5, True])
+    def test_rejects_a_bad_number_of_realisations(self, samples: Any) -> None:
+        with pytest.raises(ValueError, match="jitter_samples must be an integer >= 1"):
+            self.build(2, 0.2, samples, 0)
+
+    def test_realisations_need_a_jitter(self) -> None:
+        with pytest.raises(ValueError, match=r"jitter_samples .*position_jitter > 0"):
+            self.build(2, 0.0, 3, None)
+
+    def test_a_jitter_needs_realisations(self) -> None:
+        with pytest.raises(ValueError, match="jitter_samples is required when position_jitter"):
+            self.build(2, 0.2, None, 0)
+
+    def test_a_jitter_needs_a_seed(self) -> None:
+        with pytest.raises(ValueError, match="jitter_seed is required when position_jitter"):
+            self.build(2, 0.2, 3, None)
+
+    def test_a_seed_needs_a_jitter(self) -> None:
+        with pytest.raises(ValueError, match=r"jitter_seed .*position_jitter > 0"):
+            self.build(2, 0.0, None, 3)
+
+    @pytest.mark.parametrize("seed", [-1, 2**64, 1.0, True, "1"])
+    def test_rejects_a_bad_seed(self, seed: Any) -> None:
+        with pytest.raises(ValueError, match="jitter_seed must be an integer in"):
+            self.build(2, 0.2, 3, seed)
