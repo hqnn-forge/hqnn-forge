@@ -687,16 +687,17 @@ class RydbergFeatureMap:
 
     def _draw_registers(self) -> tuple[AtomRegister, ...]:
         """
-        The ``K`` displaced registers, or none without jitter.
+        The ``K`` displaced registers, or none without jitter or interactions.
 
         One ``torch.randn((K, N, 2), dtype=float64)`` from a CPU generator
         seeded with ``jitter_seed``: entry ``[k, i, c]`` displaces coordinate
         ``c`` (0 = ``x``, 1 = ``y``) of atom ``i`` in realisation ``k``, and
-        realisation ``k`` is ``AtomRegister(positions + σ · z[k])``.  With
-        interactions each is checked for finite couplings here, so that a
-        failing realisation is named once, at construction.
+        realisation ``k`` is ``AtomRegister(positions + σ · z[k])``.  Each is
+        checked for finite couplings here, so that a failing realisation is
+        named once, at construction.  Without interactions the positions enter
+        nothing, so none is drawn or checked.
         """
-        if self._jitter_samples is None or self._jitter_seed is None:
+        if self._jitter_samples is None or self._jitter_seed is None or not self._interactions:
             return ()
         n = self._register.n_atoms
         generator = torch.Generator(device="cpu").manual_seed(self._jitter_seed)

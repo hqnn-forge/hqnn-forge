@@ -1712,19 +1712,17 @@ class TestPositionJitter:
         4.03 µm) the second-order terms are below 1e-2 relative.  The sample
         standard deviation of ``K = 4000`` draws has a relative standard error
         of ``1/√(2(K − 1)) = 1.1 %``; the band is 5 of them.  The draws are
-        those of a map built with these settings.
+        those the map itself drew, so a map that scaled or dropped a
+        displacement fails here.
         """
         sigma, samples = 0.01, 4000
         register = chain(2, v_over_omega)
-        self.build(2, sigma, samples, 12, register=register)  # accepted and drawn
+        drawn = self.build(2, sigma, samples, 12, register=register)._jitter_registers
+        assert len(drawn) == samples
         a = float(register.positions[1, 0])
         v = DEFAULT_C6 / a**6
         couplings = torch.tensor(
-            [
-                float(r.interaction_matrix(DEFAULT_C6)[0, 1])
-                for r in jittered_registers(register, sigma, samples, 12)
-            ],
-            dtype=F64,
+            [float(r.interaction_matrix(DEFAULT_C6)[0, 1]) for r in drawn], dtype=F64
         )
         expected = 6 * math.sqrt(2) * sigma * v / a
         tolerance = 5 / math.sqrt(2 * (samples - 1))
@@ -1861,17 +1859,19 @@ class TestPositionJitter:
                 jitter_samples=6,
                 jitter_seed=11,
             )
-        # Without interactions the positions do not matter, and nothing is refused.
-        RydbergFeatureMap(
-            register,
-            PulseEncoding(2, omega=OMEGA),
-            c6=c6,
-            gamma=0.0,
-            interactions=False,
-            position_jitter=0.05,
-            jitter_samples=6,
-            jitter_seed=11,
-        )
+        # Without interactions the positions do not matter, and nothing is
+        # refused, not even displacements that overflow to infinity.
+        for sigma in (0.05, 1e308):
+            RydbergFeatureMap(
+                register,
+                PulseEncoding(2, omega=OMEGA),
+                c6=c6,
+                gamma=0.0,
+                interactions=False,
+                position_jitter=sigma,
+                jitter_samples=6,
+                jitter_seed=11,
+            )
 
     def test_config_records_the_jitter_and_rebuilds_the_map_through_json(self) -> None:
         feature_map = self.build(3, 0.25, np.int64(3), np.int64(17), gamma=0.5 * OMEGA)
