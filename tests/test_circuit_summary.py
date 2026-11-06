@@ -760,6 +760,18 @@ _TAPE_INERT = {"angle": 3, "reuploading-scaled": 3, "reuploading-strongly": 3, "
 class TestCountInertWeightsGradMode:
     """#721: a tape built without grad is refused, a tape built with it counts in any mode."""
 
+    def test_a_tape_disconnected_from_the_weights_is_refused(self) -> None:
+        # The contract change of #725: this tape used to count all 3 entries of w inert,
+        # but it looks the same as a tape built without grad, where that count is wrong.
+        w = torch.zeros(3, requires_grad=True)
+        tape = qml.tape.QuantumScript(
+            [qml.RX(0.3, 0), qml.RY(torch.tensor(0.2), 0)], [qml.expval(qml.Z(0))]
+        )
+        with pytest.raises(ValueError, match="no graph to the weights.*grad mode on"):
+            count_inert_weights(tape, [w])
+        # Weights that do not require grad are not counted, so nothing is refused.
+        assert count_inert_weights(tape, [w.detach()]) == 0
+
     @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
     @pytest.mark.parametrize("make_layer", _TAPE_LAYERS, ids=_TAPE_IDS)
     def test_a_tape_built_without_grad_is_refused(

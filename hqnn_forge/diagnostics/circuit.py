@@ -705,9 +705,12 @@ def count_inert_weights(tape: qml.tape.QuantumScript, weights: Sequence[torch.Te
         graph to ``weights``, as for a tape built under ``torch.no_grad()`` or
         ``torch.inference_mode()`` (#721): no gate parameter requires grad
         while some of ``weights`` do, or one is a slice of a weight without a
-        graph (a ``Rot`` angle, or the per-layer block a template takes).  A tape whose gates take no tensor that requires grad is refused
-        for that reason too, although its weights would all be inert: from the
-        tape alone it cannot be told apart from one built without grad.
+        graph (a ``Rot`` angle, or the per-layer block a template takes).
+        A tape whose gates take no tensor that requires grad, while some of
+        ``weights`` do, is refused for that reason too, although its weights
+        would all be inert: from the tape alone it cannot be told apart from
+        one built without grad.  Count such weights directly: every entry of
+        a weight the tape does not use is inert.
     """
     leaves = [w for w in weights if w.requires_grad]
     if leaves and not _has_graph(tape):
