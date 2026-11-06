@@ -758,6 +758,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
+- `AtomRegister` refuses positions with a forward-mode tangent (`torch.func.jvp`, `jacfwd`,
+  `torch.autograd.forward_ad`), which it used to accept and store without their derivative, so
+  `jacfwd` through a register returned zeros; a list or tuple holding a tensor that requires
+  grad is refused whatever the grad mode, where `no_grad` and `inference_mode` used to let it
+  through (#531, #724)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
