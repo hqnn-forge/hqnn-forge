@@ -77,7 +77,7 @@ replayed one sample at a time.  At ``gamma → 0`` ``ρ(x)`` tends to
 ``|Φ(x)⟩⟨Φ(x)|`` and the kernel to the fidelity kernel of the unitary layer.
 With ``noise_level > 0`` the channels act on ``ρ(T)`` at ``"end"``, as in the
 layer's own training noise; ``"all"`` is refused, as the layer refuses it
-(#717), and ``"cz"`` finds no CZ to act after.  :func:`encoded_states` and
+(#717), and ``"cz"`` raises, as the circuit has no CZ.  :func:`encoded_states` and
 :func:`overlap_kernel_matrix` need a pure state or a unitary to invert, and
 refuse the layer (#711).
 
