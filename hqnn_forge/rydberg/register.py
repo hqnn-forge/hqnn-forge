@@ -42,6 +42,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.autograd import forward_ad
 
 __all__ = ["AtomRegister"]
 
@@ -74,6 +75,27 @@ def _real_tensor(value: Any, name: str) -> torch.Tensor:
     return tensor.to(torch.float64)
 
 
+def _carries_derivative(value: Any) -> bool:
+    """
+    Whether ``value``, or a tensor in a list or tuple of it, would take a derivative along.
+
+    A tensor that requires grad does for reverse mode (``backward``,
+    ``torch.func.grad``, ``jacrev``), whatever the grad mode the register is
+    built under.  A dual tensor of forward mode does not require grad, and
+    ``.detach()`` strips its tangent, so it is recognised by its tangent:
+    ``unpack_dual`` returns one for a ``torch.autograd.forward_ad.make_dual``
+    tensor and for the inputs of ``torch.func.jvp`` and ``jacfwd``, and ``None``
+    for any other tensor, also outside a dual level.  Lists and tuples are
+    walked, since a container of tensors that require grad is converted
+    without a graph under ``torch.no_grad()`` or ``torch.inference_mode()``.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.requires_grad or forward_ad.unpack_dual(value).tangent is not None
+    if isinstance(value, (list, tuple)):
+        return any(_carries_derivative(item) for item in value)
+    return False
+
+
 def _atom_count(n_atoms: Any) -> int:
     if isinstance(n_atoms, bool) or not isinstance(n_atoms, numbers.Integral) or n_atoms < 1:
         raise ValueError(f"n_atoms must be an integer >= 1; got {n_atoms!r}.")
@@ -95,7 +117,10 @@ class AtomRegister:
         Shape ``(n_atoms, 2)``, one ``(x, y)`` row per atom, in µm.  Any
         real-valued array-like; it is copied and stored as ``float64``.  The
         positions are constants: the copy carries no graph, so a tensor that
-        requires grad is refused instead of losing its gradient unnoticed.
+        requires grad, a dual tensor of forward mode (``torch.func.jvp``,
+        ``jacfwd``, ``torch.autograd.forward_ad``), or a list or tuple
+        holding either, is refused instead of losing its derivative
+        unnoticed, whatever the grad mode.
 
     Raises
     ------
@@ -103,7 +128,9 @@ class AtomRegister:
         If ``positions`` is complex or boolean.
     ValueError
         If ``positions`` does not have shape ``(n_atoms, 2)`` with at least
-        one atom, is a tensor that requires grad, holds a NaN or an infinity,
+        one atom, carries a derivative (a tensor, or a list or tuple of
+        tensors, that requires grad or has a forward-mode tangent), holds a
+        NaN or an infinity,
         or places two atoms at the same point (their coupling ``C6 / 0``
         would be infinite).
 
@@ -126,6 +153,16 @@ class AtomRegister:
     """
 
     def __init__(self, positions: Any) -> None:
+        # Asked of the argument, before any conversion: under torch.no_grad() the
+        # conversion of another dtype, or of a list of tensors, returns a tensor that no
+        # longer requires grad, and .detach() strips a forward-mode tangent (#531).
+        if _carries_derivative(positions):
+            raise ValueError(
+                "positions must not require grad or carry a forward-mode tangent "
+                "(torch.func.jvp, jacfwd, forward_ad): the register stores them as constants, "
+                "so no derivative would reach them. Pass detached values, such as "
+                "positions.detach(), to use them."
+            )
         tensor = _real_tensor(positions, "positions")
         if tensor.ndim != 2 or tensor.shape[1] != 2:
             raise ValueError(
@@ -134,13 +171,6 @@ class AtomRegister:
             )
         if tensor.shape[0] < 1:
             raise ValueError("positions must hold at least one atom; got shape (0, 2).")
-        # Asked of the argument, not of the float64 copy: under torch.no_grad() the
-        # conversion of another dtype returns a tensor that no longer requires grad.
-        if isinstance(positions, torch.Tensor) and positions.requires_grad:
-            raise ValueError(
-                "positions must not require grad: the register stores them as constants, "
-                "so no gradient would reach them. Pass positions.detach() to use the values."
-            )
         tensor = tensor.detach().to(device="cpu", dtype=torch.float64, copy=True)
         finite = torch.isfinite(tensor).all(dim=1)
         if not bool(finite.all()):

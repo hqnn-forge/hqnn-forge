@@ -526,3 +526,121 @@ class TestClassifiers:
             HybridBinaryClassifier(
                 n_input_features=2, n_qubits=2, encoding_type="analog", gamma=1.0
             )
+
+
+class TestKernelsAndSummary:
+    """The kernels and ``circuit_summary`` on the dephased layer (#711)."""
+
+    GAMMA = 1.5
+
+    def _dephased(self, n_qubits: int = 2, n_segments: int = 2, **kwargs: object):
+        layer = _layer(n_qubits, n_segments, gamma=self.GAMMA, n_steps=2000, **kwargs)
+        with torch.no_grad():
+            layer.qlayer.weights.copy_(
+                torch.tensor([[0.3, -0.4, 0.7], [-0.2, 0.5, -1.1]], dtype=F64)[:n_segments]
+            )
+        return layer
+
+    @staticmethod
+    def _inputs(n: int, n_qubits: int = 2) -> torch.Tensor:
+        return torch.randn(n, n_qubits, generator=torch.Generator().manual_seed(3), dtype=F64)
+
+    def test_kernel_is_tr_rho_rho_of_the_liouvillian_states(self) -> None:
+        from hqnn_forge.kernels import quantum_kernel_matrix
+
+        layer = self._dephased()
+        x = self._inputs(3)
+        rho = np.stack([_reference_density_matrix(layer, row.numpy(), self.GAMMA) for row in x])
+        expected = np.einsum("aij,bji->ab", rho, rho).real
+        kernel = quantum_kernel_matrix(x, layer)
+        # n_steps = 2000: the splitting error of evolve is far below 1e-6 here.
+        np.testing.assert_allclose(kernel.numpy(), expected, atol=1e-6)
+        # The diagonal is the purity, below 1 under dephasing.
+        purity = np.einsum("aij,aji->a", rho, rho).real
+        np.testing.assert_allclose(kernel.diagonal().numpy(), purity, atol=1e-6)
+        assert bool((kernel.diagonal() < 1 - 1e-3).all())
+
+    def test_kernel_against_y_and_batches_matches_density_matrices(self) -> None:
+        from hqnn_forge.kernels import encoded_density_matrices, quantum_kernel_matrix
+
+        layer = self._dephased()
+        x, y = self._inputs(3), self._inputs(5)[3:]
+        rho_x = layer.density_matrices(x).detach()
+        rho_y = layer.density_matrices(y).detach()
+        expected = torch.einsum("aij,bji->ab", rho_x, rho_y).real
+        torch.testing.assert_close(quantum_kernel_matrix(x, layer, Y=y), expected)
+        torch.testing.assert_close(quantum_kernel_matrix(x, layer, Y=y, batch_size=2), expected)
+        torch.testing.assert_close(encoded_density_matrices(x, layer, batch_size=2), rho_x)
+
+    def test_gamma_to_zero_gives_the_fidelity_kernel_of_the_unitary_layer(self) -> None:
+        from hqnn_forge.kernels import quantum_kernel_matrix
+
+        unitary = _layer(2, 2)
+        dephased = _layer(2, 2, gamma=1e-10, n_steps=4)
+        with torch.no_grad():
+            dephased.qlayer.weights.copy_(unitary.qlayer.weights)
+        x = self._inputs(4)
+        torch.testing.assert_close(
+            quantum_kernel_matrix(x, dephased),
+            quantum_kernel_matrix(x, unitary),
+            atol=1e-8,
+            rtol=0.0,
+        )
+
+    def test_depolarising_at_end_acts_once_on_every_atom(self) -> None:
+        from hqnn_forge.kernels import encoded_density_matrices, quantum_kernel_matrix
+
+        p = 0.1
+        layer = self._dephased()
+        x = self._inputs(2)
+        rho = layer.density_matrices(x).detach().numpy()
+        for i in range(2):  # DepolarizingChannel(p) on atom i, by its Kraus operators
+            kraus = [math.sqrt(1 - p) * EYE] + [math.sqrt(p / 3) * P for P in (X, Y, Z)]
+            rho = sum(_on(k, i, 2) @ rho @ _on(k, i, 2).conj().T for k in kraus)
+        got = encoded_density_matrices(x, layer, noise_level=p, noise_position="end")
+        np.testing.assert_allclose(got.numpy(), rho, atol=1e-12)
+        kernel = quantum_kernel_matrix(x, layer, noise_level=p, noise_position="end")
+        np.testing.assert_allclose(
+            kernel.numpy(), np.einsum("aij,bji->ab", rho, rho).real, atol=1e-12
+        )
+
+    def test_differentiable_kernel_carries_the_gradient_of_tr_rho_rho(self) -> None:
+        from hqnn_forge.kernels import quantum_kernel_matrix
+
+        layer = self._dephased()
+        x = self._inputs(2)
+        quantum_kernel_matrix(x, layer, differentiable=True)[0, 1].backward()
+        got = layer.qlayer.weights.grad.clone()
+        layer.qlayer.weights.grad = None
+        rho = layer.density_matrices(x)
+        torch.einsum("ij,ji->", rho[0], rho[1]).real.backward()
+        torch.testing.assert_close(got, layer.qlayer.weights.grad)
+        assert bool((got != 0).any())
+
+    def test_noise_at_all_is_refused_as_on_the_layer(self) -> None:
+        from hqnn_forge.kernels import encoded_density_matrices, quantum_kernel_matrix
+
+        layer = self._dephased()
+        x = self._inputs(2)
+        for function in (quantum_kernel_matrix, encoded_density_matrices):
+            with pytest.raises(ValueError, match="noise_position='all'.*gamma > 0"):
+                function(x, layer, noise_level=0.1, noise_position="all")
+
+    def test_pure_state_functions_refuse_the_layer(self) -> None:
+        from hqnn_forge.kernels import encoded_states, overlap_kernel_matrix
+
+        layer = self._dephased()
+        x = self._inputs(2)
+        for function in (encoded_states, overlap_kernel_matrix):
+            with pytest.raises(ValueError, match="gamma > 0 prepares a mixed state"):
+                function(x, layer)
+
+    def test_circuit_summary_counts_the_preparation_and_the_pulse_values(self) -> None:
+        from hqnn_forge.diagnostics import circuit_summary
+
+        summary = circuit_summary(_layer(3, 4, gamma=self.GAMMA, n_steps=4))
+        assert summary.gate_counts == {"QubitDensityMatrix": 1}
+        assert (summary.n_gates, summary.depth, summary.n_two_qubit_gates) == (1, 1, 1)
+        # Every pulse value shapes ρ(T), so none is inert.
+        assert (summary.n_trainable_params, summary.n_inert_params) == (12, 0)
+        assert summary.device_name == "default.mixed"
