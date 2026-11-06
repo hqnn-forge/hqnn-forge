@@ -438,6 +438,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason (#711, #722)
 
 ### Changed
+- `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
+  that requires grad while some of the weights do, where it used to count every weight entry as
+  inert. From the tape alone this cannot be told apart from a tape built under
+  `torch.no_grad()` or `torch.inference_mode()`, for which that count was silently wrong (6 of 6
+  for the analog layer, 24 of 24 for strongly-entangling re-uploading, against 0 and 3). A
+  weight the tape does not use is inert entry for entry, so count it directly (#721, #725)
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
   passing a non-`None` seed warns and directs users to the device's own seeding option (#659)
 - `RydbergFeatureMap` estimates finite-shot features directly from integer measurement counts without
@@ -758,6 +764,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wilcoxon_signed_rank` and `rank_biserial_correlation` treat a paired difference of at most
   `1e-12` as zero and absolute differences within `1e-12` of each other as tied, so round-off
   no longer adds a pair or splits a tie; the new keyword `atol` sets the tolerance (#595, #681)
+- `count_inert_weights` refuses a tape built under `torch.no_grad()` or
+  `torch.inference_mode()` with a `ValueError` saying to build it with grad mode on. Such a
+  tape used to fail inside `torch.autograd.grad` with an opaque error or, for the analog
+  layer, whose `QubitUnitary` is computed from the weights, and for the variational blocks of
+  `DataReuploadingLayer(entangler="strongly_entangling")`, to count every weight as inert. A
+  tape built correctly is now counted the same when the call itself is made under either mode,
+  where the analog layer's matrix parameters used to fail (#721, #725)
 - `AtomRegister` refuses positions with a forward-mode tangent (`torch.func.jvp`, `jacfwd`,
   `torch.autograd.forward_ad`), which it used to accept and store without their derivative, so
   `jacfwd` through a register returned zeros; a list or tuple holding a tensor that requires

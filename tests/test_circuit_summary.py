@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Callable
 from math import comb
 from types import MappingProxyType
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pennylane as qml
 import pytest
@@ -35,6 +35,7 @@ from hqnn_forge.diagnostics.circuit import (
     _decompose_logical,
     _logical_tape,
     _written_tape,
+    count_inert_weights,
     sample_input,
 )
 from hqnn_forge.encoding import AmplitudeEncodingLayer, QuantumEncodingLayer, is_circuit_layer
@@ -714,3 +715,90 @@ class TestGradModeIndependence:
             x = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64)
             assert draw_circuit(layer, x) == expected
         assert draw_circuit(layer, x) == expected
+
+
+def _analog() -> torch.nn.Module:
+    from hqnn_forge.encoding import AnalogRydbergLayer
+
+    torch.manual_seed(0)
+    return AnalogRydbergLayer(3, 2)
+
+
+def _qlayer(layer: torch.nn.Module) -> Any:
+    # nn.Module's __getattr__ is typed as Tensor | Module; the qlayer is a TorchLayer.
+    return layer.qlayer
+
+
+def _tape_of(layer: torch.nn.Module) -> qml.tape.QuantumScript:
+    x = torch.tensor([0.6, -0.9, 1.3], dtype=torch.float64)
+    qlayer = _qlayer(layer)
+    return qml.workflow.construct_tape(qlayer.qnode, level=0)(x, **qlayer.qnode_weights)
+
+
+def _reuploading_strongly() -> DataReuploadingLayer:
+    # Each layer's weights[l : l + 1] go to StronglyEntanglingLayers whole, so without
+    # grad the template takes a graphless view of the weight, not a Rot angle of it.
+    torch.manual_seed(0)
+    return DataReuploadingLayer(
+        n_qubits=3,
+        n_layers=2,
+        trainable_input_scaling=True,
+        entangler="strongly_entangling",
+        device_name="default.qubit",
+        diff_method="backprop",
+    )
+
+
+_TAPE_LAYERS = [_angle_backprop, _reuploading_scaled, _reuploading_strongly, _analog]
+_TAPE_IDS = ["angle", "reuploading-scaled", "reuploading-strongly", "analog"]
+# The last layer's trailing RZ (the ω of each qubit's Rot) commutes with the Z readout,
+# through the CNOTs after it too, so 3 entries are inert; the analog layer's generic
+# QubitUnitary leaves none inert.
+_TAPE_INERT = {"angle": 3, "reuploading-scaled": 3, "reuploading-strongly": 3, "analog": 0}
+
+
+class TestCountInertWeightsGradMode:
+    """#721: a tape built without grad is refused, a tape built with it counts in any mode."""
+
+    def test_a_tape_disconnected_from_the_weights_is_refused(self) -> None:
+        # The contract change of #725: this tape used to count all 3 entries of w inert,
+        # but it looks the same as a tape built without grad, where that count is wrong.
+        w = torch.zeros(3, requires_grad=True)
+        tape = qml.tape.QuantumScript(
+            [qml.RX(0.3, 0), qml.RY(torch.tensor(0.2), 0)], [qml.expval(qml.Z(0))]
+        )
+        with pytest.raises(ValueError, match="no graph to the weights.*grad mode on"):
+            count_inert_weights(tape, [w])
+        # Weights that do not require grad are not counted, so nothing is refused.
+        assert count_inert_weights(tape, [w.detach()]) == 0
+
+    @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
+    @pytest.mark.parametrize("make_layer", _TAPE_LAYERS, ids=_TAPE_IDS)
+    def test_a_tape_built_without_grad_is_refused(
+        self, make_layer: Callable[[], torch.nn.Module], mode: str
+    ) -> None:
+        # The analog layer's QubitUnitary is computed from the weights, so without grad
+        # it does not require grad: it used to be skipped and all 6 weights counted inert.
+        layer = make_layer()
+        weights = list(_qlayer(layer).qnode_weights.values())
+        with _GRAD_MODES[mode]():
+            tape = _tape_of(layer)
+        with pytest.raises(ValueError, match="no graph to the weights.*grad mode on"):
+            count_inert_weights(tape, weights)
+
+    @pytest.mark.parametrize("mode", sorted(_GRAD_MODES))
+    @pytest.mark.parametrize(
+        ("make_layer", "expected"),
+        [(make, _TAPE_INERT[name]) for make, name in zip(_TAPE_LAYERS, _TAPE_IDS, strict=True)],
+        ids=_TAPE_IDS,
+    )
+    def test_a_tape_built_with_grad_counts_the_same_in_any_mode(
+        self, make_layer: Callable[[], torch.nn.Module], expected: int, mode: str
+    ) -> None:
+        layer = make_layer()
+        weights = list(_qlayer(layer).qnode_weights.values())
+        tape = _tape_of(layer)
+        assert count_inert_weights(tape, weights) == expected
+        with _GRAD_MODES[mode]():
+            assert count_inert_weights(tape, weights) == expected
+        assert circuit_summary(layer).n_inert_params == expected
