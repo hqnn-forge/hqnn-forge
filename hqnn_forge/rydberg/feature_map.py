@@ -16,6 +16,7 @@ For one sample ``x ∈ ℝ^N`` and a register of ``N`` atoms::
          →  H = Ω/2 Σ_i X_i − Σ_i Δ_i n_i + Σ_{i<j} V_ij n_i n_j   (rydberg_hamiltonian)
          →  ρ(T), from every atom in |g⟩, with dephasing γ   (evolve)
          →  F_i = ⟨n_i⟩ = Tr[ρ(T) n_i]                       (readout)
+         →  p01 + (1 − p01 − p10) F_i      (optional detection error)
 
 * **Which input feeds which atom.**  Column ``i`` of ``X`` sets the detuning
   of atom ``i``, the atom at row ``i`` of the register's positions, which is
@@ -95,6 +96,61 @@ variance ``F_i (1 − F_i)/S``, i.e. standard error
 ``⟨n_i n_j⟩``.  All features of a sample are computed from the same ``S``
 bitstrings, so their errors are correlated, as on a device.
 
+Detection error
+---------------
+By default every atom is read without error.  With
+``readout_error=(p01, p10)`` (named and ordered as the ``readout_error`` of
+the encoding layers) each atom's measured bit goes through the confusion
+matrix::
+
+    C = [[1 − p01,     p01],        row: the atom's state, 0 = |g⟩, 1 = |r⟩
+         [    p10, 1 − p10]]        column: the bit read, 0 = g, 1 = r
+
+``p01`` = P(read ``r`` | atom in ``|g⟩``), ``p10`` = P(read ``g`` | atom in
+``|r⟩``), both dimensionless probabilities in ``[0, 1]``.  The bit read for an
+atom depends on that atom's state alone: the errors of different atoms are
+independent of each other and of the states of the other atoms.  For one atom
+in state ``b ∈ {0, 1}`` the bit read, ``b̂``, is 1 with probability::
+
+    P(b̂ = 1 | b) = p01 (b = 0),  1 − p10 (b = 1)   =   p01 + c b,    c = 1 − p01 − p10
+
+Averaging over ``b``, which is 1 with probability ``⟨n_i⟩``::
+
+    ⟨n̂_i⟩ = p01 + c ⟨n_i⟩
+
+For ``i ≠ j`` the two bits are read independently given the bitstring
+``b``, so ``E[b̂_i b̂_j | b] = (p01 + c b_i)(p01 + c b_j)
+= p01² + p01 c (b_i + b_j) + c² b_i b_j``, and averaging over ``b``::
+
+    ⟨n̂_i n̂_j⟩ = p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩
+
+These are the exact features with the option, computed from the exact
+``⟨n_i⟩`` and ``⟨n_i n_j⟩`` term by term as written.  The constant terms
+``p01`` and ``p01²`` take ``Tr ρ = Σ_k ρ_kk = 1``; the solver keeps the trace
+to rounding (about ``1e-14`` with dephasing), and the features differ from a
+sum over ``ρ_kk`` by that much.  Only ``[0, 1]`` is required of each
+probability, as for the layers, so ``c`` may be 0 (the bits read carry no
+information about the state) or negative.
+
+**With shots** the ``S`` bitstrings are drawn as above, and then each bit of
+each shot is flipped as a device would misread it: a 0 reads 1 with
+probability ``p01`` and a 1 reads 0 with ``p10``, independently.  The shots
+are independent, so each bit read is 1 with probability ``⟨n̂_i⟩`` (each
+product ``b̂_i b̂_j`` with ``⟨n̂_i n̂_j⟩``), and ``F̂_i`` is unbiased for the
+exact feature with the error, ``F′ = ⟨n̂_i⟩``, with standard error
+``√(F′(1 − F′)/S)``: the spread of a device with this error, not the spread
+without it scaled by ``c``.
+
+The flips are drawn from the same generator, **after every bitstring of the
+call**: first the bitstrings of all samples, sample by sample as without the
+error, so they are the same as without it, then, sample by sample in order,
+one ``torch.rand((S, N), dtype=float64)`` of uniforms ``u``.  Row ``s`` of it
+belongs to the ``s``-th shot with the shots sorted by basis index (they are
+independent and identically distributed, so their order does not matter),
+column ``i`` to atom ``i``; a 0 reads 1 when ``u < p01``, a 1 reads 0 when
+``u < p10``.  ``readout_error=(0, 0)`` draws no flips and is the map without
+the option bit for bit, on both paths and including the generator's state.
+
 Not an encoding layer
 ---------------------
 :class:`RydbergFeatureMap` is a preprocessing step, like
@@ -102,8 +158,9 @@ Not an encoding layer
 It is not an ``nn.Module``, has no PennyLane circuit (``qlayer``) and no
 trainable weights, so the encoding-layer contract
 (``hqnn_forge.encoding.EncodingLayer``) does not apply to it, and neither do
-the gate-based noise options (``noise_level``, ``apply_depolarizing_noise``):
-its noise is the dephasing rate γ.  Nothing is differentiated; the results
+the gate-based noise options (``noise_level``, ``apply_depolarizing_noise``,
+``apply_readout_error``): its noise is the dephasing rate γ and its own
+``readout_error``.  Nothing is differentiated; the results
 carry no gradient.
 """
 
@@ -116,7 +173,12 @@ from typing import Any
 
 import torch
 
-from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _finite_tensor, rydberg_hamiltonian
+from hqnn_forge.rydberg.hamiltonian import (
+    MAX_ATOMS,
+    _bits,
+    _finite_tensor,
+    rydberg_hamiltonian,
+)
 from hqnn_forge.rydberg.lindblad import (
     _non_negative_number,
     _populations_to_features,
@@ -363,6 +425,17 @@ class RydbergFeatureMap:
     correlations:
         Append the pair correlations ``⟨n_i n_j⟩``, ``i < j``, in the order
         ``(0,1), (0,2), …, (N−2,N−1)``.
+    readout_error:
+        ``None`` (default): every atom is read without error.  A pair
+        ``(p01, p10)`` of probabilities in ``[0, 1]``: ``p01`` = P(read ``r``
+        | atom in ``|g⟩``), ``p10`` = P(read ``g`` | atom in ``|r⟩``), named,
+        ordered and validated as the ``readout_error`` of the encoding layers
+        (:func:`hqnn_forge.noise.validate_readout_error`), independently for
+        every atom.  The exact features become ``p01 + c ⟨n_i⟩`` and
+        ``p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩`` with
+        ``c = 1 − p01 − p10``; with ``shots`` each bit of each shot is
+        flipped (see *Detection error* in the module docstring).  ``(0, 0)``
+        gives the features without it, bit for bit.
 
     Attributes
     ----------
@@ -373,8 +446,9 @@ class RydbergFeatureMap:
         ``correlations=True``.
     evolution_time : float
         The pulse duration ``T`` in µs, ``encoding.t``.
-    register, encoding, c6, gamma, n_steps, interactions, correlations
-        The settings, read-only.
+    register, encoding, c6, gamma, n_steps, interactions, correlations, readout_error
+        The settings, read-only; ``readout_error`` as a tuple of two
+        ``float`` or ``None``.
 
     Raises
     ------
@@ -388,8 +462,9 @@ class RydbergFeatureMap:
         :data:`~hqnn_forge.rydberg.MAX_ATOMS` atoms or another number of
         atoms than ``encoding.n_features``; if ``c6`` is not a finite number
         or ``gamma`` not a finite number ``>= 0``; if ``n_steps`` is not an
-        integer ``>= 1``, or is missing with ``gamma > 0``; or if positions
-        or an encoding config are refused by
+        integer ``>= 1``, or is missing with ``gamma > 0``; if
+        ``readout_error`` is neither ``None`` nor a pair of numbers in
+        ``[0, 1]``; or if positions or an encoding config are refused by
         :class:`~hqnn_forge.rydberg.AtomRegister` or :class:`PulseEncoding`.
 
     Examples
@@ -434,7 +509,12 @@ class RydbergFeatureMap:
         n_steps: int | None = None,
         interactions: bool = True,
         correlations: bool = False,
+        readout_error: tuple[float, float] | None = None,
     ) -> None:
+        # Imported here: hqnn_forge.noise imports PennyLane, which the rest of
+        # hqnn_forge.rydberg does not need.
+        from hqnn_forge.noise import validate_readout_error
+
         if not isinstance(register, AtomRegister):
             register = AtomRegister(register)
         if isinstance(encoding, Mapping):
@@ -467,6 +547,7 @@ class RydbergFeatureMap:
             )
         self._interactions = _flag(interactions, "interactions")
         self._correlations = _flag(correlations, "correlations")
+        self._readout_error = validate_readout_error(readout_error)
 
     @property
     def register(self) -> AtomRegister:
@@ -504,6 +585,11 @@ class RydbergFeatureMap:
         return self._correlations
 
     @property
+    def readout_error(self) -> tuple[float, float] | None:
+        """The detection error ``(p01, p10)``, or ``None`` for an error-free readout."""
+        return self._readout_error
+
+    @property
     def n_features_in(self) -> int:
         """Width of the inputs: the number of atoms."""
         return self._register.n_atoms
@@ -536,19 +622,48 @@ class RydbergFeatureMap:
         )
         return evolve(hamiltonian, self._encoding.t, gamma=self._gamma, n_steps=self._n_steps)
 
-    @torch.no_grad()
-    def _sample(self, rho: torch.Tensor, shots: int, generator: torch.Generator) -> torch.Tensor:
-        """
-        The features of one chunk estimated from ``shots`` bitstrings per sample.
+    def _active_readout_error(self) -> tuple[float, float] | None:
+        """``(p01, p10)``, or ``None`` when no bit is ever misread (also for ``(0, 0)``)."""
+        if self._readout_error is None or self._readout_error == (0.0, 0.0):
+            return None
+        return self._readout_error
 
-        The outcome probabilities are the diagonal of ρ.  ``counts[k]`` is how
-        often basis state ``k`` was drawn.  The integer counts of each feature
-        are summed first, ``counts @ bits`` and the same for the pairs, converted
-        to ``float64``, and divided by ``shots`` once without building a dense
-        diagonal state: the estimates are the correctly rounded value of
-        ``count / S``, the same bit for bit in every chunk as long as the drawn
-        bitstrings are the same.  The samples are drawn one at a time, in order,
-        so the generator's stream does not depend on how they are chunked.
+    def _read_exact(self, features: torch.Tensor, p01: float, p10: float) -> torch.Tensor:
+        """
+        Exact features read through the detection error, from the exact ones.
+
+        With ``c = 1 − p01 − p10``, term by term as derived under *Detection
+        error* in the module docstring::
+
+            ⟨n̂_i⟩     = p01 + c ⟨n_i⟩
+            ⟨n̂_i n̂_j⟩ = p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩
+
+        ``features`` holds the atoms in its first ``N`` columns and, with
+        ``correlations``, the pairs after them in the order
+        ``(0,1), (0,2), …, (N−2,N−1)`` of :func:`readout`.
+        """
+        n = self._register.n_atoms
+        c = 1.0 - p01 - p10
+        singles = features[:, :n]
+        read = p01 + c * singles
+        if not self._correlations:
+            return read
+        # The same row-major upper triangle as _populations_to_features.
+        first, second = torch.triu_indices(n, n, offset=1, device=features.device)
+        pairs = features[:, n:]
+        read_pairs = p01**2 + p01 * c * (singles[:, first] + singles[:, second]) + c**2 * pairs
+        return torch.cat([read, read_pairs], dim=1)
+
+    @torch.no_grad()
+    def _counts(self, rho: torch.Tensor, shots: int, generator: torch.Generator) -> torch.Tensor:
+        """
+        How often each basis state was drawn in ``shots`` bitstrings per sample.
+
+        The outcome probabilities are the diagonal of ρ; ``counts[b, k]`` is
+        how often basis state ``k`` was drawn for sample ``b`` of the chunk,
+        as ``int64`` on the generator's device.  The samples are drawn one at
+        a time, in order, so the generator's stream does not depend on how
+        they are chunked.
         """
         # A population can come out of the splitting as −1e-17; a probability cannot.
         populations = rho.diagonal(dim1=-2, dim2=-1).real.clamp(min=0.0).to(generator.device)
@@ -558,9 +673,54 @@ class RydbergFeatureMap:
                 populations[sample], shots, replacement=True, generator=generator
             )
             counts[sample] = torch.bincount(outcomes, minlength=populations.shape[1])
+        return counts
+
+    def _estimates(self, counts: torch.Tensor, shots: int) -> torch.Tensor:
+        """
+        The features estimated from the counts of the basis states.
+
+        The integer counts of each feature are summed first, ``counts @ bits``
+        and the same for the pairs, converted to ``float64``, and divided by
+        ``shots`` once without building a dense diagonal state: the estimates
+        are the correctly rounded value of ``count / S``, the same bit for bit
+        in every chunk as long as the drawn bitstrings are the same.
+        """
         features = _populations_to_features(counts.to(torch.float64), pairs=self._correlations)
-        estimates = features / shots
-        return estimates.to(rho.device)
+        return features / shots
+
+    @torch.no_grad()
+    def _flip(
+        self,
+        counts: torch.Tensor,
+        shots: int,
+        generator: torch.Generator,
+        p01: float,
+        p10: float,
+    ) -> torch.Tensor:
+        """
+        The counts of the bitstrings read, each bit of each shot flipped.
+
+        For each sample in order: its ``S`` shots as basis indices in
+        ascending order, their bits ``b_i(k)`` (atom 0 the most significant),
+        one ``torch.rand((S, N))`` from ``generator``, row ``s`` for shot
+        ``s`` and column ``i`` for atom ``i``; a 0 reads 1 when ``u < p01``
+        and a 1 reads 0 when ``u < p10`` (it stays 1 when ``u >= p10``).
+        The bits read are put back together into a basis index with the same
+        ordering and counted.
+        """
+        n = self._register.n_atoms
+        device = counts.device
+        bits = _bits(n, device).bool()
+        weights = 2 ** torch.arange(n - 1, -1, -1, device=device)
+        states = torch.arange(2**n, device=device)
+        read_counts = torch.empty_like(counts)
+        for sample in range(counts.shape[0]):
+            true_bits = bits[torch.repeat_interleave(states, counts[sample])]
+            u = torch.rand((shots, n), generator=generator, dtype=torch.float64, device=device)
+            read = torch.where(true_bits, u >= p10, u < p01)
+            index = (read.to(torch.int64) * weights).sum(dim=1)
+            read_counts[sample] = torch.bincount(index, minlength=2**n)
+        return read_counts
 
     @torch.no_grad()
     def transform(
@@ -585,13 +745,16 @@ class RydbergFeatureMap:
             sampled from the diagonal of that sample's ρ, as the mean of
             ``b_i`` (and of ``b_i b_j``).  The estimate is unbiased with
             standard error ``√(F(1 − F)/S) ≤ 1/(2√S)`` for a feature of
-            value ``F``.  There is no default number of shots.
+            value ``F``.  There is no default number of shots.  With a
+            ``readout_error`` each bit is flipped as read by a device, and
+            ``F`` is the exact feature with the error.
         generator:
-            The ``torch.Generator`` the bitstrings are drawn with.  Required
-            when ``shots`` is given, so that every estimate comes from a
-            stated source of randomness; it is advanced by the call, and a
-            generator with the same seed repeats the estimates.  Not used
-            with ``shots=None``.
+            The ``torch.Generator`` the bitstrings are drawn with, and with
+            a ``readout_error`` the flips, after every bitstring of the call.
+            Required when ``shots`` is given, so that every estimate comes
+            from a stated source of randomness; it is advanced by the call,
+            and a generator with the same seed repeats the estimates.  Not
+            used with ``shots=None``.
         chunk_size:
             Samples evolved at a time, an integer ``>= 1``.  Default: as
             many as hold ``2^20`` matrix entries, ``max(1, 2^20 / 4^N)``.
@@ -623,6 +786,9 @@ class RydbergFeatureMap:
           memory is that of one chunk: the solver holds a handful of
           ``complex128`` tensors of ``chunk_size · 4^N`` entries
           (``16 · 4^N`` bytes per sample each; 16 MiB each at the default).
+          With ``shots`` and a ``readout_error`` the counts of every sample,
+          ``n_samples · 2^N`` ``int64``, are also held until all bitstrings
+          are drawn, since the flips are drawn after them.
         * **Chunked and unchunked results are equal to rounding, not bit for
           bit.**  Every sample is evolved with the same ``T``, γ and
           ``n_steps`` whatever the chunk, and bitstrings are drawn sample by
@@ -659,17 +825,33 @@ class RydbergFeatureMap:
         delta = self._encoding.detunings(X)
         size = self._chunk_size(chunk_size)
         n_samples = delta.shape[0]
+        error = self._active_readout_error()
         features = torch.empty(
             n_samples, self.n_features_out, dtype=torch.float64, device=delta.device
         )
+        if shots is None or generator is None:
+            for start in range(0, n_samples, size):
+                chunk = readout(
+                    self._evolve(delta[start : start + size]), pairs=self._correlations
+                )
+                features[start : start + size] = (
+                    chunk if error is None else self._read_exact(chunk, *error)
+                )
+            return features
+        if error is None:
+            for start in range(0, n_samples, size):
+                counts = self._counts(self._evolve(delta[start : start + size]), shots, generator)
+                features[start : start + size] = self._estimates(counts, shots).to(delta.device)
+            return features
+        # The flips are drawn after every bitstring of the call, so the
+        # bitstrings are those drawn without the error (see the module docstring).
+        dim = 2**self._register.n_atoms
+        all_counts = torch.empty(n_samples, dim, dtype=torch.int64, device=generator.device)
         for start in range(0, n_samples, size):
             rho = self._evolve(delta[start : start + size])
-            if shots is None or generator is None:
-                chunk = readout(rho, pairs=self._correlations)
-            else:
-                chunk = self._sample(rho, shots, generator)
-            features[start : start + size] = chunk
-        return features
+            all_counts[start : start + size] = self._counts(rho, shots, generator)
+        read_counts = self._flip(all_counts, shots, generator, *error)
+        return self._estimates(read_counts, shots).to(delta.device)
 
     @torch.no_grad()
     def states(self, X: Any, *, chunk_size: int | None = None) -> torch.Tensor:
@@ -732,6 +914,8 @@ class RydbergFeatureMap:
         ``c6``, ``gamma``, ``n_steps``, ``interactions``, ``correlations``
             As passed; ``n_steps`` is the solver's step count, ``None`` if
             none was given (``gamma = 0``).
+        ``readout_error``
+            ``[p01, p10]`` as a list of two floats, or ``None``.
 
         The number of shots and the chunk size are arguments of
         :meth:`transform`, not settings of the map, and are not recorded.
@@ -744,11 +928,13 @@ class RydbergFeatureMap:
             "n_steps": self._n_steps,
             "interactions": self._interactions,
             "correlations": self._correlations,
+            "readout_error": None if self._readout_error is None else list(self._readout_error),
         }
 
     def __repr__(self) -> str:
         return (
             f"RydbergFeatureMap(n_atoms={self._register.n_atoms}, encoding={self._encoding!r}, "
             f"c6={self._c6!r}, gamma={self._gamma!r}, n_steps={self._n_steps!r}, "
-            f"interactions={self._interactions}, correlations={self._correlations})"
+            f"interactions={self._interactions}, correlations={self._correlations}, "
+            f"readout_error={self._readout_error!r})"
         )

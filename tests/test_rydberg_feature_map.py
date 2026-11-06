@@ -1002,6 +1002,7 @@ class TestConfig:
             "n_steps": 30,
             "interactions": False,
             "correlations": True,
+            "readout_error": None,
         }
 
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.7 * OMEGA, 35)])
@@ -1048,6 +1049,7 @@ class TestConfig:
             {"gamma": OMEGA},
             {"n_steps": 3},
             {"interactions": False},
+            {"readout_error": [0.01, 0.08]},
         ]
         for change in changes:
             changed = RydbergFeatureMap(**{**base, **change}).transform(x)
@@ -1207,3 +1209,320 @@ class TestValidation:
                 call(torch.zeros(shape))
         with pytest.raises(ValueError, match="X must be finite"):
             call([[0.0, math.nan, 0.0]])
+
+
+def confusion_reference(
+    feature_map: RydbergFeatureMap, x: torch.Tensor, p01: float, p10: float
+) -> torch.Tensor:
+    """
+    The features read through the detection error, by brute force over bitstrings.
+
+    From the exact diagonal of ``ρ`` (``feature_map.states``): the probability
+    of reading ``m`` when the atoms are in ``k`` is the product over the atoms
+    of the confusion matrix ``[[1 − p01, p01], [p10, 1 − p10]]`` (row the true
+    bit, column the read bit), and each read feature is
+    ``Σ_k Σ_m ρ_kk P(m | k) b_i(m)`` (and ``b_i(m) b_j(m)``), with the bit
+    ``b_i(k) = (k >> (N − 1 − i)) & 1`` of the model page.  No formula of the
+    feature map is used.
+    """
+    confusion = [[1.0 - p01, p01], [p10, 1.0 - p10]]
+    n = feature_map.n_features_in
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)] if feature_map.correlations else []
+
+    def bit(k: int, i: int) -> int:
+        return (k >> (n - 1 - i)) & 1
+
+    rows = []
+    for rho in feature_map.states(x):
+        populations = rho.diagonal().real.tolist()
+        read = [0.0] * 2**n
+        for k, population in enumerate(populations):
+            for m in range(2**n):
+                probability = 1.0
+                for i in range(n):
+                    probability *= confusion[bit(k, i)][bit(m, i)]
+                read[m] += population * probability
+        singles = [sum(read[m] for m in range(2**n) if bit(m, i)) for i in range(n)]
+        both = [sum(read[m] for m in range(2**n) if bit(m, i) and bit(m, j)) for i, j in pairs]
+        rows.append(singles + both)
+    return torch.tensor(rows, dtype=F64)
+
+
+def flipped_shots_reference(
+    feature_map: RydbergFeatureMap,
+    x: torch.Tensor,
+    shots: int,
+    seed: int,
+    readout_error: tuple[float, float] | None,
+) -> torch.Tensor:
+    """
+    Shot estimates drawn by hand in the order the feature map documents.
+
+    First the bitstrings of every sample, in order, as ``torch.multinomial``
+    over the diagonal of ρ; then, sample by sample, one ``torch.rand((S, N))``
+    from the same generator, row ``s`` the ``s``-th shot in ascending basis
+    index, column ``i`` atom ``i``: a 0 reads 1 when ``u < p01``, a 1 reads 0
+    when ``u < p10``.  The features are counted from the read bits directly.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    n = feature_map.n_features_in
+    populations = feature_map.states(x).diagonal(dim1=-2, dim2=-1).real.clamp(min=0.0)
+    drawn = [
+        torch.multinomial(row, shots, replacement=True, generator=generator) for row in populations
+    ]
+    rows = []
+    for outcomes in drawn:
+        true_index = outcomes.sort().values
+        bits = torch.stack([(true_index >> (n - 1 - i)) & 1 for i in range(n)], dim=1)
+        if readout_error is None:
+            read = bits.bool()
+        else:
+            p01, p10 = readout_error
+            u = torch.rand((shots, n), generator=generator, dtype=F64)
+            read = torch.where(bits == 1, u >= p10, u < p01)
+        counts = [int(read[:, i].sum()) for i in range(n)]
+        if feature_map.correlations:
+            counts += [
+                int((read[:, i] & read[:, j]).sum()) for i in range(n) for j in range(i + 1, n)
+            ]
+        rows.append([count / shots for count in counts])
+    return torch.tensor(rows, dtype=F64)
+
+
+class TestReadoutError:
+    """
+    ``readout_error=(p01, p10)``: each atom read through a confusion matrix (#730).
+
+    ``p01`` = P(read 1 | atom in ``|g⟩``), ``p10`` = P(read 0 | atom in ``|r⟩``).
+    The exact features are checked against closed forms and against a brute
+    force over bitstrings; the shot estimates against those exact features,
+    and against draws made by hand in the documented order.
+    """
+
+    #: Aquila's detection error, an asymmetric pair, and one with ``p01 + p10 > 1``.
+    ERRORS = [(0.01, 0.08), (0.2, 0.05), (0.7, 0.6)]
+
+    def build(
+        self,
+        n: int = 3,
+        readout_error: Any = None,
+        *,
+        gamma: float = 0.0,
+        correlations: bool = True,
+    ) -> RydbergFeatureMap:
+        return RydbergFeatureMap(
+            chain(n),
+            PulseEncoding(n, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=gamma,
+            n_steps=None if gamma == 0 else 20,
+            correlations=correlations,
+            readout_error=readout_error,
+        )
+
+    @pytest.mark.parametrize(("p01", "p10"), ERRORS)
+    def test_one_resonant_atom_after_a_pi_pulse_reads_1_minus_p10(
+        self, p01: float, p10: float
+    ) -> None:
+        """``Δ ≈ 0`` (``x = −40``), ``ΩT = π``: ``⟨n⟩ = 1``, so the feature is ``1 − p10``."""
+        feature_map = RydbergFeatureMap(
+            AtomRegister([[0.0, 0.0]]),
+            PulseEncoding(1, omega=OMEGA),
+            c6=DEFAULT_C6,
+            gamma=0.0,
+            readout_error=(p01, p10),
+        )
+        assert feature_map.transform([[-40.0]]).item() == pytest.approx(1 - p10, abs=1e-12)
+
+    @pytest.mark.parametrize(("p01", "p10"), ERRORS)
+    def test_one_resonant_atom_after_a_2pi_pulse_reads_p01(self, p01: float, p10: float) -> None:
+        """``Δ ≈ 0``, ``ΩT = 2π``: ``⟨n⟩ = 0``, so the feature is ``p01``."""
+        feature_map = RydbergFeatureMap(
+            AtomRegister([[0.0, 0.0]]),
+            PulseEncoding(1, omega=OMEGA, t=2 * math.pi / OMEGA),
+            c6=DEFAULT_C6,
+            gamma=0.0,
+            readout_error=(p01, p10),
+        )
+        assert feature_map.transform([[-40.0]]).item() == pytest.approx(p01, abs=1e-12)
+
+    @pytest.mark.parametrize(("p01", "p10"), ERRORS)
+    @pytest.mark.parametrize("n", [2, 3])
+    @pytest.mark.parametrize("gamma", [0.0, 0.5 * OMEGA])
+    def test_exact_features_equal_the_brute_force_over_read_bitstrings(
+        self, p01: float, p10: float, n: int, gamma: float
+    ) -> None:
+        """
+        Atoms and pairs, in the documented order, against the confusion matrix
+        summed over the ``2^N`` true and ``2^N`` read bitstrings.
+
+        The brute force weights every term by ``ρ_kk``, the formulas take
+        ``Σ_k ρ_kk = 1``: they differ by at most ``|1 − Tr ρ|`` (times ``p01``
+        or ``p01²``), which the splitting leaves at about ``2e-14``.
+        """
+        feature_map = self.build(n, (p01, p10), gamma=gamma)
+        x = inputs(5, n, seed=20)
+        expected = confusion_reference(feature_map, x, p01, p10)
+        trace = feature_map.states(x).diagonal(dim1=-2, dim2=-1).real.sum(dim=-1)
+        tolerance = 1e-14 + (1 - trace).abs().max().item()
+        assert torch.allclose(feature_map.transform(x), expected, rtol=0, atol=tolerance)
+
+    @pytest.mark.parametrize(("p01", "p10"), ERRORS)
+    def test_exact_features_are_the_formulas_of_the_issue(self, p01: float, p10: float) -> None:
+        """``p01 + c ⟨n_i⟩`` and ``p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩``."""
+        x = inputs(4, 3, seed=21)
+        clean = self.build(3).transform(x)
+        noisy = self.build(3, (p01, p10)).transform(x)
+        c = 1 - p01 - p10
+        assert torch.allclose(noisy[:, :3], p01 + c * clean[:, :3], rtol=0, atol=1e-15)
+        for column, (i, j) in enumerate([(0, 1), (0, 2), (1, 2)], start=3):
+            expected = p01**2 + p01 * c * (clean[:, i] + clean[:, j]) + c**2 * clean[:, column]
+            assert torch.allclose(noisy[:, column], expected, rtol=0, atol=1e-15)
+
+    @pytest.mark.parametrize("readout_error", [(0.2, 0.05), (0.05, 0.3)])
+    def test_the_mean_of_shot_estimates_is_the_exact_noisy_feature(
+        self, readout_error: tuple[float, float]
+    ) -> None:
+        """
+        400 estimates of 25 shots each average to the exact noisy features
+        within 6 standard errors ``√(F′(1 − F′)/(400 · 25))``, atoms and pairs.
+
+        Every read bit is a Bernoulli variable of mean ``F′``, the exact noisy
+        feature, so this holds for an unbiased estimator; the clean features
+        lie further off than that for these errors.
+        """
+        feature_map = self.build(3, readout_error)
+        x = inputs(4, 3, seed=22)
+        exact = feature_map.transform(x)
+        generator = torch.Generator().manual_seed(7)
+        repeats, shots = 400, 25
+        mean = torch.stack(
+            [feature_map.transform(x, shots=shots, generator=generator) for _ in range(repeats)]
+        ).mean(dim=0)
+        standard_error = (exact * (1 - exact) / (repeats * shots)).sqrt()
+        assert bool(((mean - exact).abs() <= 6 * standard_error).all())
+        clean = self.build(3).transform(x)
+        assert bool(((mean - clean).abs() > 6 * standard_error).any())
+
+    @pytest.mark.parametrize("shots", [50, 800])
+    def test_the_error_of_flipped_shots_has_the_binomial_variance_of_the_noisy_feature(
+        self, shots: int
+    ) -> None:
+        """
+        ``Σ (F̂ − F′)² / Σ F′(1 − F′)/S`` is 1 on average: the read bits of
+        each shot are flipped, so the spread is that of a device with this
+        error, not the clean spread scaled by ``1 − p01 − p10`` (as #486
+        describes for the layers).  The band is the one of
+        ``TestShots.test_the_error_has_the_binomial_variance``.
+        """
+        feature_map = self.build(4, (0.2, 0.25))
+        x = inputs(768, 4, seed=23)
+        exact = feature_map.transform(x)
+        estimates = feature_map.transform(
+            x, shots=shots, generator=torch.Generator().manual_seed(shots)
+        )
+        ratio = ((estimates - exact) ** 2).sum() / (exact * (1 - exact) / shots).sum()
+        assert ratio.item() == pytest.approx(1.0, abs=0.15)
+
+    def test_the_same_seed_repeats_the_estimates_and_another_does_not(self) -> None:
+        feature_map = self.build(3, (0.01, 0.08))
+        x = inputs(6, 3, seed=24)
+        first = feature_map.transform(x, shots=200, generator=torch.Generator().manual_seed(5))
+        again = feature_map.transform(x, shots=200, generator=torch.Generator().manual_seed(5))
+        other = feature_map.transform(x, shots=200, generator=torch.Generator().manual_seed(6))
+        assert torch.equal(first, again)
+        assert not torch.equal(first, other)
+
+    @pytest.mark.parametrize("readout_error", [(0.01, 0.08), (0.7, 0.6), None])
+    @pytest.mark.parametrize("chunk_size", [None, 1, 3])
+    def test_shots_are_drawn_in_the_documented_order(
+        self, readout_error: tuple[float, float] | None, chunk_size: int | None
+    ) -> None:
+        """
+        Bit for bit the hand-drawn estimates of :func:`flipped_shots_reference`:
+        every bitstring first, then the flips sample by sample, whatever the
+        chunking.
+        """
+        feature_map = self.build(3, readout_error)
+        x = inputs(5, 3, seed=25)
+        estimates = feature_map.transform(
+            x, shots=60, generator=torch.Generator().manual_seed(11), chunk_size=chunk_size
+        )
+        expected = flipped_shots_reference(feature_map, x, 60, 11, readout_error)
+        assert torch.equal(estimates, expected)
+
+    @pytest.mark.parametrize(("readout_error", "direction"), [((0.3, 0.0), 1), ((0.0, 0.3), -1)])
+    def test_the_error_flips_the_bitstrings_drawn_without_it(
+        self, readout_error: tuple[float, float], direction: int
+    ) -> None:
+        """
+        From one seed, an error that only turns 0 into 1 lowers no count (and
+        the reverse raises none): the bitstrings are those drawn without the
+        error, and only flipped.  Over 2 chunks of 3 samples.
+        """
+        x = inputs(6, 3, seed=26)
+        clean = self.build(3).transform(
+            x, shots=100, generator=torch.Generator().manual_seed(3), chunk_size=3
+        )
+        noisy = self.build(3, readout_error).transform(
+            x, shots=100, generator=torch.Generator().manual_seed(3), chunk_size=3
+        )
+        assert bool((direction * (noisy - clean) >= 0).all())
+        assert bool((noisy != clean).any())
+
+    @pytest.mark.parametrize("readout_error", [None, (0, 0), (0.0, 0.0), [0, 0.0]])
+    @pytest.mark.parametrize("correlations", [False, True])
+    def test_none_and_no_error_give_the_features_without_it_bit_for_bit(
+        self, readout_error: Any, correlations: bool
+    ) -> None:
+        """
+        Exact: ``readout`` of the states.  Shots: the hand-drawn estimates
+        without flips, and the generator is left where the map without the
+        option leaves it (no flips are drawn).
+        """
+        feature_map = self.build(3, readout_error, correlations=correlations)
+        without = self.build(3, correlations=correlations)
+        x = inputs(5, 3, seed=27)
+        assert torch.equal(
+            feature_map.transform(x), readout(without.states(x), pairs=correlations)
+        )
+        generator = torch.Generator().manual_seed(4)
+        estimates = feature_map.transform(x, shots=70, generator=generator)
+        reference_generator = torch.Generator().manual_seed(4)
+        assert torch.equal(
+            estimates, without.transform(x, shots=70, generator=reference_generator)
+        )
+        assert torch.equal(estimates, flipped_shots_reference(without, x, 70, 4, None))
+        assert torch.equal(generator.get_state(), reference_generator.get_state())
+
+    def test_config_records_the_pair_and_rebuilds_the_map_through_json(self) -> None:
+        feature_map = self.build(3, np.array([0.01, 0.08]), gamma=0.5 * OMEGA)
+        assert feature_map.readout_error == (0.01, 0.08)
+        assert feature_map.readout_error is not None
+        assert all(type(p) is float for p in feature_map.readout_error)
+        config = feature_map.get_config()
+        assert config["readout_error"] == [0.01, 0.08]
+        assert json.loads(json.dumps(config)) == config
+        rebuilt = RydbergFeatureMap(**json.loads(json.dumps(config)))
+        assert rebuilt.get_config() == config
+        x = inputs(4, 3, seed=28)
+        assert torch.equal(rebuilt.transform(x), feature_map.transform(x))
+        assert "readout_error=(0.01, 0.08)" in repr(feature_map)
+        assert self.build(3).readout_error is None
+
+    @pytest.mark.parametrize(
+        "readout_error",
+        [
+            (1.5, 0.0),
+            (0.0, -0.1),
+            (math.nan, 0.0),
+            (0.1,),
+            (0.1, 0.2, 0.3),
+            0.1,
+            "ab",
+            (True, 0.0),
+        ],
+    )
+    def test_rejects_a_bad_pair_naming_the_argument(self, readout_error: Any) -> None:
+        with pytest.raises(ValueError, match="readout_error"):
+            self.build(2, readout_error)

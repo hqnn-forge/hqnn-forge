@@ -436,6 +436,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `QubitDensityMatrix` and the `3K` pulse values; `encoded_states` and
   `overlap_kernel_matrix`, which need a pure state, refuse the layer with a message naming the
   reason (#711, #722)
+- `readout_error=(p01, p10)` on `RydbergFeatureMap`: a detection error that reads each atom
+  through the confusion matrix `[[1 − p01, p01], [p10, 1 − p10]]`, named, ordered and
+  validated as on the encoding layers and recorded by `get_config()`. The exact features
+  become `p01 + c ⟨n_i⟩` and `p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩` with
+  `c = 1 − p01 − p10`; with `shots` each bit of each shot is flipped, from the same generator
+  after all of the call's bitstrings, which therefore stay those drawn without the error.
+  `None` and `(0, 0)` give the previous features bit for bit (#730)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
