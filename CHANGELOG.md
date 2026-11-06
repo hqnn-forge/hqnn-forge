@@ -449,7 +449,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   features are read from the mixture of the `K` evolved states, i.e. the mean of the
   per-realisation features, and shots are drawn from its diagonal; a `readout_error` acts after
   the mixture. Without interactions the features are those without jitter, bit for bit. All
-  three are recorded by `get_config()` (#731)
+  three are recorded by `get_config()` (#731, #735)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
