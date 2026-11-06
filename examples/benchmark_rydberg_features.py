@@ -265,7 +265,18 @@ Data
     2.6 GiB at 13.
 ``iranian-churn``, ``taiwanese-bankruptcy``, ``cervical-cancer-risk``
     The UCI loaders of :mod:`hqnn_forge.data`, read from ``--data-path``
-    (``--download`` fetches a missing file).
+    (``--download`` fetches a missing file).  The Iranian Churn file repeats
+    300 earlier rows exactly (:func:`~hqnn_forge.data.load_iranian_churn`).
+    By default they are kept, 3,150 rows, so one customer record can sit in
+    both the training and the test rows of a fold, which inflates the
+    absolute scores.  Paired differences between arms are less affected,
+    since every arm is scored on the same folds.  ``--drop-duplicates``
+    (``settings.drop_duplicates``) keeps the first of each, 2,850 rows, and
+    the line's ``data_sha256`` and ``n_samples`` change with it.  The default
+    stays as it was, so lines written before the option existed, such as
+    those of ``docs/results/rydberg-features-benchmark.md``, compare with
+    default runs, not with runs with the option.  The other datasets have no
+    such option, and it leaves them unchanged.
 
 What a line records
 -------------------
@@ -533,6 +544,10 @@ class Settings:
         values are held to the bounds above.
     n_samples:
         Samples of the positive control.
+    drop_duplicates:
+        Load Iranian Churn without the 300 rows that repeat an earlier one
+        (``Data`` in the module docstring).  No effect on the other
+        datasets.  Default ``False``, the file as published.
     random_state:
         Root seed of every split, draw, initialisation and batch order.
     max_separation_rows:
@@ -570,6 +585,7 @@ class Settings:
         default_factory=lambda: {"lr": (0.003, 0.01, 0.03), "batch_size": (32, 128)}
     )
     n_samples: int = 600
+    drop_duplicates: bool = False
     random_state: int = 0
     max_separation_rows: int | None = 2000
     separation_seed: int = 0
@@ -855,7 +871,8 @@ def load_dataset(
 
     ``data_seed`` is the seed the positive control was drawn with, derived
     from ``settings.random_state``, and ``None`` for a UCI dataset, which is
-    read from ``path`` as its loader documents.
+    read from ``path`` as its loader documents.  ``settings.drop_duplicates``
+    reaches the Iranian Churn loader only.
     """
     if name == "positive-control":
         data_seed = run_seeds(settings.random_state)["data_seed"]
@@ -868,7 +885,12 @@ def load_dataset(
     }
     if name not in loaders:
         raise ValueError(f"unknown dataset {name!r}; choose from {list(DATASETS)}.")
-    data = loaders[name](path, download=download)
+    if name == "iranian-churn":
+        data = load_iranian_churn(
+            path, download=download, drop_duplicates=settings.drop_duplicates
+        )
+    else:
+        data = loaders[name](path, download=download)
     return data.X, data.y, None
 
 
@@ -2616,6 +2638,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-path", type=Path, default=None, help="file or directory (UCI)")
     parser.add_argument("--download", action="store_true", help="fetch a missing UCI file")
     parser.add_argument(
+        "--drop-duplicates",
+        action="store_true",
+        help=(
+            "load iranian-churn without the 300 rows that repeat an earlier one "
+            "(2,850 rows instead of 3,150); no effect on the other datasets"
+        ),
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=Path("rydberg_features_cache"),
@@ -2888,6 +2918,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             n_trials=args.trials,
             inner_folds=args.inner_folds,
             n_samples=args.samples,
+            drop_duplicates=args.drop_duplicates,
             random_state=args.seed,
             max_separation_rows=max_sep,
             separation_seed=args.separation_seed,
