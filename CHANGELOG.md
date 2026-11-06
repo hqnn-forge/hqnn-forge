@@ -424,6 +424,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AnalogRydbergLayer.density_matrices` returns the final state. With `gamma > 0` there is no
   gate between segments, so noise at position `"all"` (which would act once, as at `"end"`) is
   refused at construction and by `apply_depolarizing_noise` and `noise_sweep` (#699, #710)
+- `quantum_kernel_matrix`, `encoded_density_matrices` and `circuit_summary` on
+  `AnalogRydbergLayer` with `gamma > 0`: the kernel is the Hilbert–Schmidt kernel
+  `Tr[ρ(x) ρ(y)]` of the dephased states at every `noise_level` (purities on the diagonal,
+  `noise_position="all"` refused as on the layer), and the summary counts the one
+  `QubitDensityMatrix` and the `3K` pulse values; `encoded_states` and
+  `overlap_kernel_matrix`, which need a pure state, refuse the layer with a message naming the
+  reason (#711, #722)
 
 ### Changed
 - Devices whose registered constructor does not explicitly declare `seed` do not receive it;
