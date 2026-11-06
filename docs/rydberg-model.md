@@ -99,7 +99,8 @@ evolution starts with every atom in `|g⟩`.
 - **Atomic motion.** Atoms at 12 µK have random Doppler shifts of about 2π × 50 kHz (Bernien
   et al. 2017), and their positions vary from shot to shot (0.2 µm in Wurtz et al. 2023), which
   changes `V_ij`. See [Noise](#noise) for why the Doppler shift is not the dephasing modelled
-  here.
+  here. The position spread is left out by default and is an option of the geometry (see
+  [Geometry](#geometry)).
 - **Decay of the Rydberg state, preparation errors, pulse ramps** and inhomogeneity of Ω and
   Δ across the array. Detection errors are left out by default and are an option of the
   readout (see [Readout](#readout)).
@@ -136,6 +137,21 @@ limits `N` only from above.
 
 - **The non-interacting control is `V_ij = 0` exactly**, the Hamiltonian without its third
   term, not a large spacing. Everything else stays the same.
+- **Positions are exact by default.** As an option, `position_jitter=σ` (in µm) with
+  `jitter_samples=K` and `jitter_seed` displaces each Cartesian coordinate (`x` and `y`; the
+  register is planar) of each atom by an independent `N(0, σ²)`, in `K` realisations of the
+  register. Realisation `k` has its own `V_ij^(k)`, and `ρ_k(T)` evolves under it; the
+  features are read from the mixture `ρ̄ = (1/K) Σ_k ρ_k(T)`. Since the readout is linear in
+  the diagonal of ρ, the exact features are the mean of the `K` per-realisation features, and
+  shots are drawn from the diagonal of `ρ̄` (a realisation taken uniformly, then a bitstring).
+  A detection error acts after the mixture. To first order in `σ/a` a nearest-neighbour
+  coupling spreads by `6 √2 σ V / a`. The `K` displacements are drawn once, when the map is
+  built, from `jitter_seed`, and shared by every input sample, so the map stays a
+  deterministic function of its input and settings: `ρ̄` is a Monte Carlo estimate of the
+  average over positions with `K` common draws, not fresh positions per sample. Without
+  interactions the positions enter nothing, and the features equal those without jitter
+  exactly. Derived in `hqnn_forge.rydberg.feature_map`; see
+  [Hardware realism](#hardware-realism) for the device's `σ`.
 
 ## Encoding
 
@@ -312,8 +328,8 @@ Two idealisations are part of this choice:
 
 ## Closed-form limits
 
-Each convention above is fixed by a limit that the tests of #496 and #497 check; the last two
-rows are checked by the feature map (#499, #730).
+Each convention above is fixed by a limit that the tests of #496 and #497 check; the last three
+rows are checked by the feature map (#499, #730, #731).
 
 | Convention | Closed-form check |
 |---|---|
@@ -329,6 +345,7 @@ rows are checked by the feature map (#499, #730).
 | Strong dephasing | `Ω > 0`, `γ > 0`, any input and any `V`: `ρ → 1/2^N` and every `⟨n_i⟩ → ½` once `gt ≫ 1`, with `g` the smallest nonzero decay rate of the Liouvillian (one atom, `Δ = 0`: `γ/4` up to `γ = 4Ω`, `γ/4 − κ` above). `γt ≫ 1` alone is not sufficient. Reached at `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 | Detection error | One atom, `Δ ≈ 0`: the feature is `1 − p10` after `ΩT = π` and `p01` after `ΩT = 2π`; atoms and pairs equal the confusion matrix summed over the true and read bitstrings |
+| Position jitter | Interactions off: the features without jitter, exactly. Otherwise the mean of the maps on the `K` displaced registers; for small `σ` the drawn nearest-neighbour `V` spread by `6 √2 σ V / a` |
 
 ## Separation measures
 
@@ -407,7 +424,7 @@ meet.
 |---|---|---|
 | Hamiltonian, units, `C6` | Aquila's native Hamiltonian has this form, with the phase convention above and `C6` of `70S` | Supported |
 | Chain, spacings 4 to 15 µm | Sites at least 4 µm apart in a region 75 µm wide: a row of 6 atoms fits up to `a = 15 µm`, so `0.04 ≤ V/Ω ≤ 105` at the reference Ω | Supported |
-| Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); the same expression gives about 42 % at `a = 4.03 µm`. Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation; the spread of `V` grows as the spacing shrinks |
+| Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); the same expression gives about 42 % at `a = 4.03 µm`. Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation by default; the spread of `V` grows as the spacing shrinks. `position_jitter=0.2` with `jitter_samples` and `jitter_seed` models it (see [Geometry](#geometry)) |
 | Pulse bounds | `Ω ≤ 15.8 rad/µs`, `−125 ≤ Δ ≤ 125 rad/µs`, at most 4 µs: the reference `Ω = 12.57`, `Δ_max = 21.8 rad/µs` and `T = 0.25 µs` are inside | Supported |
 | Constant pulse | Ω may change by at most 250 rad/µs², so each edge of the pulse takes 0.05 µs of the 0.25 µs | Idealisation |
 | Local addressing: one detuning per atom | Ω and the phase are global. A local detuning `−Δ_local(t) · h_k n_k` with a static pattern `0 ≤ h_k ≤ 1` exists as an experimental capability, on request (AWS 2024); with the global detuning it reaches a one-signed range. Its magnitude limits and the resolution of `h_k` were not verified for this page | Idealisation |

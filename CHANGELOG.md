@@ -443,6 +443,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `c = 1 − p01 − p10`; with `shots` each bit of each shot is flipped, from the same generator
   after all of the call's bitstrings, which therefore stay those drawn without the error.
   `None` and `(0, 0)` give the previous features bit for bit (#730, #734)
+- `position_jitter=σ`, `jitter_samples=K` and `jitter_seed` on `RydbergFeatureMap`: shot-to-shot
+  position noise, each coordinate of each atom displaced by an independent `N(0, σ²)` µm in
+  `K` realisations drawn once, at construction, from the seed and shared by every sample. The
+  features are read from the mixture of the `K` evolved states, i.e. the mean of the
+  per-realisation features, and shots are drawn from its diagonal; a `readout_error` acts after
+  the mixture. Without interactions the features are those without jitter, bit for bit. All
+  three are recorded by `get_config()` (#731)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor

@@ -1644,7 +1644,7 @@ class TestPositionJitter:
     ) -> None:
         """Positions enter only through ``V_ij``: exact, states and shots, and the generator."""
         jittered = self.build(
-            3, 1.5, 4, gamma=gamma, interactions=False, correlations=correlations
+            3, 1.5, 3, gamma=gamma, interactions=False, correlations=correlations
         )
         plain = self.build(
             3, 0.0, None, None, gamma=gamma, interactions=False, correlations=correlations

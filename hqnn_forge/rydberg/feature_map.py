@@ -280,7 +280,7 @@ def _seed(value: Any, name: str) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, numbers.Integral)
-        or not 0 <= value < 2**64
+        or not 0 <= int(value) < 2**64
     ):
         raise ValueError(f"{name} must be an integer in [0, 2^64); got {value!r}.")
     return int(value)
