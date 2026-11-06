@@ -147,7 +147,8 @@ limits `N` only from above.
   A detection error acts after the mixture. To first order in `σ/a` a nearest-neighbour
   coupling spreads by `6 √2 σ V / a`. The `K` displacements are drawn once, when the map is
   built, from `jitter_seed`, and shared by every input sample, so the map stays a
-  deterministic function of its input and settings: `ρ̄` is a Monte Carlo estimate of the
+  deterministic function of its input and settings (the seed is therefore required with
+  `σ > 0`, as `K` is, and has no unseeded default): `ρ̄` is a Monte Carlo estimate of the
   average over positions with `K` common draws, not fresh positions per sample. Without
   interactions the positions enter nothing, and the features equal those without jitter
   exactly. Derived in `hqnn_forge.rydberg.feature_map`; see

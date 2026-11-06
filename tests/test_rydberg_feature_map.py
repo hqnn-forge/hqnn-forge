@@ -1738,6 +1738,35 @@ class TestPositionJitter:
         assert torch.equal(first, again)
         assert (first - other).abs().max().item() > 1e-4
 
+    @pytest.mark.parametrize("gamma", [0.0, 0.5 * OMEGA])
+    def test_the_config_alone_fixes_the_draws_whatever_torchs_global_seed(
+        self, gamma: float
+    ) -> None:
+        """
+        Two maps built from one config under different global seeds are equal.
+
+        The draws come from ``jitter_seed`` alone, which is why it is required
+        with ``σ > 0`` (#731 Decision): a cache keyed on ``get_config()``, like
+        the benchmark's, can then never hold one map's features under another's
+        settings.  Building the map leaves torch's global generator as it was.
+        """
+        config = json.loads(json.dumps(self.build(3, 0.6, 4, 21, gamma=gamma).get_config()))
+        x = inputs(5, 3, seed=40)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(1)
+            state = torch.random.get_rng_state()
+            first = RydbergFeatureMap(**config)
+            assert torch.equal(torch.random.get_rng_state(), state)
+            torch.manual_seed(2)
+            second = RydbergFeatureMap(**config)
+        assert first.get_config() == second.get_config() == config
+        assert torch.equal(first.transform(x), second.transform(x))
+        assert torch.equal(first.states(x), second.states(x))
+        # Features that differ come with configs that differ.
+        other = RydbergFeatureMap(**{**config, "jitter_seed": 22})
+        assert other.get_config() != config
+        assert (other.transform(x) - first.transform(x)).abs().max().item() > 1e-4
+
     @pytest.mark.parametrize("chunk_size", [1, 2, 3, None])
     def test_chunk_sizes_change_the_features_by_rounding_only(
         self, chunk_size: int | None
@@ -1883,7 +1912,10 @@ class TestPositionJitter:
             self.build(2, 0.2, None, 0)
 
     def test_a_jitter_needs_a_seed(self) -> None:
-        with pytest.raises(ValueError, match="jitter_seed is required when position_jitter"):
+        with pytest.raises(
+            ValueError,
+            match=r"jitter_seed is required when position_jitter > 0: .*get_config\(\) fixes them.*jitter_seed=0",
+        ):
             self.build(2, 0.2, 3, None)
 
     def test_a_seed_needs_a_jitter(self) -> None:

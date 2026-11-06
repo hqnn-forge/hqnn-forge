@@ -198,7 +198,10 @@ deterministic function of its input and its config, and no draw depends on
 the chunking.  ``ρ̄`` is therefore a Monte Carlo estimate, with ``K`` common
 draws, of the average of ``ρ(T)`` over Gaussian positions, not a device's
 fresh positions for every sample: its error, of order ``1/√K``, is the same
-for every sample and does not average out over a data set.
+for every sample and does not average out over a data set.  For the same
+reason ``jitter_seed`` has no unseeded default: like ``K`` it is required
+with ``σ > 0`` (and refused without), so ``get_config()`` fixes the draws,
+and torch's global generator is neither read nor advanced.
 
 **The spread of a coupling.**  For a pair at distance ``a`` along the unit
 vector ``e``, ``|r_i^(k) − r_j^(k)| = a + σ e·(z_ki − z_kj) + O(σ²/a)``, and
@@ -531,7 +534,10 @@ class RydbergFeatureMap:
     jitter_seed:
         The seed the ``K`` displacement patterns are drawn from, once, at
         construction, an integer in ``[0, 2^64)``.  Required when
-        ``position_jitter > 0`` and refused when it is 0.
+        ``position_jitter > 0`` and refused when it is 0, as ``jitter_samples``
+        is: there is no unseeded draw, so ``get_config()`` fixes the
+        positions, a map rebuilt from it draws the same ones, and building
+        the map takes nothing from torch's global generator.
 
     Attributes
     ----------
@@ -672,7 +678,8 @@ class RydbergFeatureMap:
                     raise ValueError(
                         f"{name} is required when position_jitter > 0: the displaced registers "
                         "are drawn once, at construction, as jitter_samples realisations "
-                        "from jitter_seed."
+                        "from jitter_seed, so that get_config() fixes them; pass integers, "
+                        "e.g. jitter_samples=16, jitter_seed=0."
                     )
             self._jitter_samples = _positive_integer(jitter_samples, "jitter_samples")
             self._jitter_seed = _seed(jitter_seed, "jitter_seed")
