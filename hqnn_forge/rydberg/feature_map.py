@@ -858,8 +858,14 @@ class RydbergFeatureMap:
         """
         The density matrices ``ρ(T)`` the features are read from.
 
+        Without a ``readout_error`` (or with ``(0, 0)``),
         ``readout(feature_map.states(X), pairs=feature_map.correlations)``
-        equals ``feature_map.transform(X)``.
+        equals ``feature_map.transform(X)``.  With one, ``readout`` gives the
+        error-free ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of these states, and
+        ``transform`` (without ``shots``) applies the detection error on top:
+        ``p01 + c ⟨n_i⟩`` and ``p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩``
+        with ``c = 1 − p01 − p10``, derived under *Detection error* in the
+        module docstring.  The states themselves carry no detection error.
 
         Parameters
         ----------

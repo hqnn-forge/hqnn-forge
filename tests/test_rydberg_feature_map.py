@@ -1495,6 +1495,49 @@ class TestReadoutError:
         assert torch.equal(estimates, flipped_shots_reference(without, x, 70, 4, None))
         assert torch.equal(generator.get_state(), reference_generator.get_state())
 
+    @pytest.mark.parametrize("readout_error", [None, *ERRORS])
+    def test_transform_is_the_error_applied_to_the_readout_of_the_states(
+        self, readout_error: tuple[float, float] | None
+    ) -> None:
+        """
+        What the docstring of ``states`` states.  Without the error,
+        ``readout(states(X))`` is ``transform(X)`` bit for bit.  With it, each
+        pair of atoms' joint distribution is rebuilt from ``readout(states(X))``
+        alone (``P(1,1) = ⟨n_i n_j⟩``, ``P(1,0) = ⟨n_i⟩ − ⟨n_i n_j⟩``, …) and
+        pushed through ``C ⊗ C`` by hand, with
+        ``C = [[1 − p01, p01], [p10, 1 − p10]]`` (row the true bit, column the
+        read bit); one atom's marginal through ``C``.  No formula of the
+        feature map is used.
+        """
+        feature_map = self.build(3, readout_error, gamma=0.4 * OMEGA)
+        x = inputs(4, 3, seed=29)
+        read = readout(feature_map.states(x), pairs=True)
+        features = feature_map.transform(x)
+        if readout_error is None:
+            assert torch.equal(read, features)
+            return
+        p01, p10 = readout_error
+        confusion = torch.tensor([[1 - p01, p01], [p10, 1 - p10]], dtype=F64)
+        n = 3
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        rows = []
+        for row in read.tolist():
+            singles = []
+            for i in range(n):
+                marginal = torch.tensor([1 - row[i], row[i]], dtype=F64)
+                singles.append((marginal @ confusion)[1].item())
+            both = []
+            for column, (i, j) in enumerate(pairs, start=n):
+                ni, nj, nij = row[i], row[j], row[column]
+                # joint[a, b] = P(atom i true bit a, atom j true bit b)
+                joint = torch.tensor([[1 - ni - nj + nij, nj - nij], [ni - nij, nij]], dtype=F64)
+                read_joint = confusion.T @ joint @ confusion
+                both.append(read_joint[1, 1].item())
+            rows.append(singles + both)
+        expected = torch.tensor(rows, dtype=F64)
+        assert not torch.allclose(read, features, rtol=0, atol=1e-3)
+        assert torch.allclose(features, expected, rtol=0, atol=1e-12)
+
     def test_config_records_the_pair_and_rebuilds_the_map_through_json(self) -> None:
         feature_map = self.build(3, np.array([0.01, 0.08]), gamma=0.5 * OMEGA)
         assert feature_map.readout_error == (0.01, 0.08)
