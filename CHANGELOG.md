@@ -457,7 +457,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `n_ramp_segments` midpoint segments (error of second order). `levels=None, t_ramp=0` gives
   the features of `PulseEncoding` bit for bit. `device_violations()` checks Ω, `|Δ_i|`, the
   duration and the slew `Ω/t_ramp` against `DeviceLimits`, by default `AQUILA_LIMITS`, on
-  request only (#732)
+  request only (#732, #736)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
