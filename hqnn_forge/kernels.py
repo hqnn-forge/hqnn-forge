@@ -75,9 +75,11 @@ sample at a time (#710).  There is no state vector, so
 purity ``Tr[ρ(x)²]``, and :func:`encoded_density_matrices` returns them,
 replayed one sample at a time.  At ``gamma → 0`` ``ρ(x)`` tends to
 ``|Φ(x)⟩⟨Φ(x)|`` and the kernel to the fidelity kernel of the unitary layer.
-With ``noise_level > 0`` the channels act on ``ρ(T)`` at ``"end"``, as in the
-layer's own training noise; ``"all"`` is refused, as the layer refuses it
-(#717), and ``"cz"`` raises, as the circuit has no CZ.  :func:`encoded_states` and
+With ``noise_level > 0`` the channels act as in the layer's own noise: at
+``"end"`` once on ``ρ(T)``, at ``"all"`` on every atom after every pulse
+segment, applied to ρ in torch between the segments (#717; see
+:mod:`hqnn_forge.noise`, *Circuits without gates between segments*), and
+``"cz"`` raises, as the circuit has no CZ.  :func:`encoded_states` and
 :func:`overlap_kernel_matrix` need a pure state or a unitary to invert, and
 refuse the layer (#711).
 
@@ -203,15 +205,6 @@ def _refuse_mixed(qlayer: qml.qnn.TorchLayer, caller: str) -> None:
             f"the pulse).  Use quantum_kernel_matrix, which gives Tr[ρ(x) ρ(y)] for this "
             f"layer, or encoded_density_matrices and kernel_from_density_matrices."
         )
-
-
-def _check_layer_noise_position(
-    encoder: EncodingLayer, noise_level: float, noise_position: Position
-) -> None:
-    """Let the layer refuse ``noise_position`` as its own training noise does (#710)."""
-    check = getattr(encoder, "_noise_position_check", None)
-    if noise_level > 0.0 and check is not None:
-        check(noise_position, "noise_position")
 
 
 def _prepare(X: torch.Tensor, encoder: EncodingLayer, name: str) -> torch.Tensor:
@@ -466,8 +459,8 @@ def quantum_kernel_matrix(
         is the purity, below 1.  ``0`` (default) is the noiseless kernel,
         computed from state vectors as before.  For
         :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``
-        the kernel is ``Tr[ρ(x_i) ρ(y_j)]`` at every ``noise_level``, and
-        ``noise_position="all"`` with ``noise_level > 0`` is refused (module
+        the kernel is ``Tr[ρ(x_i) ρ(y_j)]`` at every ``noise_level``, with
+        ``noise_position="all"`` after every pulse segment (module
         docstring, "The dephased analog layer").
 
     Returns
@@ -529,7 +522,6 @@ def quantum_kernel_matrix(
     )
     encoder = _resolve_layer(layer, "quantum_kernel_matrix")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
-    _check_layer_noise_position(encoder, noise_level, noise_position)
     # Validate both input sets before simulating either.
     prepared_x = _prepare(X, encoder, "X")
     if noise_level > 0.0 or _prepares_density_matrix(qlayer):
@@ -950,8 +942,7 @@ def encoded_density_matrices(
     TypeError, ValueError, RuntimeError
         As :func:`encoded_states` (which the dephased analog layer passes
         here); also ``ValueError`` for a ``noise_level`` or
-        ``noise_position`` out of range, or one the layer refuses
-        (``"all"`` with ``gamma > 0``).
+        ``noise_position`` out of range.
     """
     validate_noise(
         noise_level, noise_position, p_name="noise_level", position_name="noise_position"
@@ -959,7 +950,6 @@ def encoded_density_matrices(
     _check_batch_size(batch_size)
     encoder = _resolve_layer(layer, "encoded_density_matrices")
     qlayer, n_qubits = encoder.qlayer, encoder.n_qubits
-    _check_layer_noise_position(encoder, noise_level, noise_position)
     return _simulate_density(
         _prepare(X, encoder, "X"),
         qlayer,

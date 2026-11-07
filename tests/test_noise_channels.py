@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 from typing import Any, get_args
 
+import numpy as np
 import pennylane as qml
 import pytest
 import torch
@@ -519,3 +520,104 @@ def test_classifiers_record_and_restore_the_channel(
         clean = layer.eval()(x)
         noisy = layer.train()(x)
     torch.testing.assert_close(noisy, END_EFFECT["bit_flip"](clean, 0.1), atol=1e-5, rtol=0)
+
+
+class TestKrausOperators:
+    """
+    ``CHANNELS[c].operators(p)``, the Kraus operators the dephased analog layer
+    applies to ρ in torch (#717), against PennyLane's own channel.
+
+    Kraus sets are unique only up to a unitary mixing, so the channels are
+    compared as superoperators ``S = Σ_k K_k ⊗ K_k*`` (row-major
+    ``vec(K ρ K†) = (K ⊗ K*) vec ρ``), with PennyLane's from the very operation
+    the density path inserts, ``CHANNELS[c].op(p, wires=0).kraus_matrices()``.
+    PennyLane adds ``qml.math.eps = 1e-14`` under each square root (to keep
+    the gradient finite at 0), so the two agree to a few times 1e-14, not to
+    rounding.
+    """
+
+    @staticmethod
+    def _superoperator(operators: Any) -> torch.Tensor:
+        ops = torch.as_tensor(np.asarray(operators), dtype=torch.complex128)
+        return sum(torch.kron(k, k.conj()) for k in ops)  # type: ignore[return-value]
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    @pytest.mark.parametrize("fraction", [0.0, 0.1, 0.5, 1.0])
+    def test_the_same_channel_as_pennylane(self, channel: Channel, fraction: float) -> None:
+        spec = CHANNELS[channel]
+        p = fraction * spec.max_p
+        ours = spec.operators(p)
+        assert ours.dtype == torch.complex128
+        assert ours.shape[1:] == (2, 2)
+        theirs = spec.op(p, wires=0).kraus_matrices()
+        # At p = 1, PennyLane's sqrt(1 − p + eps) is sqrt(1e-14) = 1e-7, where
+        # the exact operator has 0 (amplitude and phase damping).
+        atol = 1e-13 if p < 1 else 2e-7
+        torch.testing.assert_close(
+            self._superoperator(ours), self._superoperator(theirs), rtol=0, atol=atol
+        )
+        # trace preserving: Σ K† K = I
+        completeness = sum(k.conj().T @ k for k in ours)
+        torch.testing.assert_close(
+            completeness, torch.eye(2, dtype=torch.complex128), rtol=0, atol=1e-15
+        )
+
+    @staticmethod
+    def _random_state(seed: int) -> torch.Tensor:
+        """A full-rank 3-qubit ρ with no symmetry between its wires."""
+        g = torch.Generator().manual_seed(seed)
+        a = torch.randn(8, 8, dtype=torch.complex128, generator=g)
+        rho = a @ a.conj().T
+        return rho / torch.trace(rho)
+
+    @staticmethod
+    def _pennylane(state: torch.Tensor, channel: Channel, p: float, wires: list[int]) -> Any:
+        """``default.mixed``: ``QubitDensityMatrix`` on wires 0, 1, 2, then the channel."""
+        device = qml.device("default.mixed", wires=3)
+
+        @qml.qnode(device, interface="torch")
+        def circuit() -> Any:
+            qml.QubitDensityMatrix(state, wires=range(3))
+            for wire in wires:
+                CHANNELS[channel].op(p, wires=wire)
+            return qml.density_matrix(wires=range(3))
+
+        return circuit().to(torch.complex128)
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    @pytest.mark.parametrize("wire", [0, 1, 2])
+    def test_on_one_wire_in_pennylane_wire_order(self, channel: Channel, wire: int) -> None:
+        """
+        ``_kraus_map_on_wire(ρ, K, w)`` against PennyLane's channel on wire ``w``
+        alone: axis ``w`` of ρ is wire ``w``, wire 0 the most significant bit.
+        The state is random, so another wire, or rows and columns mixed up,
+        would show.
+        """
+        from hqnn_forge.noise import _kraus_map_on_wire
+
+        p = 0.3
+        rho = self._random_state(4)
+        got = _kraus_map_on_wire(rho, CHANNELS[channel].operators(p), wire)
+        expected = self._pennylane(rho, channel, p, [wire])
+        torch.testing.assert_close(got, expected, rtol=0, atol=1e-13)
+        # Not the channel on any other wire.
+        for other in {0, 1, 2} - {wire}:
+            assert (got - self._pennylane(rho, channel, p, [other])).abs().max() > 1e-3
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    def test_on_every_wire_and_on_a_batch(self, channel: Channel) -> None:
+        """``_kraus_map_on_every_wire``: the channel on wires 0, 1, 2, state by state."""
+        from hqnn_forge.noise import _kraus_map_on_every_wire
+
+        p = 0.3
+        batch = torch.stack(
+            [
+                self._random_state(4),
+                self._random_state(5),
+                torch.eye(8, dtype=torch.complex128) / 8,
+            ]
+        )
+        mapped = _kraus_map_on_every_wire(batch, CHANNELS[channel].operators(p))
+        for state, out in zip(batch, mapped, strict=True):
+            expected = self._pennylane(state, channel, p, [0, 1, 2])
+            torch.testing.assert_close(out, expected, atol=1e-13, rtol=0)
