@@ -123,7 +123,7 @@ def test_spearman_of_a_monotone_map_is_one_and_ties_average() -> None:
 
 def test_b_lines_reused_across_v_count_once() -> None:
     rows = summary._rows(_records())
-    b = rows[("B", "linear", None, 0.0)]
+    b = rows[("B", "linear", None, None, 0.0)]
     assert len(b) == N_FOLDS
     assert all(r["reused_from_v_over_omega"] is None for r in b.values())
 
@@ -135,7 +135,7 @@ def test_comparisons_form_one_holm_family() -> None:
     assert [c["kind"] for c in family].count("arm − baseline") == (2 + 1) * 2
     raw = [c["p"] for c in family]
     assert [c["p_holm"] for c in family] == pytest.approx(holm_correction(raw).tolist())
-    won = next(c for c in family if c["kind"] == "A − B" and c["a"][2] == 1.0)
+    won = next(c for c in family if c["kind"] == "A − B" and c["a"][3] == 1.0)
     # Won in all 13 folds: the exact two-sided floor, 2/2^13, and it survives Holm over 8.
     assert won["n_pairs"] == N_FOLDS
     assert won["p"] == pytest.approx(2 / 2**N_FOLDS)
@@ -191,3 +191,76 @@ def test_summarise_prints_the_tracking_correlation() -> None:
     assert "| linear | fisher_ratio | – | 2 | – |" in text
     # The Fisher ratio of A at V/Ω = 1 (2 in every fold) beside that of B (0.5).
     assert "| 1 | 0 | 1.000 | 1.000 | 2.000 | 0.500 |" in text
+
+
+def _two_geometries() -> list[dict[str, Any]]:
+    """
+    :func:`_records` (chain lines without the field, as before #733) and arm A on a 2 × 2
+    grid at the same grid points, with B reused for the grid lines as the runner does.
+    """
+    records = _records()
+    for r in list(records):
+        if r["arm"] == "A":
+            # The grid wins every fold at both V/Ω, by more than the chain at V/Ω = 1.
+            records.append({**r, "geometry": "grid", "grid_shape": [2, 2], "mcc": r["mcc"] + 1})
+        if r["arm"] == "B":
+            records.append(
+                {
+                    **r,
+                    "geometry": "grid",
+                    "grid_shape": [2, 2],
+                    "reused_from_v_over_omega": 1.0,
+                    "reused_from_geometry": "chain",
+                }
+            )
+    return records
+
+
+def test_lines_without_a_geometry_are_the_chain_and_a_grid_is_labelled_by_its_shape() -> None:
+    assert summary.geometry_label({"arm": "A"}) == "chain"
+    assert summary.geometry_label({"arm": "A", "geometry": "ring", "grid_shape": None}) == "ring"
+    assert summary.geometry_label({"geometry": "grid", "grid_shape": [2, 3]}) == "grid-2x3"
+
+
+def test_arm_a_is_grouped_by_geometry_and_b_counts_once() -> None:
+    rows = summary._rows(_two_geometries())
+    a_keys = sorted((k[2], k[3]) for k in rows if k[0] == "A")
+    assert a_keys == [("chain", 1.0), ("chain", 10.0), ("grid-2x2", 1.0), ("grid-2x2", 10.0)]
+    # One B row, its computed lines only, although the grid lines repeat it.
+    (b_key,) = [k for k in rows if k[0] == "B"]
+    assert b_key == ("B", "linear", None, None, 0.0)
+    assert all(r.get("geometry") is None for r in rows[b_key].values())
+    assert summary._geometries(rows) == ["chain", "grid-2x2"]
+
+
+def test_the_geometries_of_a_dataset_form_one_holm_family() -> None:
+    family = summary.comparisons(summary._rows(_two_geometries()))
+    # A − B at four rows (two geometries × two V/Ω); A at four, B at one against two baselines.
+    assert [c["kind"] for c in family].count("A − B") == 4
+    assert [c["kind"] for c in family].count("arm − baseline") == (4 + 1) * 2
+    raw = [c["p"] for c in family]
+    assert [c["p_holm"] for c in family] == pytest.approx(holm_correction(raw).tolist())
+    grid = [c for c in family if c["kind"] == "A − B" and c["a"][2] == "grid-2x2"]
+    assert all(c["b"] == ("B", "linear", None, None, 0.0) for c in grid)
+    # MCC + 1 over the chain's: A − B of the grid at V/Ω = 1 is that of the chain plus 1.
+    chain = next(c for c in family if c["kind"] == "A − B" and c["a"][2:4] == ("chain", 1.0))
+    assert grid[0]["a"][3] == 1.0
+    assert grid[0]["mean_diff"] == pytest.approx(chain["mean_diff"] + 1.0)
+
+
+def test_one_geometry_prints_what_it_printed_before_and_two_print_each() -> None:
+    one = summary.summarise(_records(), permutations=99, long=True)
+    assert "geometry" not in one
+    assert "Head `linear`:" in one
+    text = summary.summarise(_two_geometries(), permutations=99, long=True)
+    assert "Holm family: 14 comparisons" in text
+    assert "| arm | head | geometry | V/Ω | γ/Ω |" in text
+    assert "| A | linear | grid-2x2 | 1 | 0 |" in text
+    assert "| B | linear | – | – | 0 |" in text
+    assert text.count("Head `linear`, geometry `chain`:") == 1
+    assert text.count("Head `linear`, geometry `grid-2x2`:") == 1
+    assert text.count("Geometry `grid-2x2`:") == 1
+    assert "| A/linear grid-2x2 V/Ω=1 γ/Ω=0 | B/linear γ/Ω=0 |" in text
+    # The grid's A − B table, ΔMCC 1.36 at V/Ω = 1, its Holm p 14 · 2/2^13.
+    grid_section = text.split("Head `linear`, geometry `grid-2x2`:")[1]
+    assert grid_section.split("\n\n")[1].splitlines()[2].startswith("| 1 | +1.360 (0.0034 ✓) |")

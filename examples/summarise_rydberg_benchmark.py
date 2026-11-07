@@ -32,6 +32,17 @@ Markdown:
   points and a two-sided permutation p-value (``--permutations`` draws,
   seeded).
 
+**Geometries** (``--geometry`` of the runner, #733).  Arm A is grouped by
+geometry as well (``chain``, ``ring``, ``grid-RxC``); a line written before
+the option existed is a chain line.  Arms B, C and D do not depend on the
+geometry and appear once: B's features do not depend on where its atoms sit,
+so every A line, whatever its geometry, is paired with the same B line.  A
+file of a single geometry prints exactly the tables it printed before the
+option existed.  With several, the scores table gains a ``geometry``
+column, every grid and mechanism table is printed once per geometry, and
+the comparisons of all geometries of one dataset still form **one** Holm
+family.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
@@ -166,34 +177,79 @@ def spearman(
 # Grouping
 # ---------------------------------------------------------------------------
 
-Key = tuple[str, str, Any, Any]  # arm, head, V/Ω, γ/Ω
+Key = tuple[str, str, Any, Any, Any]  # arm, head, geometry, V/Ω, γ/Ω
+
+
+def geometry_label(record: Mapping[str, Any]) -> str:
+    """
+    The geometry of an arm A line as one word: ``chain``, ``ring`` or ``grid-RxC``.
+
+    A line without the field was written before ``--geometry`` existed, on
+    the chain.
+    """
+    geometry = str(record.get("geometry") or "chain")
+    if geometry == "grid" and record.get("grid_shape") is not None:
+        rows, cols = record["grid_shape"]
+        return f"grid-{rows}x{cols}"
+    return geometry
 
 
 def _rows(records: Iterable[Mapping[str, Any]]) -> dict[Key, dict[int, Mapping[str, Any]]]:
-    """``{(arm, head, V/Ω, γ/Ω): {fold: record}}``; arm B is keyed by γ/Ω alone."""
+    """
+    ``{(arm, head, geometry, V/Ω, γ/Ω): {fold: record}}``.
+
+    Arm B is keyed by γ/Ω alone, and only arm A by its geometry
+    (:func:`geometry_label`); the other arms have ``None`` there.
+    """
     rows: dict[Key, dict[int, Mapping[str, Any]]] = {}
     for r in records:
         v = None if r["arm"] == "B" else r["v_over_omega"]
-        key = (r["arm"], r["head"], v, r["gamma_over_omega"])
+        geometry = geometry_label(r) if r["arm"] == "A" else None
+        key = (r["arm"], r["head"], geometry, v, r["gamma_over_omega"])
         folds = rows.setdefault(key, {})
-        # Arm B has one line per V/Ω, all with the same scores (reused); keep the computed one.
+        # Arm B has one line per geometry and V/Ω, all with the same scores (reused); keep the
+        # computed one.
         if r["fold"] in folds and r.get("reused_from_v_over_omega") is not None:
             continue
         folds[r["fold"]] = r
     return rows
 
 
-def _label(key: Key) -> str:
-    arm, head, v, gamma = key
+def _label(key: Key, *, geometry: bool = False) -> str:
+    """``arm/head`` and the grid point; with ``geometry``, arm A's geometry first."""
+    arm, head, shape, v, gamma = key
     grid = (
         "" if gamma is None else (f" γ/Ω={gamma:g}" if v is None else f" V/Ω={v:g} γ/Ω={gamma:g}")
     )
-    return f"{arm}/{head}{grid}"
+    where = f" {shape}" if geometry and shape is not None else ""
+    return f"{arm}/{head}{where}{grid}"
+
+
+#: The runner's order of the geometries, in which the tables print them.
+GEOMETRY_ORDER: tuple[str, ...] = ("chain", "ring", "grid")
+
+
+def _geometry_rank(shape: str) -> tuple[int, str]:
+    """Sort key of a :func:`geometry_label`: the runner's order, a shape after its kind."""
+    kind = shape.split("-")[0]
+    rank = GEOMETRY_ORDER.index(kind) if kind in GEOMETRY_ORDER else len(GEOMETRY_ORDER)
+    return rank, shape
+
+
+def _geometries(rows: Iterable[Key]) -> list[str]:
+    """The geometries of arm A in ``rows``, in the order of :func:`_geometry_rank`."""
+    return sorted({k[2] for k in rows if k[0] == "A"}, key=_geometry_rank)
 
 
 def _sort(key: Key) -> tuple[Any, ...]:
-    arm, head, v, gamma = key
-    return (arm, head, -1.0 if gamma is None else gamma, -1.0 if v is None else v)
+    arm, head, shape, v, gamma = key
+    return (
+        arm,
+        head,
+        (-1, "") if shape is None else _geometry_rank(shape),
+        -1.0 if gamma is None else gamma,
+        -1.0 if v is None else v,
+    )
 
 
 def _fmt(value: float, digits: int = 3) -> str:
@@ -213,16 +269,20 @@ def _p(value: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def scores_table(rows: Mapping[Key, Mapping[int, Mapping[str, Any]]]) -> str:
+def scores_table(
+    rows: Mapping[Key, Mapping[int, Mapping[str, Any]]], *, geometry: bool = False
+) -> str:
+    """One row per arm, head and grid point; with ``geometry``, a column for arm A's geometry."""
+    where = ("geometry | ", "---|") if geometry else ("", "")
     lines = [
         (
-            "| arm | head | V/Ω | γ/Ω | n | MCC mean ± sd | MCC 95 % CI | PR-AUC mean ± sd "
-            "| PR-AUC 95 % CI | dim | params | feature s | fit s |"
+            f"| arm | head | {where[0]}V/Ω | γ/Ω | n | MCC mean ± sd | MCC 95 % CI "
+            "| PR-AUC mean ± sd | PR-AUC 95 % CI | dim | params | feature s | fit s |"
         ),
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"|---|---|{where[1]}---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key in sorted(rows, key=_sort):
-        arm, head, v, gamma = key
+        arm, head, shape, v, gamma = key
         folds = rows[key]
         recs = [folds[f] for f in sorted(folds)]
         mcc = interval([r["mcc"] for r in recs])
@@ -231,8 +291,9 @@ def scores_table(rows: Mapping[Key, Mapping[int, Mapping[str, Any]]]) -> str:
         params = sorted({r["n_parameters"] for r in recs})
         feat = np.mean([r["feature_seconds"] for r in recs])
         fit = np.mean([r["train_seconds"] for r in recs])
+        cell = f"{'–' if shape is None else shape} | " if geometry else ""
         lines.append(
-            f"| {arm} | {head} | {'–' if v is None else f'{v:g}'} | "
+            f"| {arm} | {head} | {cell}{'–' if v is None else f'{v:g}'} | "
             f"{'–' if gamma is None else f'{gamma:g}'} | {len(recs)} | "
             f"{_fmt(mcc[0])} ± {_fmt(mcc[1])} | [{_fmt(mcc[2])}, {_fmt(mcc[3])}] | "
             f"{_fmt(ap[0])} ± {_fmt(ap[1])} | [{_fmt(ap[2])}, {_fmt(ap[3])}] | "
@@ -255,17 +316,23 @@ def _paired(
 def comparisons(
     rows: Mapping[Key, Mapping[int, Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Every A − B and arm − baseline comparison of one dataset, Holm-adjusted as one family."""
+    """
+    Every A − B and arm − baseline comparison of one dataset, Holm-adjusted as one family.
+
+    The family spans every geometry of the dataset.  Arm A of each geometry
+    is compared with the one B row of its γ/Ω, and B, C and D, which have no
+    geometry, are compared with the baselines once.
+    """
     out: list[dict[str, Any]] = []
     for key in sorted(rows, key=_sort):
-        arm, head, _, gamma = key
+        arm, head, _, _, gamma = key
         if arm == "A":
-            b_key: Key = ("B", head, None, gamma)
+            b_key: Key = ("B", head, None, None, gamma)
             if b_key in rows:
                 out.append({"kind": "A − B", "a": key, "b": b_key})
         if arm != "C":
             for base in BASELINES:
-                base_key: Key = (*base, None, None)
+                base_key: Key = (*base, None, None, None)
                 if base_key in rows:
                     out.append({"kind": "arm − baseline", "a": key, "b": base_key})
     for c in out:
@@ -290,7 +357,9 @@ def comparisons(
     return out
 
 
-def comparison_table(family: Sequence[Mapping[str, Any]], kind: str) -> str:
+def comparison_table(
+    family: Sequence[Mapping[str, Any]], kind: str, *, geometry: bool = False
+) -> str:
     lines = [
         "| comparison | against | n | mean ΔMCC | W pairs | p (exact) | p floor | p Holm | r_rb |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -300,7 +369,7 @@ def comparison_table(family: Sequence[Mapping[str, Any]], kind: str) -> str:
             continue
         mark = " **✓**" if c["p_holm"] <= ALPHA else ""
         lines.append(
-            f"| {_label(c['a'])} | {_label(c['b'])} | {c['n_folds']} | "
+            f"| {_label(c['a'], geometry=geometry)} | {_label(c['b'])} | {c['n_folds']} | "
             f"{c['mean_diff']:+.3f} | {c['n_pairs']} | {_p(c['p'])} | {_p(c['min_p'])} | "
             f"{_p(c['p_holm'])}{mark} | {c['effect']:+.2f} |"
         )
@@ -312,14 +381,26 @@ def _cell(c: Mapping[str, Any]) -> str:
     return f"{c['mean_diff']:+.3f} ({_p(c['p_holm'])}{mark})"
 
 
-def grid_table(family: Sequence[Mapping[str, Any]], kind: str, head: str, against: Key) -> str:
-    """Arm A's comparisons of one head as a ``V/Ω`` × ``γ/Ω`` grid: ΔMCC (Holm p)."""
+def grid_table(
+    family: Sequence[Mapping[str, Any]],
+    kind: str,
+    head: str,
+    against: Key,
+    geometry: str | None = None,
+) -> str:
+    """
+    Arm A's comparisons of one head as a ``V/Ω`` × ``γ/Ω`` grid: ΔMCC (Holm p).
+
+    ``geometry`` (a :func:`geometry_label`) restricts it to arm A of that
+    geometry; ``None`` takes every A row, as for a file of one geometry.
+    """
     cells = {
-        (c["a"][2], c["a"][3]): c
+        (c["a"][3], c["a"][4]): c
         for c in family
         if c["kind"] == kind
         and c["a"][0] == "A"
         and c["a"][1] == head
+        and (geometry is None or c["a"][2] == geometry)
         and c["b"][:2] == against[:2]
     }
     vs = sorted({v for v, _ in cells})
@@ -340,7 +421,7 @@ def other_arms_table(family: Sequence[Mapping[str, Any]]) -> str:
     for c in family:
         if c["kind"] == "arm − baseline" and c["a"][0] != "A":
             rows.setdefault(c["a"], {})[c["b"]] = c
-    bases: list[Key] = [(*b, None, None) for b in BASELINES]
+    bases: list[Key] = [(*b, None, None, None) for b in BASELINES]
     lines = [
         "| arm | " + " | ".join(f"against {_label(b)}" for b in bases) + " |",
         "|---|" + "---|" * len(bases),
@@ -364,17 +445,25 @@ def mechanism_tables(
     permutations: int,
     seed: int,
     heads: Sequence[str],
+    geometry: str | None = None,
 ) -> str:
-    """Separation measures of A and B per grid point and their rank correlation with ΔMCC."""
+    """
+    Separation measures of A and B per grid point and their rank correlation with ΔMCC.
+
+    ``geometry`` restricts arm A to that geometry (the rank correlation then
+    runs over its grid points only); ``None`` takes every A row.
+    """
     out: list[str] = []
-    cells = sorted({(k[2], k[3]) for k in rows if k[0] == "A"}, key=lambda c: (c[1], c[0]))
+    a_keys = {k for k in rows if k[0] == "A" and (geometry is None or k[2] == geometry)}
+    shapes = {k[3:]: k[2] for k in a_keys}
+    cells = sorted(shapes, key=lambda c: (c[1], c[0]))
     # The measures are properties of the features, not of the head: read them from one head.
     head0 = heads[0]
     out.append("| V/Ω | γ/Ω | " + " | ".join(f"{m} A | {m} B" for m in MEASURES) + " |")
     out.append("|---|---|" + "---|---|" * len(MEASURES))
     for v, gamma in cells:
-        a = rows[("A", head0, v, gamma)]
-        b = rows.get(("B", head0, None, gamma), {})
+        a = rows[("A", head0, shapes[(v, gamma)], v, gamma)]
+        b = rows.get(("B", head0, None, None, gamma), {})
         vals = []
         for m in MEASURES:
             vals.append(_fmt(_mean_measure(a, m, part)))
@@ -387,8 +476,8 @@ def mechanism_tables(
         d_mcc: list[float] = []
         d_measure: dict[str, list[float]] = {m: [] for m in MEASURES}
         for v, gamma in cells:
-            a_rows = rows.get(("A", head, v, gamma))
-            b_rows = rows.get(("B", head, None, gamma))
+            a_rows = rows.get(("A", head, shapes[(v, gamma)], v, gamma))
+            b_rows = rows.get(("B", head, None, None, gamma))
             if not a_rows or not b_rows:
                 continue
             ma, mb = _paired(a_rows, b_rows)
@@ -410,7 +499,13 @@ def summarise(
     seed: int = 0,
     long: bool = False,
 ) -> str:
-    """The Markdown tables of every dataset in ``records``; ``long`` adds one row per test."""
+    """
+    The Markdown tables of every dataset in ``records``; ``long`` adds one row per test.
+
+    A dataset with arm A in several geometries gets a ``geometry`` column in
+    its scores, and its grid and mechanism tables once per geometry; with one
+    geometry the output is that of a file from before ``--geometry``.
+    """
     by_dataset: dict[str, list[Mapping[str, Any]]] = {}
     for r in records:
         by_dataset.setdefault(r["dataset"], []).append(r)
@@ -420,6 +515,12 @@ def summarise(
         family = comparisons(rows)
         n_folds = {len(f) for f in rows.values()}
         heads = sorted({k[1] for k in rows if k[0] == "A"})
+        found = _geometries(rows)
+        several = len(found) > 1
+        # Per geometry, with its name, when there are several; else once, as before #733.
+        per_geometry: list[tuple[str | None, str]] = (
+            [(g, f", geometry `{g}`") for g in found] if several else [(None, "")]
+        )
         m = len(family)
         sections += [
             f"## {dataset}",
@@ -431,7 +532,7 @@ def summarise(
             "",
             "### Scores",
             "",
-            scores_table(rows),
+            scores_table(rows, geometry=several),
             "",
             "### A against B (MCC, paired by fold)",
             "",
@@ -439,12 +540,13 @@ def summarise(
             "",
         ]
         for head in heads:
-            sections += [
-                f"Head `{head}`:",
-                "",
-                grid_table(family, "A − B", head, ("B", head, None, None)),
-                "",
-            ]
+            for shape, named in per_geometry:
+                sections += [
+                    f"Head `{head}`{named}:",
+                    "",
+                    grid_table(family, "A − B", head, ("B", head, None, None, None), shape),
+                    "",
+                ]
         sections += [
             "### Every arm against the classical baselines (MCC, paired by fold)",
             "",
@@ -453,12 +555,15 @@ def summarise(
         ]
         for head in heads:
             for base in BASELINES:
-                sections += [
-                    f"Arm A, head `{head}`, against {base[0]}/{base[1]}:",
-                    "",
-                    grid_table(family, "arm − baseline", head, (*base, None, None)),
-                    "",
-                ]
+                for shape, named in per_geometry:
+                    sections += [
+                        f"Arm A, head `{head}`{named}, against {base[0]}/{base[1]}:",
+                        "",
+                        grid_table(
+                            family, "arm − baseline", head, (*base, None, None, None), shape
+                        ),
+                        "",
+                    ]
         sections += [
             "The other arms:",
             "",
@@ -469,19 +574,32 @@ def summarise(
             sections += [
                 "### Every comparison",
                 "",
-                comparison_table(family, "A − B"),
+                comparison_table(family, "A − B", geometry=several),
                 "",
-                comparison_table(family, "arm − baseline"),
+                comparison_table(family, "arm − baseline", geometry=several),
                 "",
             ]
         sections += [
             "### Separation measures (real rows of the training part, mean over folds)",
             "",
-            mechanism_tables(rows, part="train", permutations=permutations, seed=seed, heads=heads)
-            if heads
-            else "(no arm A lines)",
-            "",
         ]
+        if not heads:
+            sections += ["(no arm A lines)", ""]
+        for shape, _ in per_geometry:
+            if heads and several:
+                sections += [f"Geometry `{shape}`:", ""]
+            if heads:
+                sections += [
+                    mechanism_tables(
+                        rows,
+                        part="train",
+                        permutations=permutations,
+                        seed=seed,
+                        heads=heads,
+                        geometry=shape,
+                    ),
+                    "",
+                ]
     return "\n".join(sections)
 
 

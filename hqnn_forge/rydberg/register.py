@@ -96,9 +96,10 @@ def _carries_derivative(value: Any) -> bool:
     return False
 
 
-def _atom_count(n_atoms: Any) -> int:
+def _atom_count(n_atoms: Any, name: str = "n_atoms") -> int:
+    """``n_atoms`` as an ``int``, or a ``ValueError`` naming the argument unless it is ``>= 1``."""
     if isinstance(n_atoms, bool) or not isinstance(n_atoms, numbers.Integral) or n_atoms < 1:
-        raise ValueError(f"n_atoms must be an integer >= 1; got {n_atoms!r}.")
+        raise ValueError(f"{name} must be an integer >= 1; got {n_atoms!r}.")
     return int(n_atoms)
 
 
@@ -254,6 +255,59 @@ class AtomRegister:
         radius = a / (2 * math.sin(math.pi / n))
         theta = 2 * math.pi * torch.arange(n, dtype=torch.float64) / n
         return cls(radius * torch.stack([torch.cos(theta), torch.sin(theta)], dim=1))
+
+    @classmethod
+    def grid(cls, rows: int, cols: int, spacing: float) -> AtomRegister:
+        """
+        A rectangular grid of ``rows × cols`` atoms on a square lattice of side ``spacing``.
+
+        Atoms are counted row-major: atom ``k = r · cols + c``, for row
+        ``0 <= r < rows`` and column ``0 <= c < cols``, sits at::
+
+            r_k = (c · spacing, r · spacing)
+
+        so row 0 runs along the positive x axis from the origin, atoms
+        ``0, …, cols − 1``, and each further row lies one ``spacing`` higher
+        in y.  Atoms ``k`` and ``l`` with ``(r, c) = divmod(k, cols)`` are
+        ``spacing · √(Δr² + Δc²)`` apart, so with ``V = C6 / spacing⁶`` the
+        nearest-neighbour coupling,
+
+        ::
+
+            V_kl = V / (Δr² + Δc²)³
+
+        Each atom has its nearest neighbours (``V``) left, right, above and
+        below: ``k ± 1`` in the same row and ``k ± cols``; two at a corner,
+        three on an edge, four inside.  The next-nearest are the diagonals at
+        ``√2 · spacing``, with ``V / 8``.  ``grid(1, n, a)`` is
+        :meth:`chain` ``(n, a)``.
+
+        Parameters
+        ----------
+        rows, cols:
+            Number of rows and of columns, each at least 1.
+        spacing:
+            Distance between neighbouring atoms of a row or of a column in
+            µm, finite and positive.
+
+        Raises
+        ------
+        ValueError
+            If ``rows`` or ``cols`` is not an integer ``>= 1`` or ``spacing``
+            is not a finite number ``> 0``.
+
+        Examples
+        --------
+        >>> AtomRegister.grid(2, 2, spacing=5.0).positions.tolist()
+        [[0.0, 0.0], [5.0, 0.0], [0.0, 5.0], [5.0, 5.0]]
+        """
+        n_rows = _atom_count(rows, "rows")
+        n_cols = _atom_count(cols, "cols")
+        a = _finite_number(spacing, "spacing", positive=True)
+        k = torch.arange(n_rows * n_cols)
+        x = (k % n_cols).to(torch.float64) * a
+        y = (k // n_cols).to(torch.float64) * a
+        return cls(torch.stack([x, y], dim=1))
 
     @property
     def positions(self) -> torch.Tensor:

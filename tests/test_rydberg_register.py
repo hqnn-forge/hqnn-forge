@@ -228,6 +228,61 @@ class TestRing:
             AtomRegister.ring(4, 0.0)
 
 
+class TestGrid:
+    def test_a_2_by_3_grid_is_row_major_by_hand(self) -> None:
+        """Atom ``k = r · cols + c`` at ``(c · a, r · a)``: row 0 left to right, then row 1."""
+        a = 5.5
+        assert AtomRegister.grid(2, 3, a).positions.tolist() == [
+            [0.0, 0.0],
+            [5.5, 0.0],
+            [11.0, 0.0],
+            [0.0, 5.5],
+            [5.5, 5.5],
+            [11.0, 5.5],
+        ]
+
+    def test_a_square_has_v_on_its_edges_and_v_over_8_on_its_diagonals(self) -> None:
+        """2 × 2: edges (0,1), (2,3), (0,2), (1,3) at ``a``; diagonals at ``√2 a``, ``(√2)⁶ = 8``."""
+        c6, spacing = 15625.0, 5.0  # nearest-neighbour V = 15625 / 5^6 = 1
+        v = AtomRegister.grid(2, 2, spacing).interaction_matrix(c6)
+        expected = [
+            [0.0, 1.0, 1.0, 1 / 8],
+            [1.0, 0.0, 1 / 8, 1.0],
+            [1.0, 1 / 8, 0.0, 1.0],
+            [1 / 8, 1.0, 1.0, 0.0],
+        ]
+        torch.testing.assert_close(
+            v, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=0
+        )
+
+    def test_couplings_of_a_3_by_4_grid_from_the_lattice_offsets(self) -> None:
+        """``V_kl = V / (Δr² + Δc²)³`` with ``(r, c) = divmod(k, cols)``, summed by hand."""
+        rows, cols, c6, spacing = 3, 4, 729.0, 3.0  # V = 1
+        v = AtomRegister.grid(rows, cols, spacing).interaction_matrix(c6).numpy()
+        for k in range(rows * cols):
+            for m in range(rows * cols):
+                (rk, ck), (rm, cm) = divmod(k, cols), divmod(m, cols)
+                squared = (rk - rm) ** 2 + (ck - cm) ** 2
+                expected = 0.0 if k == m else 1.0 / squared**3
+                assert v[k, m] == pytest.approx(expected, rel=1e-12)
+
+    def test_one_row_is_the_chain(self) -> None:
+        assert AtomRegister.grid(1, 4, 6.0).positions.tolist() == (
+            AtomRegister.chain(4, 6.0).positions.tolist()
+        )
+
+    @pytest.mark.parametrize("name", ["rows", "cols"])
+    @pytest.mark.parametrize("count", [0, -1, 2.0, True, "3"])
+    def test_rejects_a_bad_count(self, name: str, count: object) -> None:
+        shape = {"rows": 2, "cols": 2, name: count}
+        with pytest.raises(ValueError, match=f"{name} must be an integer >= 1"):
+            AtomRegister.grid(shape["rows"], shape["cols"], 5.0)  # type: ignore[arg-type]
+
+    def test_rejects_a_bad_spacing(self) -> None:
+        with pytest.raises(ValueError, match="spacing must be a finite number > 0"):
+            AtomRegister.grid(2, 2, -1.0)
+
+
 class TestInteractionMatrix:
     def test_a_3_4_5_triangle_by_hand(self) -> None:
         """Distances 3, 4 and 5 µm: ``V = C6 / 729``, ``C6 / 4096``, ``C6 / 15625``."""
