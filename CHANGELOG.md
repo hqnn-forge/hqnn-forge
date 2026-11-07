@@ -458,6 +458,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the features of `PulseEncoding` bit for bit. `device_violations()` checks Ω, `|Δ_i|`, the
   duration and the slew `Ω/t_ramp` against `DeviceLimits`, by default `AQUILA_LIMITS`, on
   request only (#732, #736)
+- `AtomRegister.grid(rows, cols, spacing)`, atom `k = r · cols + c` at `(c · a, r · a)`, and
+  `--geometry chain ring grid` (with `--grid-cols`) on `examples/benchmark_rydberg_features.py`:
+  `V/Ω` stays the nearest-neighbour interaction in every geometry, arm B is computed once for
+  all of them, every line records `geometry` and `grid_shape`, a ring or a grid gets cache
+  entries of its own while the default chain keeps its keys, and both summaries group by
+  geometry (#733, #739)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor

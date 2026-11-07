@@ -46,7 +46,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from threading import Thread
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pennylane as qml
@@ -3798,6 +3798,8 @@ FIELDS = {
     "head",
     "representation",
     "feature_map_trained",
+    "geometry",
+    "grid_shape",
     "v_over_omega",
     "gamma_over_omega",
     "spacing_um",
@@ -3807,6 +3809,7 @@ FIELDS = {
     "n_steps",
     "feature_map",
     "reused_from_v_over_omega",
+    "reused_from_geometry",
     "measurement",
     "shots",
     "fold",
@@ -4411,6 +4414,332 @@ class TestArmBReuse:
         assert len(list(cache.iterdir())) == 1 + settings.inner_folds
 
 
+class TestGeometry:
+    """#733: ``--geometry`` runs the chain, a ring and a 2D grid at the same ``V/Ω``."""
+
+    #: Keys of the chain's ``--quick`` maps, computed on ``main`` before #733 (0840dae, which
+    #: already records ``readout_error`` from #734 and the position jitter from #735) with
+    #: ``cache_key("0" * 64, config, KEY_ENV, "c" * 64)``: the config is unchanged, so the
+    #: entries a chain run wrote before the option existed are still hit.
+    CHAIN_KEYS: ClassVar[dict[str, str]] = {
+        "A": "ac15c7f711f29923fd098f6a212528cc68b9fb83205650a2a33fb70297fdb7e0",
+        "B": "f1d5115943e52fec3e823fd7cc07e32453dff88a5dc2975487913c1bb68e800e",
+    }
+    KEY_ENV: ClassVar[dict[str, Any]] = {
+        "python": "3.12.0",
+        "implementation": "CPython",
+        "hqnn_forge": "0.0.0",
+        "packages": {"torch": "2.0"},
+    }
+
+    @staticmethod
+    def _neighbours(geometry: str, n_atoms: int, cols: int = 0) -> set[tuple[int, int]]:
+        """The nearest-neighbour pairs ``i < j`` of each geometry, written out by index."""
+        if geometry == "chain":
+            return {(i, i + 1) for i in range(n_atoms - 1)}
+        if geometry == "ring":
+            return {tuple(sorted((i, (i + 1) % n_atoms))) for i in range(n_atoms)}  # type: ignore[misc]
+        across = {(k, k + 1) for k in range(n_atoms - 1) if (k + 1) % cols}
+        down = {(k, k + cols) for k in range(n_atoms - cols)}
+        return across | down
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "cols", "shape"),
+        [
+            (4, None, (2, 2)),
+            (6, None, (2, 3)),
+            (8, None, (2, 4)),
+            (9, None, (3, 3)),
+            (10, None, (2, 5)),
+            (12, None, (3, 4)),
+            (6, 2, (3, 2)),
+            (12, 6, (2, 6)),
+        ],
+    )
+    def test_the_grid_shape_rule(self, n_atoms: int, cols: int | None, shape: tuple) -> None:
+        """Default: the smallest ``cols`` dividing ``N`` with ``cols² >= N``; else as given."""
+        assert bench.grid_shape(n_atoms, cols) == shape
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "cols", "match"),
+        [
+            (6, 4, "grid_cols=4 does not divide n_atoms=6"),
+            (5, None, "a grid of 1 × 5 atoms is a chain"),
+            (6, 6, "a grid of 1 × 6 atoms is a chain"),
+            (6, 1, "a grid of 6 × 1 atoms is a chain"),
+            (6, 0, "grid_cols must be an integer >= 1"),
+        ],
+    )
+    def test_a_shape_that_is_no_grid_is_refused(
+        self, n_atoms: int, cols: int | None, match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            bench.grid_shape(n_atoms, cols)
+
+    @pytest.mark.parametrize(
+        ("changes", "match"),
+        [
+            ({"geometries": ()}, "geometries must be distinct values"),
+            ({"geometries": ("chain", "chain")}, "geometries must be distinct values"),
+            ({"geometries": ("square",)}, "geometries must be distinct values"),
+            ({"grid_cols": 2}, "grid_cols is the shape of the grid geometry"),
+            ({"geometries": ("grid",), "grid_cols": 3}, "grid_cols=3 does not divide"),
+            ({"geometries": ("grid",), "n_atoms": 5}, "a grid of 1 × 5 atoms is a chain"),
+            ({"geometries": ("ring",), "n_atoms": 2}, "the ring geometry needs n_atoms >= 3"),
+        ],
+    )
+    def test_invalid_geometry_settings(self, changes: dict[str, Any], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            _replace(QUICK, **changes)
+
+    def test_a_shape_binds_only_where_a_rydberg_map_is_built(self) -> None:
+        settings = _replace(QUICK, arms=("C",), n_atoms=5, geometries=("grid", "ring"))
+        assert settings.geometries == ("grid", "ring")
+
+    @pytest.mark.parametrize("geometry", ["chain", "ring", "grid"])
+    @pytest.mark.parametrize("v", [0.1, 1.0, 30.0])
+    @pytest.mark.parametrize("n_atoms", [4, 6])
+    def test_the_nearest_neighbour_coupling_is_the_ratio_asked_for(
+        self, geometry: str, v: float, n_atoms: int
+    ) -> None:
+        """``V_ij/Ω = V/Ω`` on every nearest-neighbour pair, and no pair couples more."""
+        settings = _replace(QUICK, n_atoms=n_atoms, geometries=(geometry,))
+        register = bench.atom_register(settings, geometry, v)
+        ratio = register.interaction_matrix(DEFAULT_C6).numpy() / OMEGA
+        cols = 0 if settings.grid_shape is None else settings.grid_shape[1]
+        pairs = self._neighbours(geometry, n_atoms, cols)
+        assert (
+            len(pairs)
+            == {"chain": n_atoms - 1, "ring": n_atoms, "grid": 4 if n_atoms == 4 else 7}[geometry]
+        )
+        for i, j in pairs:
+            assert ratio[i, j] == pytest.approx(v, rel=1e-12)
+        assert ratio.max() == pytest.approx(v, rel=1e-12)
+        others = [ratio[i, j] for i in range(n_atoms) for j in range(i + 1, n_atoms)]
+        assert sum(r == pytest.approx(v, rel=1e-12) for r in others) == len(pairs)
+
+    @pytest.mark.parametrize(
+        ("geometry", "n_atoms", "pair", "factor"),
+        [
+            ("chain", 4, (0, 2), 64.0),  # 2a
+            ("ring", 4, (0, 2), 8.0),  # the square's diagonal, 2a cos(π/4) = √2 a
+            ("ring", 6, (0, 2), 27.0),  # 2a cos(π/6) = √3 a
+            ("grid", 4, (0, 3), 8.0),  # √2 a
+            ("grid", 6, (0, 4), 8.0),  # 2 × 3: atom 4 is (1, 1)
+        ],
+    )
+    def test_the_next_nearest_coupling_of_each_geometry(
+        self, geometry: str, n_atoms: int, pair: tuple[int, int], factor: float
+    ) -> None:
+        settings = _replace(QUICK, n_atoms=n_atoms, geometries=(geometry,))
+        register = bench.atom_register(settings, geometry, 10.0)
+        ratio = register.interaction_matrix(DEFAULT_C6).numpy() / OMEGA
+        assert ratio[pair] == pytest.approx(10.0 / factor, rel=1e-12)
+
+    def test_the_next_nearest_table_of_the_model_page(self) -> None:
+        """Each entry of the page's table, to its two or three digits, from the register."""
+        text = (ROOT / "docs" / "rydberg-model.md").read_text(encoding="utf-8")
+        table = {
+            cells[0]: [float(x) for x in cells[1:]]
+            for line in text.splitlines()
+            if line.lstrip().startswith("|")
+            and (cells := [c.strip() for c in line.strip().strip("|").split("|")])[0].startswith(
+                ("chain, ", "ring of ")
+            )
+        }
+        pairs = {
+            "chain, `2a`": [("chain", 4, (0, 2))],
+            "ring of 6, `√3 a`": [("ring", 6, (0, 2))],
+            "ring of 4 and grid, `√2 a`": [("ring", 4, (0, 2)), ("grid", 4, (0, 3))],
+        }
+        assert set(table) == set(pairs)
+        values = bench.Settings().v_over_omega
+        for row, cases in pairs.items():
+            assert len(table[row]) == len(values)
+            for geometry, n_atoms, pair in cases:
+                settings = _replace(QUICK, n_atoms=n_atoms, geometries=(geometry,))
+                for v, shown in zip(values, table[row], strict=True):
+                    register = bench.atom_register(settings, geometry, v)
+                    exact = float(register.interaction_matrix(DEFAULT_C6)[pair]) / OMEGA
+                    assert shown == pytest.approx(exact, rel=0.035)  # rounded to 2 digits
+
+    def test_the_registers_are_the_constructors_at_the_spacing_of_the_ratio(self) -> None:
+        settings = _replace(QUICK, n_atoms=6, geometries=("chain", "ring", "grid"), grid_cols=2)
+        a = bench.spacing(3.0, OMEGA, DEFAULT_C6)
+        expected = {
+            "chain": AtomRegister.chain(6, a),
+            "ring": AtomRegister.ring(6, a),
+            "grid": AtomRegister.grid(3, 2, a),
+        }
+        for geometry, register in expected.items():
+            built = bench.atom_register(settings, geometry, 3.0)
+            assert built.positions.tolist() == register.positions.tolist()
+
+    def test_the_chain_reproduces_the_cache_key_from_before_the_option(self) -> None:
+        settings = _replace(QUICK, geometries=("chain", "ring", "grid"))
+        reps = [r for r in bench.representations(settings) if r.geometry == "chain"]
+        for rep in reps:
+            assert "geometry" not in rep.config
+            key = bench.cache_key("0" * 64, rep.config, self.KEY_ENV, "c" * 64)
+            assert key == self.CHAIN_KEYS[rep.arm]
+        assert [r.arm for r in reps] == ["A", "B"]
+
+    def test_a_chain_a_ring_and_a_grid_get_different_keys_at_one_grid_point(self) -> None:
+        settings = _replace(QUICK, geometries=("chain", "ring", "grid"))
+        reps = bench.representations(settings)
+        assert [(r.arm, r.geometry) for r in reps[:6]] == [
+            ("A", "chain"),
+            ("B", "chain"),
+            ("A", "ring"),
+            ("B", "ring"),
+            ("A", "grid"),
+            ("B", "grid"),
+        ]
+        assert {(r.v_over_omega, r.gamma_over_omega) for r in reps[:6]} == {(1.0, 0.1)}
+        keys = {bench.cache_key("0" * 64, r.config, self.KEY_ENV, "c" * 64) for r in reps[:6]}
+        assert len(keys) == 6
+        assert reps[2].config["geometry"] == "ring" and "grid_shape" not in reps[2].config
+        assert reps[4].config["geometry"] == "grid" and reps[4].config["grid_shape"] == [2, 2]
+        assert reps[4].grid_shape == (2, 2)
+
+    @pytest.mark.parametrize("gamma", [0.0, 0.1])
+    def test_arm_b_features_are_identical_across_geometries(self, gamma: float) -> None:
+        """Without interactions feature ``i`` depends on input ``i`` alone, wherever atom i is."""
+        settings = _replace(QUICK, geometries=("chain", "ring", "grid"))
+        X = torch.tensor(
+            [[-2.0, -0.5, 0.3, 2.9], [0.1, 1.2, -3.0, 0.0], [1.5, 1.5, -1.5, -1.5]],
+            dtype=torch.float64,
+        )
+        features = {
+            g: bench.feature_map(settings, 1.0, gamma, interactions=False, geometry=g).transform(X)
+            for g in ("chain", "ring", "grid")
+        }
+        torch.testing.assert_close(features["ring"], features["chain"], rtol=1e-12, atol=1e-12)
+        torch.testing.assert_close(features["grid"], features["chain"], rtol=1e-12, atol=1e-12)
+        if gamma == 0.0:  # the closed form of the module docstring
+            expected = torch.from_numpy(_single_atom_feature(X.numpy()))
+            torch.testing.assert_close(features["chain"], expected, rtol=1e-10, atol=1e-12)
+        # Arm A is not: the ring couples atoms 0 and 3, which the chain barely does.
+        interacting = {
+            g: bench.feature_map(settings, 10.0, gamma, interactions=True, geometry=g).transform(X)
+            for g in ("chain", "ring")
+        }
+        assert (interacting["ring"] - interacting["chain"]).abs().max() > 1e-3
+
+    def test_arm_b_is_computed_once_for_every_geometry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _replace(
+            QUICK,
+            arms=("A", "B"),
+            n_trials=0,
+            n_splits=2,
+            max_folds=1,
+            n_steps=10,
+            v_over_omega=(1.0, 10.0),
+            gamma_over_omega=(0.1,),
+            geometries=("chain", "ring", "grid"),
+        )
+        rng = np.random.RandomState(3)
+        data = {"positive-control": (rng.randn(40, 4), np.array([0, 1] * 20), 0)}
+        calls: list[tuple[str, str]] = []
+        original = bench.features_of
+
+        def spy(rep: Any, split: Any, cache: Any) -> Any:
+            calls.append((rep.arm, rep.geometry))
+            return original(rep, split, cache)
+
+        monkeypatch.setattr(bench, "features_of", spy)
+        records = bench.run(data, settings, tmp_path / "out.jsonl", cache_dir=None)
+        # A at 3 geometries × 2 V/Ω; B once, at the first geometry.
+        assert sorted(calls) == sorted(
+            [("A", g) for g in ("chain", "ring", "grid") for _ in range(2)] + [("B", "chain")]
+        )
+        b = [r for r in records if r["arm"] == "B" and r["head"] == "linear"]
+        assert [(r["geometry"], r["v_over_omega"]) for r in b] == [
+            (g, v) for g in ("chain", "ring", "grid") for v in (1.0, 10.0)
+        ]
+        assert [(r["reused_from_geometry"], r["reused_from_v_over_omega"]) for r in b] == [
+            (None, None),
+            *[("chain", 1.0)] * 5,
+        ]
+        for r in b[1:]:
+            for k in ("mcc", "pr_auc", "threshold", "separation", "hyperparameters"):
+                assert r[k] == b[0][k]
+            assert r["feature_seconds"] == r["train_seconds"] == 0.0
+        grid_lines = [r for r in records if r["geometry"] == "grid"]
+        assert {tuple(r["grid_shape"]) for r in grid_lines} == {(2, 2)}
+        assert all(r["grid_shape"] is None for r in records if r["geometry"] != "grid")
+        assert all(
+            r["feature_map"]["config"]["register"]
+            == bench.atom_register(settings, r["geometry"], r["v_over_omega"]).positions.tolist()
+            for r in records
+        )
+
+    @pytest.mark.slow
+    def test_quick_with_every_geometry_through_the_command_line(self, tmp_path: Path) -> None:
+        """One ``--quick`` run of all three: the lines carry the geometry, the keys differ."""
+        out, cache = tmp_path / "quick.jsonl", tmp_path / "cache"
+        records = bench.main(
+            [
+                "--quick",
+                "--geometry",
+                "chain",
+                "ring",
+                "grid",
+                "--out",
+                str(out),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        lines = bench.read_records(out)
+        assert len(lines) == len(records) == 3 * 4 + 5  # A and B × 2 heads per geometry; C, D
+        rydberg = [r for r in lines if r["arm"] in ("A", "B")]
+        assert [r["geometry"] for r in rydberg] == [
+            g for g in ("chain", "ring", "grid") for _ in range(4)
+        ]
+        assert [r["grid_shape"] for r in rydberg] == [None] * 8 + [[2, 2]] * 4
+        assert all(r["geometry"] is None for r in lines if r["arm"] not in ("A", "B"))
+        assert all(r["settings"]["geometries"] == ["chain", "ring", "grid"] for r in lines)
+        # Three A maps, one B map, arm D: each with its fold and its tuning folds.
+        assert len(list(cache.iterdir())) == 5 * (1 + QUICK.inner_folds)
+        a_configs = {
+            json.dumps(r["feature_map"], sort_keys=True) for r in rydberg if r["arm"] == "A"
+        }
+        assert len(a_configs) == 3
+        chain_a = next(r for r in rydberg if r["arm"] == "A")
+        assert "geometry" not in chain_a["feature_map"]
+        key = bench.cache_key("0" * 64, chain_a["feature_map"], self.KEY_ENV, "c" * 64)
+        assert key == self.CHAIN_KEYS["A"]
+        table = bench.summarise(lines)
+        assert {line.split()[1] for line in table.splitlines()[1:]} == {
+            "chain",
+            "ring",
+            "grid-2x2",
+            "-",
+        }
+
+    def test_the_command_line_passes_the_geometry_also_under_quick(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[Any] = []
+
+        def capture(datasets: Any, settings: Any, out: Any, **kwargs: Any) -> list[Any]:
+            captured.append(settings)
+            return []
+
+        monkeypatch.setattr(bench, "run", capture)
+        out = str(tmp_path / "out.jsonl")
+        bench.main(["--quick", "--geometry", "grid", "ring", "grid", "--out", out, "--no-cache"])
+        bench.main(["--geometry", "grid", "--grid-cols", "2", "--out", out, "--no-cache"])
+        assert captured[0] == _replace(QUICK, geometries=("grid", "ring"))
+        assert (captured[1].geometries, captured[1].grid_cols) == (("grid",), 2)
+        assert bench.Settings().geometries == ("chain",)
+        with pytest.raises(SystemExit):
+            bench._parser().parse_args(["--geometry", "square"])
+
+
 class TestSummary:
     @staticmethod
     def _line(v: float | None, arm: str, feature: float, train: float, **extra: Any) -> dict:
@@ -4433,7 +4762,7 @@ class TestSummary:
         (row,) = [
             line.split()
             for line in table.splitlines()[1:]
-            if line.split()[1] == v and line.split()[3] == arm
+            if line.split()[2] == v and line.split()[4] == arm
         ]
         return row
 

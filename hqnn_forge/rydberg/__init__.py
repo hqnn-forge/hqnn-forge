@@ -14,7 +14,7 @@ JAX, which this library does not depend on.
 
 Exported symbols
 ----------------
-AtomRegister          Atom positions in µm; chain and ring constructors, C6/r^6 couplings, blockade radius.
+AtomRegister          Atom positions in µm; chain, ring and grid constructors, C6/r^6 couplings, blockade radius.
 rydberg_hamiltonian   Dense 2^n x 2^n Hamiltonian of a register, for one or a batch of pulses.
 evolve                ρ(t) from all atoms in |g⟩: exact without dephasing, Strang splitting with it.
 readout               ⟨n_i⟩ of every atom, optionally ⟨n_i n_j⟩ of every pair, from the diagonal of ρ.

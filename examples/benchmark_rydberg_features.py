@@ -75,8 +75,9 @@ For a dataset ``(X, y)`` and one outer fold of :func:`stratified_kfold`
    ``N`` components, each squashed to ``(−π, π)`` (``π · tanh`` of the
    standardised component).  Test rows enter neither fit.  **Component
    ``i`` is input ``i``, and input ``i`` sets the detuning of atom ``i``**,
-   the atom at position ``(i · a, 0)`` of the chain: neighbouring
-   components sit on neighbouring atoms.
+   atom ``i`` in the order of the register's constructor: on the default
+   chain the atom at ``(i · a, 0)``, so that neighbouring components sit on
+   neighbouring atoms (the other geometries are under "Geometry" below).
 3. **Oversampling.**  :func:`smote` on the training rows' inputs.  The
    synthetic rows are made once, in input space, so every arm trains on the
    same samples; validation and test rows are real rows only.
@@ -131,7 +132,9 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
 
       V/Ω = (R_b/a)⁶,        a = R_b · (V/Ω)^(−1/6)        [µm]
 
-  (:func:`spacing`).  The full ``1/r⁶`` tail is kept.
+  (:func:`spacing`).  The full ``1/r⁶`` tail is kept.  ``V`` is the
+  nearest-neighbour interaction in every geometry (below), so ``a`` is the
+  same function of ``V/Ω`` in all three.
 * **``γ/Ω``** is the dephasing rate of the collapse operators ``√γ n_i`` in
   units of Ω: ``γ = (γ/Ω) · Ω`` rad/µs.
 * **Solver steps.**  With ``γ > 0`` the Lindblad solver needs an explicit
@@ -145,7 +148,55 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
   no interaction term): its non-interacting features are computed once per
   dephasing rate and fold and reused across the interaction grid, so every
-  A line has its B line.
+  A line has its B line.  Nor does it depend on the geometry: each feature
+  is a function of its own atom's input only, wherever the atom sits, so B
+  is computed at the first geometry and ``V/Ω`` of the run and reused for
+  every other (``reused_from_geometry``), never recomputed per geometry.
+
+Geometry
+--------
+``--geometry`` lists one or more of :data:`GEOMETRIES`; every geometry is
+run over the whole ``(V/Ω, γ/Ω)`` grid, geometry varying slowest.  The
+default is ``chain`` alone, the geometry of every run before #733, and a
+chain map's cache entry has the same key as before (below).
+
+**``V/Ω`` means the same in every geometry**: ``V = C6/a⁶`` is the
+interaction of the nearest neighbours, all at the spacing ``a`` of
+:func:`spacing`, and no pair is closer.  **Component ``i`` goes to atom
+``i`` in the order of the constructor** (:func:`atom_register`).  What
+changes is how many neighbours an atom has, which components they hold,
+and how far the next-nearest pairs are:
+
+``chain`` (:meth:`~hqnn_forge.rydberg.AtomRegister.chain`)
+    Atom ``i`` at ``(i · a, 0)``.  Neighbours: components ``i ± 1``, one at
+    each end, two inside.  Next-nearest: ``i ± 2`` at ``2a``, ``V/64``.
+``ring`` (:meth:`~hqnn_forge.rydberg.AtomRegister.ring`)
+    The corners of a regular ``N``-gon of side ``a``, counterclockwise.
+    Neighbours: ``i ± 1`` modulo ``N``, two for every atom, so components
+    ``0`` and ``N − 1`` are neighbours as well.  Atoms ``k`` steps apart are
+    the chord ``a · sin(πk/N)/sin(π/N)`` apart; the next-nearest, ``k = 2``,
+    at ``2a cos(π/N)``, with ``V/(2 cos(π/N))⁶``: ``√2 a`` and ``V/8`` for
+    ``N = 4`` (the square's diagonals), ``√3 a`` and ``V/27`` for ``N = 6``.
+    ``N >= 3``: a ring of two atoms is a chain.
+``grid`` (:meth:`~hqnn_forge.rydberg.AtomRegister.grid`)
+    ``rows × cols`` atoms on a square lattice, row-major: component
+    ``k = r · cols + c`` on the atom at ``(c · a, r · a)``.  Neighbours:
+    ``k ± 1`` in the same row and ``k ± cols``, two to four per atom; the
+    components ``k`` and ``k + 1`` at the end of one row and the start of
+    the next are not neighbours.  Next-nearest: the diagonals at ``√2 a``,
+    ``V/8``.  The shape is :func:`grid_shape`: ``--grid-cols`` columns, or
+    by default the most nearly square shape with ``rows <= cols``
+    (``2 × 2`` for 4 atoms, ``2 × 3`` for 6); a column count that does not
+    divide ``N``, or a shape with a single row or column (a chain), is
+    refused.
+
+The positive control's label stays the sum over the bonds of the chain,
+``z_i z_{i+1}``.  On a ring those are neighbours too (with one more pair,
+``0`` and ``N − 1``, that the label does not use); on a grid the pair
+``(cols − 1, cols)`` that ends one row and starts the next is
+``√(1 + (cols − 1)²) · a`` apart (``√2 a`` and ``V/8`` on ``2 × 2``), and
+the vertical pairs ``(k, k + cols)`` are not in the label.  A label that
+follows the geometry is #738.
 
 Units: ħ = 1, angular frequencies (Ω, γ, ``C6/r⁶``) in rad/µs, lengths in
 µm, times in µs; inputs and features are dimensionless.
@@ -174,7 +225,11 @@ computed once and stored under ``--cache-dir``, keyed by the SHA-256
 * ``data``: the data fingerprint, :func:`hqnn_forge.benchmark.fingerprint`
   of the input matrix handed to the map and its labels;
 * ``config``: the map's ``get_config()``, with the number of shots and the
-  shot seed;
+  shot seed, and for a ring or a grid the geometry (``"geometry"``, and
+  ``"grid_shape"`` as ``[rows, cols]``).  A chain's config has no such entry
+  and is exactly the config from before ``--geometry`` existed, so its
+  entries are still hit; a ring and a chain at the same grid point never
+  share one, even where their positions could coincide;
 * ``environment``: the entries of :func:`hqnn_forge.experiment.environment`
   that :func:`hqnn_forge.experiment.compare_environment` compares, i.e. the
   Python version and implementation, the version of ``hqnn_forge`` and those
@@ -281,11 +336,14 @@ Data
 What a line records
 -------------------
 ``arm``, ``head``, ``representation``, ``feature_map_trained``; the grid
-point (``v_over_omega``, ``gamma_over_omega``, ``spacing_um``, ``omega``,
-``omega_t``, ``evolution_time_us``, ``n_steps``) and the map's
-``get_config()`` (``feature_map``); ``reused_from_v_over_omega`` (identifying
-the interaction-grid value from which an arm B record was reused across the
-grid, or ``null`` if the record was computed rather than reused; for reused
+point (``geometry``, ``grid_shape`` as ``[rows, cols]`` for a grid and
+``null`` otherwise, ``v_over_omega``, ``gamma_over_omega``, ``spacing_um``,
+``omega``, ``omega_t``, ``evolution_time_us``, ``n_steps``; all ``null`` for
+arms C, D and ``D-hybrid``) and the map's ``get_config()``
+(``feature_map``); ``reused_from_v_over_omega`` and ``reused_from_geometry``
+(identifying the interaction-grid value and the geometry from which an arm B
+record was reused across the grid, both ``null`` if the record was computed
+rather than reused; for reused
 records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
 all zero, and ``feature_cache_hit``, ``feature_environment`` and the
 ``feature_cache_hits`` and ``feature_environments`` of ``tuning`` are those
@@ -362,7 +420,7 @@ one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
 ``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
-and ``--separation-seed`` still apply.
+``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.
 """
 
 from __future__ import annotations
@@ -438,6 +496,8 @@ DATASETS: tuple[str, ...] = (
     "taiwanese-bankruptcy",
     "cervical-cancer-risk",
 )
+#: Shapes of the atom array that ``--geometry`` can select ("Geometry" in the module docstring).
+GEOMETRIES: tuple[str, ...] = ("chain", "ring", "grid")
 #: Losses by name.  ``bce`` makes the linear head on the inputs a logistic regression.
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
 
@@ -490,7 +550,7 @@ class Settings:
     Attributes
     ----------
     n_atoms:
-        Atoms ``N`` of the chain: the number of PCA components, of inputs
+        Atoms ``N`` of the array: the number of PCA components, of inputs
         and of qubits of arm D.  At most :data:`~hqnn_forge.rydberg.MAX_ATOMS`
         (10) with arm A or B, the Rydberg maps' limit, and at most
         :data:`~hqnn_forge.encoding.AUTO_BACKPROP_MAX_QUBITS` (12) with arm
@@ -512,6 +572,14 @@ class Settings:
         ``C6`` in rad/µs · µm⁶.
     v_over_omega, gamma_over_omega:
         The values whose product is the grid; ``V/Ω > 0``, ``γ/Ω >= 0``.
+    geometries:
+        A non-empty tuple of distinct :data:`GEOMETRIES`, each run over the
+        whole grid.  Default ``("chain",)``.  With arm A or B, ``"ring"``
+        needs ``n_atoms >= 3`` and ``"grid"`` a shape :func:`grid_shape`
+        accepts.
+    grid_cols:
+        Columns of the grid geometry, ``None`` for the default shape of
+        :func:`grid_shape`; only with ``"grid"`` in ``geometries``.
     n_steps:
         Solver steps of every map with ``γ > 0``.
     shots:
@@ -565,6 +633,8 @@ class Settings:
     c6: float = DEFAULT_C6
     v_over_omega: tuple[float, ...] = (0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
     gamma_over_omega: tuple[float, ...] = (0.0, 0.1, 1.0, 10.0)
+    geometries: tuple[str, ...] = ("chain",)
+    grid_cols: int | None = None
     n_steps: int = 200
     shots: int | None = None
     arms: tuple[str, ...] = ARMS
@@ -620,6 +690,30 @@ class Settings:
         unknown = sorted(set(self.arms) - set(ARMS))
         if unknown or not self.arms:
             raise ValueError(f"arms must be a non-empty subset of {list(ARMS)}; got {self.arms}.")
+        geometries = tuple(self.geometries)
+        if (
+            not geometries
+            or not set(geometries) <= set(GEOMETRIES)
+            or len(set(geometries)) != len(geometries)
+        ):
+            raise ValueError(
+                f"geometries must be distinct values of {list(GEOMETRIES)}, at least one; "
+                f"got {self.geometries}."
+            )
+        if self.grid_cols is not None and "grid" not in geometries:
+            raise ValueError(
+                f"grid_cols is the shape of the grid geometry; got grid_cols={self.grid_cols} "
+                f"with geometries {self.geometries}."
+            )
+        # Like the atom limits, the shapes bind only where a Rydberg map is built.
+        if {"A", "B"} & set(self.arms):
+            if "ring" in geometries and self.n_atoms < 3:
+                raise ValueError(
+                    f"the ring geometry needs n_atoms >= 3 (a ring of {self.n_atoms} is a "
+                    f"chain); got {self.n_atoms}."
+                )
+            if "grid" in geometries:
+                grid_shape(self.n_atoms, self.grid_cols)
         if self.loss not in LOSSES:
             raise ValueError(f"loss must be one of {sorted(LOSSES)}; got {self.loss!r}.")
         if self.n_splits < 2 or self.validation_folds < 2:
@@ -652,6 +746,13 @@ class Settings:
             )
 
     @property
+    def grid_shape(self) -> tuple[int, int] | None:
+        """``(rows, cols)`` of the grid geometry (:func:`grid_shape`), ``None`` without it."""
+        if "grid" not in self.geometries:
+            return None
+        return grid_shape(self.n_atoms, self.grid_cols)
+
+    @property
     def evolution_time(self) -> float:
         """The pulse duration ``T = ΩT / Ω`` in µs."""
         return self.omega_t / self.omega
@@ -670,6 +771,7 @@ class Settings:
         """Every field as plain data."""
         plain: dict[str, Any] = dataclasses.asdict(self)
         plain["search_space"] = {k: list(v) for k, v in self.search_space.items()}
+        plain["geometries"] = list(self.geometries)
         return plain
 
 
@@ -1091,20 +1193,81 @@ def spacing(v_over_omega: float, omega: float, c6: float) -> float:
     return AtomRegister.blockade_radius(c6, omega) * v_over_omega ** (-1.0 / 6.0)
 
 
+def grid_shape(n_atoms: int, cols: int | None = None) -> tuple[int, int]:
+    """
+    ``(rows, cols)`` of the grid geometry of ``n_atoms`` atoms.
+
+    With ``cols`` given, ``rows = n_atoms / cols``.  Without, the most nearly
+    square shape with ``rows <= cols``: ``cols`` is the smallest divisor of
+    ``n_atoms`` with ``cols² >= n_atoms``, so 4 atoms are ``2 × 2``, 6 are
+    ``2 × 3``, 8 are ``2 × 4``, 9 are ``3 × 3`` and 12 are ``3 × 4``.
+
+    Raises
+    ------
+    ValueError
+        If ``cols`` is not an integer ``>= 1`` or does not divide
+        ``n_atoms``, or if the shape has a single row or column: that is the
+        chain, which ``"chain"`` already runs.  A prime ``n_atoms`` has no
+        other shape.
+    """
+    if cols is None:
+        cols = next(d for d in range(1, n_atoms + 1) if n_atoms % d == 0 and d * d >= n_atoms)
+    elif not _positive_integer(cols):
+        raise ValueError(f"grid_cols must be an integer >= 1; got {cols!r}.")
+    if n_atoms % cols:
+        raise ValueError(f"grid_cols={cols} does not divide n_atoms={n_atoms}.")
+    rows = n_atoms // cols
+    if rows < 2 or cols < 2:
+        raise ValueError(
+            f"a grid of {rows} × {cols} atoms is a chain; the grid geometry needs at least "
+            f"two rows and two columns (n_atoms={n_atoms}, grid_cols={cols})."
+        )
+    return rows, int(cols)
+
+
+def atom_register(settings: Settings, geometry: str, v_over_omega: float) -> AtomRegister:
+    """
+    The register of ``geometry`` with nearest neighbours at :func:`spacing`.
+
+    ``chain`` is ``AtomRegister.chain(N, a)``, ``ring`` is
+    ``AtomRegister.ring(N, a)`` and ``grid`` is
+    ``AtomRegister.grid(rows, cols, a)`` with ``settings.grid_shape``, so
+    atom ``i``, and with it component ``i``, is atom ``i`` of the
+    constructor; "Geometry" in the module docstring says where each sits.
+    Every constructor puts its nearest neighbours exactly ``a`` apart and no
+    pair closer, so ``max_ij V_ij / Ω = (R_b/a)⁶ = V/Ω`` in each.
+    """
+    a = spacing(v_over_omega, settings.omega, settings.c6)
+    if geometry == "chain":
+        return AtomRegister.chain(settings.n_atoms, a)
+    if geometry == "ring":
+        return AtomRegister.ring(settings.n_atoms, a)
+    if geometry == "grid":
+        rows, cols = grid_shape(settings.n_atoms, settings.grid_cols)
+        return AtomRegister.grid(rows, cols, a)
+    raise ValueError(f"unknown geometry {geometry!r}; choose from {list(GEOMETRIES)}.")
+
+
 def feature_map(
-    settings: Settings, v_over_omega: float, gamma_over_omega: float, *, interactions: bool
+    settings: Settings,
+    v_over_omega: float,
+    gamma_over_omega: float,
+    *,
+    interactions: bool,
+    geometry: str = "chain",
 ) -> RydbergFeatureMap:
     """
     The map of one grid point: arm A with ``interactions=True``, arm B without.
 
-    An open chain of ``n_atoms`` atoms at :func:`spacing`, the pulse
-    ``ΩT = settings.omega_t`` with the default detuning bound ``√3 Ω``, and
-    ``γ = (γ/Ω) · Ω``.  The two arms differ in the ``interactions`` flag and
-    in nothing else.  ``n_steps`` is passed only with ``γ > 0``.
+    ``n_atoms`` atoms of ``geometry`` (:func:`atom_register`, by default the
+    open chain) at :func:`spacing`, the pulse ``ΩT = settings.omega_t`` with
+    the default detuning bound ``√3 Ω``, and ``γ = (γ/Ω) · Ω``.  The two
+    arms differ in the ``interactions`` flag and in nothing else.
+    ``n_steps`` is passed only with ``γ > 0``.
     """
     gamma = gamma_over_omega * settings.omega
     return RydbergFeatureMap(
-        AtomRegister.chain(settings.n_atoms, spacing(v_over_omega, settings.omega, settings.c6)),
+        atom_register(settings, geometry, v_over_omega),
         PulseEncoding(settings.n_atoms, omega=settings.omega, t=settings.evolution_time),
         c6=settings.c6,
         gamma=gamma,
@@ -1177,6 +1340,9 @@ class Representation:
         The models trained on it.
     v_over_omega, gamma_over_omega:
         The grid point, ``None`` for the arms without one.
+    geometry, grid_shape:
+        The geometry of the grid point and, for ``"grid"``, its
+        ``(rows, cols)``; ``None`` for the arms without a grid point.
     config:
         The settings the features are cached under: the map's
         ``get_config()`` (or arm D's circuit settings) with the shots.
@@ -1197,6 +1363,8 @@ class Representation:
     heads: tuple[str, ...]
     v_over_omega: float | None = None
     gamma_over_omega: float | None = None
+    geometry: str | None = None
+    grid_shape: tuple[int, int] | None = None
     config: dict[str, Any] | None = None
     compute: Callable[[FloatArray], FloatArray] | None = None
     n_frozen_parameters: int = 0
@@ -1204,10 +1372,17 @@ class Representation:
 
 
 def _rydberg_representation(
-    settings: Settings, arm: str, v: float, gamma: float, shot_seed: int
+    settings: Settings, arm: str, v: float, gamma: float, shot_seed: int, geometry: str = "chain"
 ) -> Representation:
-    fmap = feature_map(settings, v, gamma, interactions=arm == "A")
+    fmap = feature_map(settings, v, gamma, interactions=arm == "A", geometry=geometry)
     shots = settings.shots
+    shape = settings.grid_shape if geometry == "grid" else None
+    # The chain's config is the one from before #733, so that its cache entries are still hit.
+    shape_config: dict[str, Any] = (
+        {}
+        if geometry == "chain"
+        else {"geometry": geometry, **({} if shape is None else {"grid_shape": list(shape)})}
+    )
 
     def compute(inputs: FloatArray) -> FloatArray:
         generator = None if shots is None else torch.Generator().manual_seed(shot_seed)
@@ -1221,11 +1396,14 @@ def _rydberg_representation(
         heads=HEADS,
         v_over_omega=v,
         gamma_over_omega=gamma,
+        geometry=geometry,
+        grid_shape=shape,
         config={
             "feature_map": "RydbergFeatureMap",
             "config": fmap.get_config(),
             "shots": shots,
             "shot_seed": None if shots is None else shot_seed,
+            **shape_config,
         },
         compute=compute,
     )
@@ -1278,14 +1456,20 @@ def _circuit_representation(
 def representations(settings: Settings) -> list[Representation]:
     """
     Every representation of a run, in output order: A and B at each grid
-    point, then C, D and D-hybrid, as far as ``settings.arms`` selects them.
+    point of each geometry (geometry varying slowest), then C, D and
+    D-hybrid, as far as ``settings.arms`` selects them.
     """
     seeds = run_seeds(settings.random_state)
     result: list[Representation] = []
-    for v, gamma in grid(settings):
-        for arm in ("A", "B"):
-            if arm in settings.arms:
-                result.append(_rydberg_representation(settings, arm, v, gamma, seeds["shot_seed"]))
+    for geometry in settings.geometries:
+        for v, gamma in grid(settings):
+            for arm in ("A", "B"):
+                if arm in settings.arms:
+                    result.append(
+                        _rydberg_representation(
+                            settings, arm, v, gamma, seeds["shot_seed"], geometry
+                        )
+                    )
     if "C" in settings.arms:
         result.append(Representation(arm="C", kind="inputs", heads=HEADS))
     if "D" in settings.arms:
@@ -2177,6 +2361,8 @@ def _grid_fields(rep: Representation, settings: Settings) -> dict[str, Any]:
     if rep.v_over_omega is None or rep.gamma_over_omega is None or rep.config is None:
         return dict.fromkeys(
             (
+                "geometry",
+                "grid_shape",
                 "v_over_omega",
                 "gamma_over_omega",
                 "spacing_um",
@@ -2187,6 +2373,8 @@ def _grid_fields(rep: Representation, settings: Settings) -> dict[str, Any]:
             )
         )
     return {
+        "geometry": rep.geometry,
+        "grid_shape": None if rep.grid_shape is None else list(rep.grid_shape),
         "v_over_omega": rep.v_over_omega,
         "gamma_over_omega": rep.gamma_over_omega,
         "spacing_um": spacing(rep.v_over_omega, settings.omega, settings.c6),
@@ -2312,6 +2500,7 @@ def run_dataset(
                         **_grid_fields(rep, settings),
                         "feature_map": rep.config,
                         "reused_from_v_over_omega": cached_record["v_over_omega"],
+                        "reused_from_geometry": cached_record["geometry"],
                         "feature_seconds": 0.0,
                         "train_seconds": 0.0,
                         "tuning_seconds": 0.0,
@@ -2395,6 +2584,7 @@ def run_dataset(
                     **_grid_fields(rep, settings),
                     "feature_map": rep.config,
                     "reused_from_v_over_omega": None,
+                    "reused_from_geometry": None,
                     "measurement": "shots" if sampled else "exact",
                     "shots": settings.shots if sampled else None,
                     **fold_info,
@@ -2432,21 +2622,39 @@ def _mean_seconds(rows: Sequence[Mapping[str, Any]], name: str, width: int) -> s
     return format(float(np.mean([r[name] for r in rows])), f"{width}.2f")
 
 
+def geometry_label(record: Mapping[str, Any]) -> str | None:
+    """
+    The geometry of a line as one word: ``chain``, ``ring`` or ``grid-RxC``.
+
+    ``None`` for the arms without a grid point (C, D, ``D-hybrid``).  A line
+    of arm A or B without the field was written before ``--geometry``
+    existed, on the chain.
+    """
+    geometry = record.get("geometry", "chain" if record["arm"] in ("A", "B") else None)
+    if geometry == "grid" and record.get("grid_shape") is not None:
+        rows, cols = record["grid_shape"]
+        return f"grid-{rows}x{cols}"
+    return None if geometry is None else str(geometry)
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     """
-    Mean and fold spread of MCC and PR-AUC per dataset, arm, head and grid point.
+    Mean and fold spread of MCC and PR-AUC per dataset, geometry, arm, head and grid point.
 
+    The geometry is :func:`geometry_label`, ``-`` for the arms without one.
     ``feat s`` and ``fit s`` are the mean ``feature_seconds`` and
     ``train_seconds`` of the lines that were computed: a reused arm B line
     (``reused_from_v_over_omega`` not ``null``) has both at 0 and is left
     out, and a row whose lines are all reused shows ``-``.  The cost of arm B
-    is therefore in the row of the ``V/Ω`` it was computed at: the first
-    value given to ``--v-over-omega``, which need not be the smallest.
+    is therefore in the row of the geometry and ``V/Ω`` it was computed at:
+    the first values given to ``--geometry`` and ``--v-over-omega``, which
+    need not be the smallest.
     """
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for record in records:
         key = (
             record["dataset"],
+            geometry_label(record),
             record["v_over_omega"],
             record["gamma_over_omega"],
             record["arm"],
@@ -2454,17 +2662,18 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
         )
         groups.setdefault(key, []).append(record)
     header = (
-        f"{'dataset':22s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
+        f"{'dataset':22s} {'geometry':10s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
         f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'feat s':>7s} {'fit s':>6s}  n"
     )
     lines = [header]
-    for (dataset, v, gamma, arm, head), rows in groups.items():
+    for (dataset, geometry, v, gamma, arm, head), rows in groups.items():
         computed = [r for r in rows if r.get("reused_from_v_over_omega") is None]
         mcc = np.array([r["mcc"] for r in rows], dtype=np.float64)
         spread = mcc.std(ddof=1) if len(rows) > 1 else 0.0
         ap = float(np.mean([r["pr_auc"] for r in rows]))
         lines.append(
-            f"{dataset:22s} {'-' if v is None else format(v, 'g'):>6s} "
+            f"{dataset:22s} {'-' if geometry is None else geometry:10s} "
+            f"{'-' if v is None else format(v, 'g'):>6s} "
             f"{'-' if gamma is None else format(gamma, 'g'):>6s} {arm:8s} {head:6s} "
             f"{mcc.mean():7.3f} ± {spread:5.3f} {ap:7.3f} {rows[0]['feature_dim']:4d} "
             f"{rows[0]['n_parameters']:6d} "
@@ -2625,7 +2834,7 @@ def _parser() -> argparse.ArgumentParser:
             "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
             "ignoring conflicting grid, model, dataset-selection, and training options; "
             "only --out, --cache-dir, --no-cache, --seed, --standardise/--no-standardise, "
-            "--max-separation-rows, and --separation-seed still apply"
+            "--max-separation-rows, --separation-seed, --geometry and --grid-cols still apply"
         ),
     )
     parser.add_argument(
@@ -2684,6 +2893,25 @@ def _parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(default.gamma_over_omega),
         help="gamma/Omega grid values (dephasing rate / Rabi frequency); 0 = no dephasing",
+    )
+    parser.add_argument(
+        "--geometry",
+        nargs="+",
+        choices=GEOMETRIES,
+        default=list(default.geometries),
+        help=(
+            "atom arrays to run, each over the whole grid, with V/Omega the nearest-neighbour "
+            "interaction in each; arm B is computed once for all of them"
+        ),
+    )
+    parser.add_argument(
+        "--grid-cols",
+        type=int,
+        default=None,
+        help=(
+            "columns of the grid geometry, dividing --n-atoms; omit for the most nearly "
+            "square shape with rows <= columns (2 x 2 for 4 atoms, 2 x 3 for 6)"
+        ),
     )
     parser.add_argument(
         "--n-steps",
@@ -2826,7 +3054,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``positive-control`` dataset, ignoring conflicting grid, model,
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
-    ``--max-separation-rows``, and ``--separation-seed`` still apply.
+    ``--max-separation-rows``, ``--separation-seed``, ``--geometry`` and
+    ``--grid-cols`` still apply.
 
     ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
     other option, ``--quick`` and ``--out`` included, is ignored.
@@ -2887,9 +3116,12 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             f">= {MIN_SEPARATION_ROWS}; got {args.max_separation_rows}"
         )
     max_sep = args.max_separation_rows or None
+    geometries = tuple(dict.fromkeys(args.geometry))
     if args.quick:
         settings = dataclasses.replace(
             QUICK,
+            geometries=geometries,
+            grid_cols=args.grid_cols,
             random_state=args.seed,
             standardise=args.standardise,
             max_separation_rows=max_sep,
@@ -2901,6 +3133,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             n_atoms=args.n_atoms,
             v_over_omega=tuple(args.v_over_omega),
             gamma_over_omega=tuple(args.gamma_over_omega),
+            geometries=geometries,
+            grid_cols=args.grid_cols,
             n_steps=args.n_steps,
             shots=args.shots,
             arms=tuple(args.arms),

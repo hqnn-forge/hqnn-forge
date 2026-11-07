@@ -108,17 +108,55 @@ evolution starts with every atom in `|g⟩`.
 
 ## Geometry
 
-**One shape: an open chain.** `N` atoms on a line at spacing `a`, atom `i` at
+**The default shape: an open chain.** `N` atoms on a line at spacing `a`, atom `i` at
 `r_i = (i · a, 0)`, in the order of the inputs: input `x_i` goes to atom `i`, so neighbouring
 inputs sit on neighbouring atoms. `N` equals the input dimension `d`. The default sizes are
 `4 ≤ N ≤ 6`; nothing on this page depends on that range. Every formula holds for any `N ≥ 1`,
 and the [closed-form limits](#closed-form-limits) use one to three atoms, so an implementation
 limits `N` only from above.
 
-- **The full `1/r⁶` tail is kept.** `V_ij = V / |i − j|⁶` with `V = C6/a⁶` the
+**Two more shapes** (#733), for asking whether what the chain shows is a property of the
+chain: on a chain each atom has at most two neighbours, and the next pair is already `1/64`
+as strong. In all three, input `x_i` goes to atom `i` in the order of the register's
+constructor, every nearest-neighbour pair is exactly `a` apart and no pair is closer, so
+**`V = C6/a⁶` is the nearest-neighbour interaction in every shape** and `V/Ω` and the spacing
+below mean the same in each. What changes is the number of neighbours, which inputs they
+hold, and the distance to the next-nearest pair:
+
+| Shape | Atom `i` at | Neighbours of input `i` | Per atom | Next-nearest |
+|---|---|---|---|---|
+| chain (`AtomRegister.chain`) | `(i · a, 0)` | `i ± 1` | 1–2 | `2a`, `V/64` |
+| ring (`AtomRegister.ring`) | corner `i` of a regular `N`-gon of side `a`, counterclockwise | `i ± 1` mod `N` | 2 | `2a cos(π/N)`, `V/(2 cos(π/N))⁶` |
+| grid (`AtomRegister.grid`) | `(c · a, r · a)` for `i = r · cols + c`, row-major | `i ± 1` in a row, `i ± cols` | 2–4 | `√2 a`, `V/8` |
+
+- **Ring.** Atoms `k` steps apart are the chord `a · sin(πk/N) / sin(π/N)` apart, so the
+  next-nearest pair (`k = 2`) is `2a cos(π/N)` apart: `√2 a` and `V/8` for `N = 4`, `√3 a` and
+  `V/27` for `N = 6`. Inputs `0` and `N − 1` are neighbours. A ring needs `N ≥ 3`; one of two
+  atoms is a chain.
+- **Grid.** `rows × cols` with `rows · cols = N`; at least two of each, since one row is a
+  chain. The inputs `cols − 1` and `cols` that end one row and start the next are not
+  neighbours but `√(1 + (cols − 1)²) · a` apart. The benchmark's default shape is the most
+  nearly square one with `rows ≤ cols`: `2 × 2` for four atoms, `2 × 3` for six.
+- **Four atoms.** The ring and the `2 × 2` grid are the same square; they differ in which
+  inputs are neighbours: `(0,1), (1,2), (2,3), (3,0)` on the ring, `(0,1), (2,3), (0,2), (1,3)`
+  on the grid.
+- **Next-nearest couplings** at the swept `V/Ω`, as `V_ij/Ω` of the next-nearest pair (four
+  and six atoms on the ring):
+
+    | `V/Ω` | 0.1 | 0.3 | 1 | 3 | 10 | 30 | 100 |
+    |---|---|---|---|---|---|---|---|
+    | chain, `2a` | 0.0016 | 0.0047 | 0.016 | 0.047 | 0.16 | 0.47 | 1.6 |
+    | ring of 6, `√3 a` | 0.0037 | 0.011 | 0.037 | 0.11 | 0.37 | 1.1 | 3.7 |
+    | ring of 4 and grid, `√2 a` | 0.0125 | 0.0375 | 0.125 | 0.375 | 1.25 | 3.75 | 12.5 |
+
+    The next-nearest pairs enter the blockade (`V_ij > Ω`) from `V/Ω > 8` on a grid or a
+    ring of four, `27` on a ring of six, and `64` on the chain.
+
+- **The full `1/r⁶` tail is kept.** On the chain `V_ij = V / |i − j|⁶` with `V = C6/a⁶` the
   nearest-neighbour interaction: next-nearest neighbours interact with `V/64`, the next with
-  `V/729`. At this size the tail costs nothing, and truncating to nearest neighbours would be
-  one more approximation to justify.
+  `V/729`; on the other shapes `V_ij = V · (a/|r_i − r_j|)⁶` for every pair alike. At this size
+  the tail costs nothing, and truncating to nearest neighbours would be one more approximation
+  to justify.
 - **Blockade radius.** `R_b = (C6/Ω)^(1/6)` is the distance at which two atoms interact with
   `V_ij = Ω`, so `V/Ω = (R_b/a)⁶` and `a = R_b · (V/Ω)^(−1/6)`. At the reference Ω,
   `R_b = 8.69 µm`. A unit-disk graph at radius `R_b` (`AtomRegister.interaction_graph`, the
