@@ -33,7 +33,7 @@ from hqnn_forge.models import (
     MulticlassHybridClassifier,
     ParallelHybridClassifier,
 )
-from hqnn_forge.noise import Channel, apply_depolarizing_noise, noise_sweep
+from hqnn_forge.noise import Channel, Position, apply_depolarizing_noise, noise_sweep
 from hqnn_forge.rydberg import AtomRegister
 
 F64 = torch.float64
@@ -625,28 +625,72 @@ class TestEveryPulseSegment:
         ):
             layer(self._x())
 
-    def test_trajectories_at_all_are_refused(self) -> None:
-        """Undecided (#717): sampled after ``ρ(T)`` they would act once, as at ``"end"``."""
-        with pytest.raises(ValueError, match=r"noise_method='trajectories'.*'all'.*gamma > 0"):
-            AnalogRydbergLayer(
+    TRAJECTORIES_MESSAGE = (
+        "noise_method='trajectories' at position 'all' is not available on a circuit that "
+        "evolves its segments outside the circuit (AnalogRydbergLayer with gamma > 0): "
+        "drawn after its one density-matrix preparation, the errors would act once, as "
+        "at 'end', not after every segment, and the circuit holds the 4^N density matrix "
+        "anyway, so sampling would save no memory.  Use noise_method='density', which "
+        "applies the channel exactly after every segment at that same cost, or position "
+        "'end'."
+    )
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    def test_trajectories_at_all_are_refused(self, channel: Channel) -> None:
+        """
+        Decided on #743 (#717): refused by ``trajectory_noise_qnode``, and so
+        by the layer and the classifiers, for every channel.
+
+        Drawn after ``ρ(T)`` the errors would act once, as at ``"end"``; drawn
+        between the segments they would save no memory, since the circuit
+        holds ρ anyway (``noise`` module docstring, *Circuits without gates
+        between segments*).  The weighted-Kraus channels never reach this
+        check on the layer: ``check_kraus_trajectories`` refuses them on
+        ``default.mixed`` at any position, as before #717.
+        """
+        from hqnn_forge.noise import CHANNELS, trajectory_noise_qnode
+
+        qnode = AnalogRydbergLayer(2, 2, gamma=1.0, n_steps=3).qlayer.qnode
+        with pytest.raises(ValueError) as error:
+            trajectory_noise_qnode(qnode, 0.1, position="all", channel=channel)
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
+
+        def layer(gamma: float, position: Position) -> AnalogRydbergLayer:
+            return AnalogRydbergLayer(
                 2,
                 2,
+                gamma=gamma,
+                n_steps=3 if gamma > 0 else None,
+                noise_level=0.1,
+                noise_position=position,
+                noise_method="trajectories",
+                noise_channel=channel,
+            )
+
+        if CHANNELS[channel].paulis is None:
+            with pytest.raises(ValueError, match="trajectories apply non-unitary"):
+                layer(1.0, "end")
+            return
+        with pytest.raises(ValueError) as error:
+            layer(1.0, "all")
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
+        with pytest.raises(ValueError) as error:
+            HybridBinaryClassifier(
+                n_input_features=2,
+                n_qubits=2,
+                encoding_type="analog",
                 gamma=1.0,
                 n_steps=3,
                 noise_level=0.1,
                 noise_position="all",
                 noise_method="trajectories",
+                noise_channel=channel,
             )
-        # "end" with trajectories is unaffected.
-        AnalogRydbergLayer(
-            2,
-            2,
-            gamma=1.0,
-            n_steps=3,
-            noise_level=0.1,
-            noise_position="end",
-            noise_method="trajectories",
-        )
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
+        # Not refused: "end" with gamma > 0, and "all" with gamma = 0, where
+        # the draws sit after every QubitUnitary.
+        assert layer(1.0, "end").noise_method == "trajectories"
+        assert layer(0.0, "all").noise_method == "trajectories"
 
 
 class TestClassifiers:

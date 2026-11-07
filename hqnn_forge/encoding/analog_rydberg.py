@@ -123,7 +123,10 @@ noise, :func:`~hqnn_forge.noise.apply_depolarizing_noise`,
 :func:`~hqnn_forge.noise.noise_sweep` and the kernels alike.
 ``noise_method="trajectories"`` at ``"all"`` is refused with ``gamma > 0``:
 drawn after the one preparation, its errors would act once, as at
-``"end"``.  ``"cz"`` raises, as without dephasing.
+``"end"``, and drawn between the segments they would save nothing, since
+this circuit holds ρ anyway and the exact channel costs one Kraus map per
+atom and segment (*Circuits without gates between segments* in
+:mod:`hqnn_forge.noise`).  ``"cz"`` raises, as without dephasing.
 
 Basis, wires and readout
 ------------------------

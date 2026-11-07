@@ -183,8 +183,21 @@ the noisy QNode through the same function, so training noise,
 :func:`apply_depolarizing_noise`, :func:`noise_sweep` and the kernels
 (:func:`hqnn_forge.kernels.quantum_kernel_matrix`) all get it.  ``"end"``
 and ``"cz"`` are inserted into the circuit as before: ``"end"`` acts once on
-``ρ(T)``, and ``"cz"`` raises, as the pulse has no CZ.  Trajectories at
-``"all"`` are refused on that circuit.
+``ρ(T)``, and ``"cz"`` raises, as the pulse has no CZ.
+
+``noise_method="trajectories"`` at ``"all"`` is refused on that circuit, by
+:func:`trajectory_noise_qnode` and so when the layer is built (#717).
+Inserted into the circuit, the draws would act once, after the preparation,
+as at ``"end"``.  Drawing them between the segments instead would be
+correct, since each draw's average is the channel, but pointless: the
+method exists to give the density result at pure-state cost, and this
+circuit already holds ``ρ``, ``4^N`` entries per sample, through every
+segment, while the exact channel between segments adds only a Kraus map per
+atom and segment to the ``evolve`` calls.  A draw would only add variance.
+``"trajectories"`` at ``"end"`` is accepted as before for the Pauli
+channels: its sites, after the preparation, are the ones ``"end"`` means
+(the weighted-Kraus channels are refused on ``default.mixed`` at any
+position, by :func:`check_kraus_trajectories`).
 
 Training-time noise
 -------------------
@@ -850,7 +863,10 @@ def trajectory_noise_qnode(
         device or shots :func:`check_kraus_trajectories` refuses; and at
         ``"all"`` on the circuit of
         :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``,
-        which has no gate between its segments (#717).
+        which has no gate between its segments and holds ρ anyway, so
+        sampling there would save no memory over the exact channel
+        (*Circuits without gates between segments* in the module docstring;
+        #717).
     """
     validate_noise(p, position, channel=channel)
     if p == 0.0:
@@ -862,8 +878,10 @@ def trajectory_noise_qnode(
             "noise_method='trajectories' at position 'all' is not available on a circuit that "
             "evolves its segments outside the circuit (AnalogRydbergLayer with gamma > 0): "
             "drawn after its one density-matrix preparation, the errors would act once, as "
-            "at 'end', not after every segment.  Use noise_method='density', which applies "
-            "the channel after every segment, or position 'end'."
+            "at 'end', not after every segment, and the circuit holds the 4^N density matrix "
+            "anyway, so sampling would save no memory.  Use noise_method='density', which "
+            "applies the channel exactly after every segment at that same cost, or position "
+            "'end'."
         )
     if not _kraus_sampled(channel):
         return _pauli_trajectories(qnode, p=p, position=position, channel=channel)
