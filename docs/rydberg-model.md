@@ -465,7 +465,8 @@ meet.
 
 **The encoding is an idealisation.** A detuning that is set freely and independently for each
 atom is more than current devices offer as a standard capability. A device-compatible variant
-would have to give up:
+would have to give up the following; `GlobalDrivePulseEncoding` gives up the exact `Δ_i` and the
+square pulse (see [Encoding](#encoding) and [Pulse](#pulse)):
 
 - **the exact `Δ_i`:** each sample's detunings become one pattern `h_k` of finite resolution,
   scaled by a waveform shared by all atoms;
