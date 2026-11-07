@@ -511,6 +511,10 @@ def _positive_integer(value: Any) -> bool:
     return isinstance(value, numbers.Integral) and not isinstance(value, bool) and not value < 1
 
 
+def _integer(value: Any) -> bool:
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
 def _positive_real(value: Any) -> bool:
     return (
         isinstance(value, numbers.Real)
@@ -835,28 +839,56 @@ class PositiveControl(NamedTuple):
     latent: FloatArray
 
 
-def product_labels(latent: npt.ArrayLike) -> IntArray:
+def product_labels(
+    latent: npt.ArrayLike, bonds: Sequence[Sequence[int]] | None = None
+) -> IntArray:
     """
-    ``y = 1`` where ``Σ_{i=0}^{N−2} z_i z_{i+1} > 0``, else 0.
+    ``y = 1`` where ``S = Σ_{(j, k) ∈ bonds} z_j z_k > 0``, else 0.
 
-    The sum runs over the bonds of an open chain: each term is the product
-    of two latent variables that sit on neighbouring atoms.
+    Each term is the product of the latent variables of two atoms that are
+    nearest neighbours.  Without ``bonds``, the bonds of an open chain,
+    ``S = Σ_{i=0}^{N−2} z_i z_{i+1}``, computed as before ``bonds`` existed;
+    :func:`nearest_neighbour_bonds` ``(N, "chain")`` gives the same labels,
+    sample by sample.
 
     Parameters
     ----------
     latent:
         Shape ``(n_samples, N)`` with ``N >= 2``; column ``i`` belongs to
         atom ``i``.
+    bonds:
+        Pairs ``(j, k)`` of distinct atoms in ``[0, N)``, at least one, for
+        instance :func:`nearest_neighbour_bonds` of a geometry.  The sum
+        runs over them in the order given.
     """
     z = np.asarray(latent, dtype=np.float64)
     if z.ndim != 2 or z.shape[1] < 2:
         raise ValueError(f"latent must have shape (n_samples, N >= 2); got {z.shape}.")
-    bonds: FloatArray = (z[:, :-1] * z[:, 1:]).sum(axis=1)
-    return (bonds > 0).astype(np.int64)
+    if bonds is None:
+        total: FloatArray = (z[:, :-1] * z[:, 1:]).sum(axis=1)
+        return (total > 0).astype(np.int64)
+    n = z.shape[1]
+    pairs = [tuple(bond) for bond in bonds]
+    if not pairs:
+        raise ValueError("bonds must hold at least one bond.")
+    if not all(
+        len(pair) == 2 and all(_integer(j) and 0 <= j < n for j in pair) and pair[0] != pair[1]
+        for pair in pairs
+    ):
+        raise ValueError(f"bonds must be pairs of distinct atoms in [0, {n}); got {pairs}.")
+    first = [int(pair[0]) for pair in pairs]
+    second = [int(pair[1]) for pair in pairs]
+    total = (z[:, first] * z[:, second]).sum(axis=1)
+    return (total > 0).astype(np.int64)
 
 
 def positive_control(
-    n_atoms: int, n_samples: int, seed: int, *, noise: float = 0.1
+    n_atoms: int,
+    n_samples: int,
+    seed: int,
+    *,
+    noise: float = 0.1,
+    bonds: Sequence[Sequence[int]] | None = None,
 ) -> PositiveControl:
     """
     A task that needs products of inputs on neighbouring atoms.
@@ -864,7 +896,11 @@ def positive_control(
     Construction
     ------------
     ``z`` holds ``N`` independent standard normal latent variables per
-    sample, and the label is :func:`product_labels` of them.  The raw
+    sample, and the label is :func:`product_labels` of them over ``bonds``:
+    the sign of ``S = Σ_{(j, k)} z_j z_k``.  Without ``bonds``, those of the
+    open chain, ``(i, i + 1)``, and the control is the one from before
+    ``bonds`` existed, bit for bit.  The latents, the raw features and so
+    the inputs do not depend on ``bonds``: only the label does.  The raw
     features are noisy copies: latent ``i`` appears in ``m_i = 2^(N−1−i)``
     columns, each ``z_i + noise · ε`` with its own standard normal ε.  The
     columns are in the order of the latents (``m_0`` copies of ``z_0``
@@ -893,12 +929,23 @@ def positive_control(
 
     Why a single input says nothing about the label
     -----------------------------------------------
-    Fix an atom ``i`` and flip the sign of every latent whose index has the
-    other parity.  Each bond ``(j, j+1)`` joins one index of each parity, so
-    every product ``z_j z_{j+1}`` changes sign and the label flips, while
-    ``z_i`` is unchanged and the distribution of ``z`` is the same.  Hence
-    ``P(y = 1 | z_i) = ½`` for every ``i``: the label is independent of each
-    single latent, and so of each single input.  For any functions ``g_i``,
+    This holds where the bonds are **bipartite**: where the atoms can be
+    coloured with two colours so that every bond joins one atom of each.
+    The bonds of :func:`nearest_neighbour_bonds` are: on the chain and on a
+    ring of even ``N``, colour by the parity of the index (the ring's
+    closing bond ``(N − 1, 0)`` joins an odd and an even index when ``N`` is
+    even); on a grid, atom ``k = r · cols + c`` by the parity of ``r + c``,
+    since a bond changes ``r`` or ``c`` by one.  (Not by the parity of
+    ``k``: with an even ``cols`` the column bond ``(k, k + cols)`` joins two
+    indices of one parity.)  A ring of odd ``N`` is not bipartite (below).
+
+    Fix an atom ``i`` and flip the sign of every latent of the other colour
+    than ``i``'s.  Every product ``z_j z_k`` changes sign, so ``S → −S``
+    and the label flips (``S = 0`` has probability 0), while ``z_i`` is
+    unchanged and the distribution of ``z``, independent and symmetric, is
+    the same.  Hence ``P(y = 1 | z_i) = ½`` for every ``i``: the label is
+    independent of each single latent, and so of each single input.  In
+    particular ``P(y = 1) = ½``.  For any functions ``g_i``,
 
     ::
 
@@ -913,9 +960,56 @@ def positive_control(
     single-input functions, and a half-space far from the centre can isolate
     a corner in which two neighbouring inputs share a sign, so a linear head
     on such features can still score above zero.  The interactions of arm A
-    make feature ``i`` depend on ``x_{i−1}`` and ``x_{i+1}`` as well, and
-    the class means of its features differ.  The classes are balanced, so
-    SMOTE adds at most a few rows.
+    make feature ``i`` depend on the inputs of its neighbours as well
+    (``x_{i−1}`` and ``x_{i+1}`` on the chain), and the class means of its
+    features differ.  The classes are balanced, so SMOTE adds at most a few
+    rows.
+
+    A ring of odd ``N``
+    -------------------
+    Going round the ring, the colours of a bipartite colouring would have to
+    alternate ``N`` times and end where they started, which an odd ``N``
+    does not allow: every choice of signs keeps the sign of at least one
+    bond, and no flip turns ``S`` around.  What holds and what does not:
+
+    * **Odd functions of one input are still blind.**  The global flip
+      ``z → −z`` keeps every product and so every label, and maps ``z_i`` to
+      ``−z_i``: ``P(y = 1 | z_i = t) = P(y = 1 | z_i = −t)``, and
+      ``Cov(y, g(z_i)) = 0`` for every odd ``g``.  In the population input
+      ``i`` is an odd function of ``z_i`` (``π tanh`` of a centred mean of
+      copies with symmetric noise), so **the class means of every input
+      still coincide**, on any bonds.
+    * **Other functions of one input are not.**  At ``z_i = 0`` the two
+      bonds of atom ``i`` vanish, ``S`` is the sum over the open chain of
+      the other ``N − 1`` atoms, which is bipartite, and
+      ``P(y = 1 | z_i = 0) = ½``.  But ``P(y = 1) ≠ ½``: ``S = ½ zᵀ A z``
+      with ``A`` the ring's adjacency matrix, whose eigenvalues
+      ``2 cos(2πk/N)`` are not symmetric about 0 for odd ``N`` (2 is one,
+      −2 is not), so ``S`` and ``−S`` are not equally distributed.  For
+      ``N = 3`` (eigenvalues 2, −1, −1), ``S = w_1² − (w_2² + w_3²)/2`` with
+      independent standard normal ``w``, and ``w_2² + w_3²`` is exponential
+      with mean 2, so
+
+      ::
+
+          P(y = 1) = P(w_2² + w_3² < 2 w_1²) = 1 − E[e^{−w_1²}] = 1 − 1/√3 ≈ 0.423
+
+      and Imhof's formula gives 0.516, 0.4965, 0.5008 and 0.4998 for
+      ``N = 5, 7, 9, 11``.  As ``P(y = 1)`` is the mean of
+      ``P(y = 1 | z_i)``, which is ½ at ``z_i = 0``, ``P(y = 1 | z_i)`` is
+      not constant: on the triangle it is 0.397 at ``|z_0| = 0.5`` and
+      0.438 at 2.  A function of one input that is not odd can therefore
+      correlate with the label, arm B's features (functions of
+      ``σ(x_i)``) among them, and their class means need not coincide.
+      ``z_i²`` happens to be blind as well: ``S`` is quadratic, so the label
+      depends only on the direction ``z/|z|``, which is independent of
+      ``|z|`` for a standard normal ``z``, and by the ring's rotation
+      symmetry ``E[z_i² | y] = E[|z|²]/N = 1`` in both classes.
+
+    The leak shrinks with ``N`` as ``P(y = 1)`` tends to ½, and the classes
+    are not balanced either (42 % positives at ``N = 3``, so SMOTE adds more
+    rows there).  On an odd ring the control is therefore a weaker check of
+    the pipeline than on the bipartite geometries.
 
     Parameters
     ----------
@@ -928,6 +1022,10 @@ def positive_control(
         Seed of the generator the latents and the noise are drawn from.
     noise:
         Standard deviation of the noise on each copy, ``> 0``.
+    bonds:
+        The bonds of the label (:func:`product_labels`), for instance
+        :func:`nearest_neighbour_bonds` of a geometry; ``None`` for the
+        open chain's.
 
     Returns
     -------
@@ -941,7 +1039,7 @@ def positive_control(
     copies = [2 ** (n_atoms - 1 - i) for i in range(n_atoms)]
     owner = np.repeat(np.arange(n_atoms), copies)
     X = latent[:, owner] + noise * rng.standard_normal((n_samples, owner.size))
-    return PositiveControl(np.ascontiguousarray(X), product_labels(latent), latent)
+    return PositiveControl(np.ascontiguousarray(X), product_labels(latent, bonds), latent)
 
 
 def check_positive_control_atoms(n_atoms: int) -> None:
@@ -1238,14 +1336,62 @@ def atom_register(settings: Settings, geometry: str, v_over_omega: float) -> Ato
     pair closer, so ``max_ij V_ij / Ω = (R_b/a)⁶ = V/Ω`` in each.
     """
     a = spacing(v_over_omega, settings.omega, settings.c6)
+    return _register(settings.n_atoms, geometry, a, settings.grid_cols)
+
+
+def _register(n_atoms: int, geometry: str, a: float, grid_cols: int | None) -> AtomRegister:
+    """``n_atoms`` atoms of ``geometry`` with nearest neighbours ``a`` µm apart."""
     if geometry == "chain":
-        return AtomRegister.chain(settings.n_atoms, a)
+        return AtomRegister.chain(n_atoms, a)
     if geometry == "ring":
-        return AtomRegister.ring(settings.n_atoms, a)
+        return AtomRegister.ring(n_atoms, a)
     if geometry == "grid":
-        rows, cols = grid_shape(settings.n_atoms, settings.grid_cols)
+        rows, cols = grid_shape(n_atoms, grid_cols)
         return AtomRegister.grid(rows, cols, a)
     raise ValueError(f"unknown geometry {geometry!r}; choose from {list(GEOMETRIES)}.")
+
+
+#: Radius of :func:`nearest_neighbour_bonds` in units of the spacing ``a``: halfway
+#: between ``a`` and ``√2 a``, the closest any other pair of every geometry gets.
+_BOND_RADIUS: Final = (1.0 + math.sqrt(2.0)) / 2.0
+
+
+def nearest_neighbour_bonds(
+    n_atoms: int, geometry: str, grid_cols: int | None = None
+) -> list[tuple[int, int]]:
+    """
+    The nearest-neighbour pairs ``(j, k)``, ``j < k``, of ``geometry``.
+
+    The edges of :meth:`~hqnn_forge.rydberg.AtomRegister.interaction_graph`
+    of the register of :func:`atom_register` at spacing ``a = 1``, at the
+    radius ``(1 + √2)/2 ≈ 1.21``, sorted lexicographically, with atom ``i``
+    in the order of the constructor ("Geometry" in the module docstring).
+    The radius lies between the nearest-neighbour distance ``a`` and the
+    smallest other distance of every geometry, ``√2 a``: ``2a`` and more on
+    the chain, the diagonal ``√2 a`` on a grid, and on a ring of ``N >= 4``
+    the next-nearest chord ``2a cos(π/N) >= 2a cos(π/4) = √2 a`` (on a ring
+    of 3 every pair is a nearest neighbour).  The distances are fixed
+    multiples of ``a``, so the pairs are those of every ``V/Ω``:
+
+    * ``chain``: ``(i, i + 1)``, ``N − 1`` bonds, the order of
+      :func:`product_labels` without ``bonds``;
+    * ``ring``: those and the closing bond ``(0, N − 1)``, ``N`` bonds;
+    * ``grid`` of ``rows × cols`` (:func:`grid_shape` with ``grid_cols``):
+      ``(k, k + 1)`` within a row and ``(k, k + cols)`` within a column,
+      ``rows (cols − 1) + (rows − 1) cols`` bonds.
+
+    Raises
+    ------
+    ValueError
+        For an unknown geometry, a ring of fewer than 3 atoms (a chain), or a
+        shape :func:`grid_shape` refuses.
+    """
+    if geometry == "ring" and n_atoms < 3:
+        raise ValueError(
+            f"the ring geometry needs n_atoms >= 3 (a ring of {n_atoms} is a chain); "
+            f"got {n_atoms}."
+        )
+    return _register(n_atoms, geometry, 1.0, grid_cols).interaction_graph(_BOND_RADIUS)
 
 
 def feature_map(

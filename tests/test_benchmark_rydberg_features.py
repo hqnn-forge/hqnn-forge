@@ -956,6 +956,280 @@ class TestPositiveControl:
         assert y.shape == (3,)
 
 
+def _bonds_by_hand(n_atoms: int, geometry: str, cols: int | None = None) -> list[tuple[int, int]]:
+    """The nearest-neighbour pairs written out from the constructors' index conventions."""
+    if geometry == "chain":
+        return [(i, i + 1) for i in range(n_atoms - 1)]
+    if geometry == "ring":
+        ends = [(i, (i + 1) % n_atoms) for i in range(n_atoms)]
+        return sorted((min(i, j), max(i, j)) for i, j in ends)
+    assert cols is not None
+    across = [(k, k + 1) for k in range(n_atoms) if k % cols != cols - 1]
+    up = [(k, k + cols) for k in range(n_atoms - cols)]
+    return sorted(across + up)
+
+
+def _colouring(n_atoms: int, geometry: str, cols: int | None = None) -> np.ndarray:
+    """``±1`` per atom, opposite at the two ends of every bond: index parity, ``r + c`` on a grid."""
+    k = np.arange(n_atoms)
+    parity = (k // cols + k % cols) % 2 if cols is not None else k % 2
+    return np.where(parity == 0, 1.0, -1.0)
+
+
+#: Geometries of the label tests: ``(n_atoms, geometry, grid_cols)``.
+LABEL_GEOMETRIES = [
+    (4, "chain", None),
+    (5, "chain", None),
+    (3, "ring", None),
+    (4, "ring", None),
+    (5, "ring", None),
+    (6, "ring", None),
+    (4, "grid", 2),
+    (6, "grid", 3),
+    (9, "grid", 3),
+    (8, "grid", 4),  # an even number of columns: r + c, not k, is the colouring
+]
+
+
+class TestGeometryLabel:
+    """
+    #738: the positive control's label over the nearest-neighbour pairs of a geometry.
+
+    Checked against the constructors' index conventions written out by hand, the
+    chain formula ``Σ z_i z_{i+1}`` as it was (label by label, and the data
+    fingerprints of ``main`` at 6080cde), the colouring that flips every bond, and,
+    for the triangle, ``P(y = 1) = 1 − 1/√3`` and SciPy quadrature of
+    ``P(y = 1 | z_0 = t)``.
+    """
+
+    @pytest.mark.parametrize(("n_atoms", "geometry", "cols"), LABEL_GEOMETRIES)
+    def test_the_bonds_are_the_nearest_neighbours_written_out_by_hand(
+        self, n_atoms: int, geometry: str, cols: int | None
+    ) -> None:
+        assert bench.nearest_neighbour_bonds(n_atoms, geometry, cols) == _bonds_by_hand(
+            n_atoms, geometry, cols
+        )
+
+    def test_the_bonds_of_small_shapes_typed_in(self) -> None:
+        """The cases the issue names: the ring's closing bond, the grid's columns."""
+        assert bench.nearest_neighbour_bonds(3, "ring") == [(0, 1), (0, 2), (1, 2)]
+        assert bench.nearest_neighbour_bonds(4, "ring") == [(0, 1), (0, 3), (1, 2), (2, 3)]
+        # 2 × 2: atoms 1 = (a, 0) and 2 = (0, a) are a diagonal, √2 a apart, not a bond
+        assert bench.nearest_neighbour_bonds(4, "grid") == [(0, 1), (0, 2), (1, 3), (2, 3)]
+        assert bench.nearest_neighbour_bonds(6, "grid", 3) == [
+            (0, 1),
+            (0, 3),
+            (1, 2),
+            (1, 4),
+            (2, 5),
+            (3, 4),
+            (4, 5),
+        ]
+        # without grid_cols, the default shape of grid_shape: 6 atoms are 2 × 3
+        assert bench.nearest_neighbour_bonds(6, "grid") == bench.nearest_neighbour_bonds(
+            6, "grid", 3
+        )
+
+    @pytest.mark.parametrize("geometry", ["chain", "ring", "grid"])
+    @pytest.mark.parametrize("n_atoms", [3, 4, 5, 6, 8, 9, 10, 12])
+    def test_bonds_are_the_pairs_at_the_spacing_and_no_other_pair_is_closer_than_root_2(
+        self, geometry: str, n_atoms: int
+    ) -> None:
+        """
+        So the radius ``(1 + √2)/2 · a`` lies between the two in every geometry the
+        benchmark builds (``2a cos(π/N) >= √2 a`` on a ring of ``N >= 4``).
+        """
+        cols: int | None = None
+        if geometry == "grid":
+            if n_atoms in (3, 5):
+                return  # a prime number of atoms has no grid shape
+            rows, cols = bench.grid_shape(n_atoms)
+            register = AtomRegister.grid(rows, cols, 3.0)
+        else:
+            register = getattr(AtomRegister, geometry)(n_atoms, 3.0)
+        positions = register.positions.numpy()
+        distance = np.linalg.norm(positions[:, None] - positions[None], axis=-1) / 3.0
+        bonds = bench.nearest_neighbour_bonds(n_atoms, geometry, cols)
+        assert bonds == _bonds_by_hand(n_atoms, geometry, cols)
+        for i in range(n_atoms):
+            for j in range(i + 1, n_atoms):
+                if (i, j) in bonds:
+                    assert distance[i, j] == pytest.approx(1.0, abs=1e-12)
+                else:
+                    assert distance[i, j] >= math.sqrt(2) - 1e-12
+
+    @pytest.mark.parametrize("n_atoms", range(2, 13))
+    def test_the_chain_label_is_bit_identical_to_the_formula_before_the_geometry(
+        self, n_atoms: int
+    ) -> None:
+        """Existing chain results stay comparable: the formula of ``main`` at 6080cde."""
+        latent = np.random.default_rng(n_atoms).standard_normal((5000, n_atoms))
+        before = ((latent[:, :-1] * latent[:, 1:]).sum(axis=1) > 0).astype(np.int64)
+        bonds = bench.nearest_neighbour_bonds(n_atoms, "chain")
+        np.testing.assert_array_equal(bench.product_labels(latent, bonds), before)
+        np.testing.assert_array_equal(bench.product_labels(latent), before)
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "n_samples", "random_state", "sha256"),
+        [
+            (4, 600, 0, "0f76549d09e84e908f062cdaf914bbcc0470a9cde46fbea4a27bccd17695e593"),
+            (6, 600, 0, "2076ebf7b1d914d07e2f4b66a1fb7d1bdfda936767412cc39e100aea6740d8f1"),
+            (4, 160, 0, "9893f5fabce42b3762849c354a1a6bd5d98efebd7d2037f8239c62b14874b4b8"),
+            (5, 600, 3, "50437b04fdbad1c0a28aca815f02e5fbe48b620f6574bfe0a534375514c048a5"),
+        ],
+    )
+    def test_the_chain_control_has_the_data_fingerprint_from_before(
+        self, n_atoms: int, n_samples: int, random_state: int, sha256: str
+    ) -> None:
+        """Fingerprints of ``positive_control`` computed on ``main`` at 6080cde."""
+        seed = bench.run_seeds(random_state)["data_seed"]
+        chain = bench.nearest_neighbour_bonds(n_atoms, "chain")
+        for control in (
+            bench.positive_control(n_atoms, n_samples, seed),
+            bench.positive_control(n_atoms, n_samples, seed, bonds=chain),
+        ):
+            assert fingerprint(control.X, control.y) == sha256
+
+    def test_the_label_sums_the_given_bonds_by_hand(self) -> None:
+        z = [
+            [1.0, 2.0, 3.0, 4.0],  # ring: 2 + 4 + 6 + 12 = 24; grid: 2 + 3 + 8 + 12 = 25
+            [1.0, 1.0, -1.0, 1.0],  # ring: 1 + 1 − 1 − 1 = 0; grid: 1 − 1 + 1 − 1 = 0
+            [2.0, -1.0, 1.0, 0.5],  # ring: −2 + 1 − 1 + 0.5 = −1.5; grid: −2 + 2 − 0.5 + 0.5 = 0
+            [1.0, -1.0, -3.0, 2.0],  # ring: −1 + 2 + 3 − 6 = −2; grid: −1 − 3 − 2 − 6 = −12
+            [-1.0, 1.0, 3.0, 2.0],  # ring: −1 − 2 + 3 + 6 = 6; grid: −1 − 3 + 2 + 6 = 4
+        ]
+        ring = bench.nearest_neighbour_bonds(4, "ring")
+        grid = bench.nearest_neighbour_bonds(4, "grid")
+        assert bench.product_labels(z, ring).tolist() == [1, 0, 0, 0, 1]
+        assert bench.product_labels(z, grid).tolist() == [1, 0, 0, 0, 1]
+        # the closing bond decides: chain 0 + 0 − 1 = −1, the ring adds z_3 z_0 = 2
+        assert bench.product_labels([[2.0, 0.0, -1.0, 1.0]]).tolist() == [0]
+        assert bench.product_labels([[2.0, 0.0, -1.0, 1.0]], ring).tolist() == [1]
+        # the 2 × 2 grid's bond (0, 2) is a column, the chain's (1, 2) a diagonal
+        assert bench.product_labels([[1.0, -1.0, 2.0, 0.0]]).tolist() == [0]  # −1 − 2 + 0
+        assert bench.product_labels([[1.0, -1.0, 2.0, 0.0]], grid).tolist() == [1]  # −1 + 2
+
+    def test_bonds_out_of_range_or_degenerate_are_refused(self) -> None:
+        z = np.ones((2, 3))
+        for bonds, match in [
+            ([], "at least one bond"),
+            ([(0, 3)], r"pairs of distinct atoms in \[0, 3\)"),
+            ([(1, 1)], r"pairs of distinct atoms in \[0, 3\)"),
+            ([(-1, 0)], r"pairs of distinct atoms in \[0, 3\)"),
+            ([(0, 1, 2)], r"pairs of distinct atoms in \[0, 3\)"),
+        ]:
+            with pytest.raises(ValueError, match=match):
+                bench.product_labels(z, bonds)
+        with pytest.raises(ValueError, match="unknown geometry"):
+            bench.nearest_neighbour_bonds(4, "triangle")
+        with pytest.raises(ValueError, match="does not divide"):
+            bench.nearest_neighbour_bonds(6, "grid", 4)
+        with pytest.raises(ValueError, match="needs n_atoms >= 3"):
+            bench.nearest_neighbour_bonds(2, "ring")
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "geometry", "cols"),
+        [g for g in LABEL_GEOMETRIES if not (g[1] == "ring" and g[0] % 2)],
+    )
+    def test_the_colouring_flips_every_label_where_the_bonds_are_bipartite(
+        self, n_atoms: int, geometry: str, cols: int | None
+    ) -> None:
+        """Every bond joins the two colours, so ``Σ z_j z_k`` changes sign and the label flips."""
+        bonds = bench.nearest_neighbour_bonds(n_atoms, geometry, cols)
+        control = bench.positive_control(n_atoms, 400, seed=2, bonds=bonds)
+        colour = _colouring(n_atoms, geometry, cols)
+        for keep in (1.0, -1.0):  # the atoms of either colour stay as they are
+            flipped = bench.product_labels(control.latent * np.where(colour == keep, 1, -1), bonds)
+            np.testing.assert_array_equal(flipped, 1 - control.y)
+
+    @pytest.mark.parametrize("n_atoms", [3, 5, 7, 9, 11])
+    def test_no_sign_flip_negates_every_bond_of_an_odd_ring(self, n_atoms: int) -> None:
+        """Not bipartite: each of the ``2^N`` sign patterns keeps at least one bond's sign."""
+        bonds = np.array(bench.nearest_neighbour_bonds(n_atoms, "ring"))
+        patterns = 1 - 2 * ((np.arange(2**n_atoms)[:, None] >> np.arange(n_atoms)) & 1)
+        negated = patterns[:, bonds[:, 0]] * patterns[:, bonds[:, 1]] == -1
+        assert not negated.all(axis=1).any()
+
+    @pytest.mark.parametrize(("n_atoms", "geometry", "cols"), LABEL_GEOMETRIES)
+    def test_the_class_means_of_every_single_input_coincide(
+        self, n_atoms: int, geometry: str, cols: int | None
+    ) -> None:
+        """
+        The inputs of the pipeline (standardisation, PCA, ``π tanh``), class by class,
+        agree within 4 standard errors on every atom: by the colouring where the bonds
+        are bipartite, and on an odd ring by the global flip ``z → −z``, which keeps
+        every label and turns each input, an odd function of its latent, around.
+        """
+        m = 20000
+        bonds = bench.nearest_neighbour_bonds(n_atoms, geometry, cols)
+        control = bench.positive_control(n_atoms, m, seed=11, bonds=bonds)
+        inputs = bench.preprocess(control.X, np.arange(m), n_atoms)
+        one, zero = inputs[control.y == 1], inputs[control.y == 0]
+        difference = one.mean(axis=0) - zero.mean(axis=0)
+        error = np.sqrt(one.var(axis=0) / len(one) + zero.var(axis=0) / len(zero))
+        assert np.abs(difference / error).max() < 4.0
+        # input i is latent i (otherwise this would check the wrong atoms)
+        correlation = np.corrcoef(inputs.T, control.latent.T)[:n_atoms, n_atoms:]
+        assert np.diag(correlation).min() > 0.9
+
+    @pytest.mark.parametrize(
+        ("n_atoms", "geometry", "cols"),
+        [(4, "ring", None), (6, "ring", None), (4, "grid", 2), (6, "grid", 3)],
+    )
+    def test_where_the_bonds_are_bipartite_one_latent_leaves_the_label_at_a_half(
+        self, n_atoms: int, geometry: str, cols: int | None
+    ) -> None:
+        """``P(y = 1 | z_i = t) = ½`` for every atom and value, so every function of it is blind."""
+        bonds = bench.nearest_neighbour_bonds(n_atoms, geometry, cols)
+        rng = np.random.default_rng(5)
+        m = 40000  # standard error of a rate of ½: 0.0025
+        for i in range(n_atoms):
+            for t in (0.0, 0.5, 2.0):
+                latent = rng.standard_normal((m, n_atoms))
+                latent[:, i] = t
+                assert abs(bench.product_labels(latent, bonds).mean() - 0.5) < 0.0125
+
+    def test_the_triangle_has_fewer_positives_and_one_latent_moves_the_label(self) -> None:
+        """
+        A ring of three: ``S = w_1² − (w_2² + w_3²)/2`` in the eigenbasis of the
+        adjacency (eigenvalues 2, −1, −1), so ``P(y = 1) = 1 − E[e^{−w²}] = 1 − 1/√3``.
+        Given ``z_0 = t`` the label is ``(z_1 + t)(z_2 + t) > t²``; its rate, by SciPy
+        quadrature, is ½ at ``t = 0`` and below it elsewhere, so ``P(y | z_0)`` is not
+        constant.  The class means of ``z_0`` and of ``z_0²`` still coincide.
+        """
+        stats = pytest.importorskip("scipy.stats")
+        integrate = pytest.importorskip("scipy.integrate")
+
+        def rate(t: float) -> float:
+            # P(pq > t²) with p, q ~ N(t, 1): q > t²/p for p > 0, q < t²/p for p < 0
+            above = integrate.quad(
+                lambda p: stats.norm.pdf(p - t) * stats.norm.cdf(t - t * t / p), 0, np.inf
+            )[0]
+            below = integrate.quad(
+                lambda p: stats.norm.pdf(p - t) * stats.norm.cdf(t * t / p - t), -np.inf, 0
+            )[0]
+            return float(above + below)
+
+        ring = bench.nearest_neighbour_bonds(3, "ring")
+        rng = np.random.default_rng(3)
+        latent = rng.standard_normal((400000, 3))
+        y = bench.product_labels(latent, ring)
+        assert y.mean() == pytest.approx(1 - 1 / math.sqrt(3), abs=0.004)  # 0.4226; SE 0.0008
+        for t in (0.5, 1.0, 2.0):
+            assert rate(t) < 0.45  # 0.397, 0.399, 0.438
+            fixed = rng.standard_normal((200000, 3))
+            fixed[:, 0] = t
+            assert bench.product_labels(fixed, ring).mean() == pytest.approx(rate(t), abs=0.005)
+        fixed = rng.standard_normal((200000, 3))
+        fixed[:, 0] = 0.0
+        assert bench.product_labels(fixed, ring).mean() == pytest.approx(0.5, abs=0.005)
+        # z_0 and z_0²: the global flip, and a label that depends on the direction of z only
+        for g in (latent[:, 0], latent[:, 0] ** 2):
+            one, zero = g[y == 1], g[y == 0]
+            error = math.sqrt(one.var() / len(one) + zero.var() / len(zero))
+            assert abs(one.mean() - zero.mean()) < 4 * error
+
+
 CHURN_HEADER = [
     "Call  Failure",
     "Complains",
