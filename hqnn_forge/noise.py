@@ -548,7 +548,7 @@ def _kraus_map_on_wire(rho: torch.Tensor, operators: torch.Tensor, wire: int) ->
     dim = rho.shape[-1]
     n_wires = dim.bit_length() - 1
     batch = rho.shape[:-2]
-    ops = operators.to(rho.dtype)
+    ops = operators.to(device=rho.device, dtype=rho.dtype)
     left, right = 2**wire, 2 ** (n_wires - 1 - wire)
     tensor = rho.reshape(*batch, left, 2, right, left, 2, right)
     tensor = torch.einsum("kab,...xbyucv,kdc->...xayudv", ops, tensor, ops.conj())

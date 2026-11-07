@@ -115,8 +115,8 @@ with ``K_j`` the channel's Kraus operators at strength ``p`` (*Kraus
 operators* in :mod:`hqnn_forge.noise`), each acting on one atom's tensor
 factor, atom ``i`` on wire ``i`` (the ordering below).  ``D`` acts on
 different atoms' factors, which commute, so ``D^{⊗N}`` does not depend on
-the order the atoms are visited in.  The continuous dephasing and the
-channel do not commute, and this order, the channel after the whole
+the order the atoms are visited in.  A segment's evolution and the
+channel do not commute in general, and this order, the channel after the whole
 segment, is the one ``"all"`` gives without dephasing; ``γ → 0`` gives that
 circuit's state.  :mod:`hqnn_forge.noise` builds this circuit for training
 noise, :func:`~hqnn_forge.noise.apply_depolarizing_noise`,
