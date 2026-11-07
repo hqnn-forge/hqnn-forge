@@ -103,7 +103,8 @@ evolution starts with every atom in `|g⟩`.
   [Geometry](#geometry)).
 - **Decay of the Rydberg state, preparation errors, pulse ramps** and inhomogeneity of Ω and
   Δ across the array. Detection errors are left out by default and are an option of the
-  readout (see [Readout](#readout)).
+  readout (see [Readout](#readout)); pulse ramps are left out by default and are an option
+  of the pulse (see [Pulse](#pulse)).
 
 ## Geometry
 
@@ -184,6 +185,20 @@ limits `N` only from above.
   the sign of the input in the control. Interactions shift the effective detuning by
   `−Σ_j V_ij n_j` and would recover the sign, which would credit them with information the
   encoding itself threw away.
+- **A device-compatible variant** (`GlobalDrivePulseEncoding`). The encoding above already
+  has the form `Δ_i = Δ_local · h_i` with `h_i = σ(x_i)` and no global detuning, the form of
+  a local detuning pattern scaled by one waveform (see [Hardware realism](#hardware-realism)).
+  The variant gives the pattern a finite resolution of `L` levels,
+
+    ```text
+    h_i = round(σ(x_i) · (L − 1)) / (L − 1)        Δ_i = Δ_local · h_i
+    ```
+
+    or `h_i = σ(x_i)` without levels. Input `x_i` lands in level `m`, `h_i = m/(L − 1)`,
+    between the boundaries `x_m = ln((2m − 1)/(2L − 2m − 1))` and `x_(m+1)`, `m = 1, …, L − 1`
+    (level 0 below `x_1`, level `L − 1` above `x_(L−1)`). Inputs in the same level give the
+    same detunings and therefore the same features, so the control is no longer injective,
+    only monotone. `Δ_local` defaults to `√3 Ω` as `Δ_max` does.
 
 ## Pulse
 
@@ -205,7 +220,20 @@ limits `N` only from above.
   `Δ = 0`.
 - **The ends are flat.** `f ≈ 1 − (Δ/Ω)²` near `Δ = 0` and
   `f ≈ (3π²/64) · (√3 − Δ/Ω)²` near `Δ_max`: injective, but with vanishing slope at both ends.
-- **Time-dependent schedules are out of scope.**
+- **A ramped drive** (`GlobalDrivePulseEncoding`, `t_ramp > 0`). On a device Ω changes at a
+  bounded rate (see [Hardware realism](#hardware-realism)), so the variant replaces the square
+  pulse by a trapezoid: Ω rises linearly over `t_ramp`, stays at Ω, and falls linearly over
+  `t_ramp`, for a total duration `T + t_ramp`. **The pulse area is kept**,
+  `∫Ω dt = Ω t_ramp/2 + Ω (T − t_ramp) + Ω t_ramp/2 = ΩT`, so `T = π/Ω` stays a π pulse and
+  a resonant atom still ends at `⟨n⟩ = sin²(ΩT/2)`; `0 ≤ t_ramp ≤ T`. The detunings and the
+  phase are constant over the whole pulse. Each edge is evolved as `n_ramp_segments`
+  constant segments at the value of Ω at their midpoints, which have the exact area of the
+  ramp; the error, from the commutator of the Hamiltonians at different times, is of second
+  order in `1/n_ramp_segments` and vanishes when they commute (one atom at `Δ = 0`). Off
+  resonance the ramp changes the features: they are the device's features, not those of
+  `f(s)`. `t_ramp = 0` and no levels give the features of the square pulse bit for bit.
+  Derived in `hqnn_forge.rydberg.feature_map`.
+- **Time-dependent schedules beyond the ramp are out of scope.**
 
 ## Readout
 
@@ -329,8 +357,8 @@ Two idealisations are part of this choice:
 
 ## Closed-form limits
 
-Each convention above is fixed by a limit that the tests of #496 and #497 check; the last three
-rows are checked by the feature map (#499, #730, #731).
+Each convention above is fixed by a limit that the tests of #496 and #497 check; the last four
+rows are checked by the feature map (#499, #730, #731, #732).
 
 | Convention | Closed-form check |
 |---|---|
@@ -347,6 +375,7 @@ rows are checked by the feature map (#499, #730, #731).
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
 | Detection error | One atom, `Δ ≈ 0`: the feature is `1 − p10` after `ΩT = π` and `p01` after `ΩT = 2π`; atoms and pairs equal the confusion matrix summed over the true and read bitstrings |
 | Position jitter | Interactions off: the features without jitter, exactly. Otherwise the mean of the maps on the `K` displaced registers; for small `σ` the drawn nearest-neighbour `V` spread by `6 √2 σ V / a` |
+| Ramp and levels | One atom, `Δ = 0`: `⟨n⟩ = sin²(ΩT/2)` for any ramp and segmentation. Off resonance the segments converge to the time-dependent Schrödinger equation at second order; without ramp and levels, the square pulse bit for bit; the level boundaries are `ln((2m − 1)/(2L − 2m − 1))` |
 
 ## Separation measures
 
@@ -426,9 +455,9 @@ meet.
 | Hamiltonian, units, `C6` | Aquila's native Hamiltonian has this form, with the phase convention above and `C6` of `70S` | Supported |
 | Chain, spacings 4 to 15 µm | Sites at least 4 µm apart in a region 75 µm wide: a row of 6 atoms fits up to `a = 15 µm`, so `0.04 ≤ V/Ω ≤ 105` at the reference Ω | Supported |
 | Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); the same expression gives about 42 % at `a = 4.03 µm`. Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation by default; the spread of `V` grows as the spacing shrinks. `position_jitter=0.2` with `jitter_samples` and `jitter_seed` models it (see [Geometry](#geometry)) |
-| Pulse bounds | `Ω ≤ 15.8 rad/µs`, `−125 ≤ Δ ≤ 125 rad/µs`, at most 4 µs: the reference `Ω = 12.57`, `Δ_max = 21.8 rad/µs` and `T = 0.25 µs` are inside | Supported |
-| Constant pulse | Ω may change by at most 250 rad/µs², so each edge of the pulse takes 0.05 µs of the 0.25 µs | Idealisation |
-| Local addressing: one detuning per atom | Ω and the phase are global. A local detuning `−Δ_local(t) · h_k n_k` with a static pattern `0 ≤ h_k ≤ 1` exists as an experimental capability, on request (AWS 2024); with the global detuning it reaches a one-signed range. Its magnitude limits and the resolution of `h_k` were not verified for this page | Idealisation |
+| Pulse bounds | `Ω ≤ 15.8 rad/µs`, `−125 ≤ Δ ≤ 125 rad/µs`, at most 4 µs: the reference `Ω = 12.57`, `Δ_max = 21.8 rad/µs` and `T = 0.25 µs` are inside | Supported; `AQUILA_LIMITS` holds these and the slew bound, and `GlobalDrivePulseEncoding.device_violations()` checks a pulse against them |
+| Constant pulse | Ω may change by at most 250 rad/µs², so each edge of the pulse takes at least `Ω/250`: 0.0503 µs at the reference Ω, about a fifth of `T = 0.25 µs` (a 0.05 µs edge would be a slew of 251 rad/µs²) | Idealisation by default; `GlobalDrivePulseEncoding` with `t_ramp ≥ Ω/250` ramps the edges and keeps the pulse area (see [Pulse](#pulse)) |
+| Local addressing: one detuning per atom | Ω and the phase are global. A local detuning `−Δ_local(t) · h_k n_k` with a static pattern `0 ≤ h_k ≤ 1` exists as an experimental capability, on request (AWS 2024); with the global detuning it reaches a one-signed range. Its magnitude limits and the resolution of `h_k` were not verified for this page | Idealisation by default; `GlobalDrivePulseEncoding` encodes into such a pattern, `Δ_i = Δ_local · h_i` with `levels` of resolution and no global detuning (see [Encoding](#encoding)) |
 | Dephasing rate | Aquila reports `T₂* = 5.8 µs`, an echo time of 11.4 µs and a Rabi decay time of 7.5 µs. Read as this model's `2/γ`, `2/γ` and `4/γ`, they give `γ` between 0.18 and 0.53 rad/µs, so `γ/Ω` between 0.014 and 0.042 at the reference Ω. The ratio grows as Ω falls: the slowest π pulse within 4 µs, `Ω = π/4 rad/µs`, gives 0.22 to 0.68, where a row of 6 atoms reaches only `V/Ω ≥ 0.6` (`R_b = 13.8 µm`); the whole sweep down to `V/Ω = 0.1` fits for `Ω ≥ 4.8 rad/µs`, where `γ/Ω ≤ 0.11` | Indicative only: those decays include shot-to-shot noise and loss, which are not Markovian dephasing. `γ/Ω` well above 0.7 is a stress test, not a device regime |
 | No decay | `T/τ_r = 1.7 × 10⁻³` for the Rydberg lifetime, `5 × 10⁻³` against the 50 µs effective lifetime of Bernien et al. | Good approximation |
 | No detection error | Aquila misreads a ground-state atom as excited with probability 0.01 and an excited atom as ground with 0.08; Bernien et al. report detection fidelities of 98 to 99 % and 93 %. With independent errors `ε` and `ε′` a feature becomes `ε + (1 − ε − ε′) ⟨n_i⟩` | Idealisation by default; `readout_error=(ε, ε′)` models it (see [Readout](#readout)) |
@@ -436,7 +465,8 @@ meet.
 
 **The encoding is an idealisation.** A detuning that is set freely and independently for each
 atom is more than current devices offer as a standard capability. A device-compatible variant
-would have to give up:
+would have to give up the following; `GlobalDrivePulseEncoding` gives up the exact `Δ_i` and the
+square pulse (see [Encoding](#encoding) and [Pulse](#pulse)):
 
 - **the exact `Δ_i`:** each sample's detunings become one pattern `h_k` of finite resolution,
   scaled by a waveform shared by all atoms;
