@@ -16,7 +16,7 @@ swept quantities, and so that the model without interactions stays a closed-form
 | Interaction | `C6 / r⁶` between every pair (full tail), `C6 = 2π × 862 690 MHz µm⁶` | Hamiltonian |
 | Encoding | `Δ_i = Δ_max · σ(x_i)`, one-signed, `Δ_max = √3 Ω` | Encoding |
 | Pulse | constant, `ΩT = π`, global Ω | Pulse |
-| Readout | exact `⟨n_i⟩`, optionally `⟨n_i n_j⟩` and a stated number of shots | Readout |
+| Readout | exact `⟨n_i⟩`, optionally `⟨n_i n_j⟩`, a stated number of shots and a detection error | Readout |
 | Noise | Markovian dephasing, `L_i = √γ n_i`, no decay | Noise |
 | Swept | `V/Ω` through the spacing, and `γ/Ω` | Geometry, Noise |
 
@@ -100,8 +100,9 @@ evolution starts with every atom in `|g⟩`.
   et al. 2017), and their positions vary from shot to shot (0.2 µm in Wurtz et al. 2023), which
   changes `V_ij`. See [Noise](#noise) for why the Doppler shift is not the dephasing modelled
   here.
-- **Decay of the Rydberg state, preparation and detection errors, pulse ramps** and
-  inhomogeneity of Ω and Δ across the array.
+- **Decay of the Rydberg state, preparation errors, pulse ramps** and inhomogeneity of Ω and
+  Δ across the array. Detection errors are left out by default and are an option of the
+  readout (see [Readout](#readout)).
 
 ## Geometry
 
@@ -202,6 +203,18 @@ limits `N` only from above.
   estimate is unbiased with standard error `√(p(1 − p)/S) ≤ 1/(2√S)` for a feature of value
   `p`. `S` has no default and is stated with every result that uses it, so the effect of
   finite statistics is shown separately from that of the model.
+- **No detection error by default.** As an option, `readout_error=(p01, p10)` reads every
+  atom through the confusion matrix `[[1 − p01, p01], [p10, 1 − p10]]` (row the atom's
+  state `g`, `r`; column the bit read): `p01` = P(read `r` | atom in `|g⟩`), `p10` = P(read
+  `g` | atom in `|r⟩`), named and ordered as the `readout_error` of the encoding layers, each
+  in `[0, 1]`. Each atom's error is independent of the other atoms and of their states. With
+  `c = 1 − p01 − p10` the exact features become
+  `⟨n̂_i⟩ = p01 + c ⟨n_i⟩` and `⟨n̂_i n̂_j⟩ = p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩`
+  for `i ≠ j`, derived in `hqnn_forge.rydberg.feature_map`. With shots, each bit of each
+  shot is flipped with the probability for its value, from the same generator after all of
+  the call's bitstrings, so those bitstrings are the ones drawn without the error and the
+  estimate is unbiased for the features with the error. Aquila's values are
+  `(0.01, 0.08)` (see [Hardware realism](#hardware-realism)).
 
 ## Noise
 
@@ -299,8 +312,8 @@ Two idealisations are part of this choice:
 
 ## Closed-form limits
 
-Each convention above is fixed by a limit that the tests of #496 and #497 check; the last row
-is checked by the feature map (#499).
+Each convention above is fixed by a limit that the tests of #496 and #497 check; the last two
+rows are checked by the feature map (#499, #730).
 
 | Convention | Closed-form check |
 |---|---|
@@ -315,6 +328,7 @@ is checked by the feature map (#499).
 | Dephasing against the drive | One atom, `Δ = 0`: the damped oscillation above, in all three cases |
 | Strong dephasing | `Ω > 0`, `γ > 0`, any input and any `V`: `ρ → 1/2^N` and every `⟨n_i⟩ → ½` once `gt ≫ 1`, with `g` the smallest nonzero decay rate of the Liouvillian (one atom, `Δ = 0`: `γ/4` up to `γ = 4Ω`, `γ/4 − κ` above). `γt ≫ 1` alone is not sufficient. Reached at `γ = 4Ω`, `Ωt = 100`, `V/Ω` of 0 or 1 |
 | Pulse and bound | Interactions off, `γ = 0`: feature `i` equals `f(√(1 + 3σ(x_i)²))` and does not change with any other input |
+| Detection error | One atom, `Δ ≈ 0`: the feature is `1 − p10` after `ΩT = π` and `p01` after `ΩT = 2π`; atoms and pairs equal the confusion matrix summed over the true and read bitstrings |
 
 ## Separation measures
 
@@ -399,7 +413,7 @@ meet.
 | Local addressing: one detuning per atom | Ω and the phase are global. A local detuning `−Δ_local(t) · h_k n_k` with a static pattern `0 ≤ h_k ≤ 1` exists as an experimental capability, on request (AWS 2024); with the global detuning it reaches a one-signed range. Its magnitude limits and the resolution of `h_k` were not verified for this page | Idealisation |
 | Dephasing rate | Aquila reports `T₂* = 5.8 µs`, an echo time of 11.4 µs and a Rabi decay time of 7.5 µs. Read as this model's `2/γ`, `2/γ` and `4/γ`, they give `γ` between 0.18 and 0.53 rad/µs, so `γ/Ω` between 0.014 and 0.042 at the reference Ω. The ratio grows as Ω falls: the slowest π pulse within 4 µs, `Ω = π/4 rad/µs`, gives 0.22 to 0.68, where a row of 6 atoms reaches only `V/Ω ≥ 0.6` (`R_b = 13.8 µm`); the whole sweep down to `V/Ω = 0.1` fits for `Ω ≥ 4.8 rad/µs`, where `γ/Ω ≤ 0.11` | Indicative only: those decays include shot-to-shot noise and loss, which are not Markovian dephasing. `γ/Ω` well above 0.7 is a stress test, not a device regime |
 | No decay | `T/τ_r = 1.7 × 10⁻³` for the Rydberg lifetime, `5 × 10⁻³` against the 50 µs effective lifetime of Bernien et al. | Good approximation |
-| No detection error | Aquila misreads a ground-state atom as excited with probability 0.01 and an excited atom as ground with 0.08; Bernien et al. report detection fidelities of 98 to 99 % and 93 %. With independent errors `ε` and `ε′` a feature becomes `ε + (1 − ε − ε′) ⟨n_i⟩` | Idealisation |
+| No detection error | Aquila misreads a ground-state atom as excited with probability 0.01 and an excited atom as ground with 0.08; Bernien et al. report detection fidelities of 98 to 99 % and 93 %. With independent errors `ε` and `ε′` a feature becomes `ε + (1 − ε − ε′) ⟨n_i⟩` | Idealisation by default; `readout_error=(ε, ε′)` models it (see [Readout](#readout)) |
 | Exact expectation values | 1 to 1000 shots per task at fewer than 10 shots per second, and each input sample is its own task; about 100 shots are typical | Idealisation; the shots option models the statistics |
 
 **The encoding is an idealisation.** A detuning that is set freely and independently for each
