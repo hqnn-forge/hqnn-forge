@@ -95,16 +95,38 @@ entries per sample instead of ``2^N``, and training keeps the state of every
 splitting step for the backward pass, ``K · n_steps`` matrices of ``4^N``
 entries per sample.  ``default.mixed`` does not broadcast a density-matrix
 preparation over a batch (PennyLane 0.45), so ``qlayer`` runs a batch
-sample by sample, whichever QNode it holds.  The gate-model noise options
-act on ``ρ(T)``: at ``noise_position="end"`` once on every atom before
-measurement, and a readout error maps each ``⟨Z_i⟩``, as without dephasing.
-There is no gate between segments, so ``"all"`` has no sites with its
-meaning: inserted into this circuit it would act once, after the one
-preparation, exactly as ``"end"`` does, and so drop the per-segment noise it
-asks for (with ``gamma = 0`` it acts ``K`` times).  ``"all"`` with a
-strength ``> 0`` is therefore refused, at construction with
-``noise_level > 0`` and by :func:`~hqnn_forge.noise.apply_depolarizing_noise`
-and :func:`~hqnn_forge.noise.noise_sweep` with ``p > 0`` (#710).
+sample by sample, whichever QNode it holds.
+
+Gate-model noise with dephasing
+-------------------------------
+The library's channels (:data:`~hqnn_forge.noise.CHANNELS`) keep the
+meaning they have with ``gamma = 0``.  At ``noise_position="end"`` the
+channel is inserted after the preparation and acts once on every atom of
+``ρ(T)``, and a readout error maps each ``⟨Z_i⟩``.  At ``"all"`` it acts on
+every atom after every segment, ``K`` times per atom, as after every
+``QubitUnitary(U_k)`` with ``gamma = 0``.  The circuit has no gate between
+segments to insert it after (#710), so the channel is applied to ρ in torch,
+between the ``evolve`` calls (#717)::
+
+    ρ_(k+1) = D^{⊗N}( evolve(H_k(x), τ, gamma=γ, n_steps=n, rho0=ρ_k) ),
+    D(ρ) = Σ_j K_j ρ K_j†
+
+with ``K_j`` the channel's Kraus operators at strength ``p`` (*Kraus
+operators* in :mod:`hqnn_forge.noise`), each acting on one atom's tensor
+factor, atom ``i`` on wire ``i`` (the ordering below).  ``D`` acts on
+different atoms' factors, which commute, so ``D^{⊗N}`` does not depend on
+the order the atoms are visited in.  A segment's evolution and the
+channel do not commute in general, and this order, the channel after the whole
+segment, is the one ``"all"`` gives without dephasing; ``γ → 0`` gives that
+circuit's state.  :mod:`hqnn_forge.noise` builds this circuit for training
+noise, :func:`~hqnn_forge.noise.apply_depolarizing_noise`,
+:func:`~hqnn_forge.noise.noise_sweep` and the kernels alike.
+``noise_method="trajectories"`` at ``"all"`` is refused with ``gamma > 0``:
+drawn after the one preparation, its errors would act once, as at
+``"end"``, and drawn between the segments they would save nothing, since
+this circuit holds ρ anyway and the exact channel costs one Kraus map per
+atom and segment (*Circuits without gates between segments* in
+:mod:`hqnn_forge.noise`).  ``"cz"`` raises, as without dephasing.
 
 Basis, wires and readout
 ------------------------
@@ -225,7 +247,15 @@ from hqnn_forge.encoding._common import (
     shots_repr,
     validate_seed,
 )
-from hqnn_forge.noise import Channel, NoiseMethod, Position, TrainingNoiseMixin
+from hqnn_forge.noise import (
+    _CHANNEL_AFTER_SEGMENTS,
+    CHANNELS,
+    Channel,
+    NoiseMethod,
+    Position,
+    TrainingNoiseMixin,
+    _kraus_map_on_every_wire,
+)
 from hqnn_forge.rydberg.hamiltonian import DEFAULT_C6, MAX_ATOMS, rydberg_hamiltonian
 from hqnn_forge.rydberg.lindblad import _non_negative_number, _propagator, _step_count, evolve
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
@@ -293,31 +323,45 @@ def _segment_hamiltonians(
 
 
 def _final_density_matrix(
-    pulse: _AnalogPulse, inputs: torch.Tensor, weights: torch.Tensor
+    pulse: _AnalogPulse,
+    inputs: torch.Tensor,
+    weights: torch.Tensor,
+    operators: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     ``ρ(T)``: every segment evolved by :func:`~hqnn_forge.rydberg.evolve` from the last one's state.
 
     Shape ``(*batch, 2^N, 2^N)``, ``complex128``; segment 0 starts from
-    ``|g…g⟩⟨g…g|``.  See *Dephasing during the pulse* in the module docstring.
+    ``|g…g⟩⟨g…g|``.  With ``operators``, the Kraus operators ``(k, 2, 2)`` of
+    a channel, the channel acts on every atom after every segment, the last
+    one included.  See *Dephasing during the pulse* and *Gate-model noise
+    with dephasing* in the module docstring.
     """
-    first, *rest = _segment_hamiltonians(pulse, inputs, weights)  # K >= 1
-    rho = evolve(first, pulse.segment_duration, gamma=pulse.gamma, n_steps=pulse.n_steps)
-    for h in rest:
+    rho = None  # evolve starts from |g…g⟩⟨g…g|
+    for h in _segment_hamiltonians(pulse, inputs, weights):
         rho = evolve(h, pulse.segment_duration, gamma=pulse.gamma, n_steps=pulse.n_steps, rho0=rho)
+        if operators is not None:
+            rho = _kraus_map_on_every_wire(rho, operators)
+    assert rho is not None  # K >= 1
     return rho
 
 
 def _make_analog_circuit(
-    pulse: _AnalogPulse, readout: Readout
+    pulse: _AnalogPulse, readout: Readout, channel: tuple[Channel, float] | None = None
 ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
     """
     The bare quantum function: one ``QubitUnitary(U_k)`` per segment, then ⟨Z_i⟩.
 
     ``inputs`` has shape ``(N,)`` or ``(batch, N)``, ``weights`` ``(K, 3)``;
-    see the module docstring for what they become.
+    see the module docstring for what they become.  With ``gamma > 0`` the
+    function prepares ``ρ(T)`` instead, and ``channel = (name, p)`` applies
+    that channel of :data:`~hqnn_forge.noise.CHANNELS` to ρ after every
+    segment; the function also builds that noisy version of itself for
+    :mod:`hqnn_forge.noise`, as ``func._hqnn_channel_after_segments(name, p)``
+    (*Gate-model noise with dephasing* in the module docstring).
     """
     wires = list(range(pulse.register.n_atoms))
+    operators = None if channel is None else CHANNELS[channel[0]].operators(channel[1])
 
     def circuit(
         inputs: torch.Tensor, weights: torch.Tensor
@@ -337,10 +381,19 @@ def _make_analog_circuit(
                 f"matrix and takes one sample of shape ({len(wires)},) at a time; got inputs "
                 f"of shape {tuple(inputs.shape)}."
             )
-        qml.QubitDensityMatrix(_final_density_matrix(pulse, inputs, weights), wires=wires)
+        rho = _final_density_matrix(pulse, inputs, weights, operators)
+        qml.QubitDensityMatrix(rho, wires=wires)
         return measure_z(len(wires), readout)
 
-    return dephased_circuit if pulse.gamma > 0 else circuit
+    def with_channel(
+        name: Channel, p: float
+    ) -> Callable[[torch.Tensor, torch.Tensor], list[qml.measurements.ExpectationMP]]:
+        return _make_analog_circuit(pulse, readout, (name, p))
+
+    if pulse.gamma > 0:
+        setattr(dephased_circuit, _CHANNEL_AFTER_SEGMENTS, with_channel)
+        return dephased_circuit
+    return circuit
 
 
 class _SampleBySampleTorchLayer(qml.qnn.TorchLayer):  # type: ignore[misc]
@@ -539,8 +592,10 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
     noise_level, noise_position, noise_method, noise_trajectories, noise_channel, readout_error:
         Training-time noise as in
         :class:`~hqnn_forge.encoding.QuantumEncodingLayer`; a channel at
-        ``"all"`` acts after every pulse segment, and is refused with
-        ``gamma > 0`` (see the module docstring).
+        ``"all"`` acts on every atom after every pulse segment, with
+        ``gamma > 0`` too, where ``noise_method="trajectories"`` at
+        ``"all"`` is refused (module docstring, *Gate-model noise with
+        dephasing*).
     shots:
         Must be ``None``: the layer computes exact expectation values, since
         backprop, the only method that differentiates its propagators,
@@ -583,9 +638,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         differentiation method other than the above, or an unknown
         ``readout`` or noise option; for ``gamma`` not a finite number
         ``>= 0``, ``n_steps`` not an integer ``>= 1`` or missing with
-        ``gamma > 0``, or ``noise_position="all"`` with ``noise_level > 0``
-        and ``gamma > 0`` (as :func:`~hqnn_forge.noise.apply_depolarizing_noise`
-        refuses ``position="all"`` on such a layer).
+        ``gamma > 0``, or ``noise_method="trajectories"`` with
+        ``noise_position="all"``, ``noise_level > 0`` and ``gamma > 0``.
 
     Examples
     --------
@@ -741,9 +795,6 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             noise_channel=noise_channel,
             readout_error=readout_error,
         )
-        # After _init_training_noise, which validates noise_level and noise_position.
-        if self.noise_level > 0:
-            self._noise_position_check(noise_position, "noise_position")
         self.seed = validate_seed(seed)
 
     # ------------------------------------------------------------------
@@ -851,22 +902,6 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         noise options.  Basis ordering as in the module docstring.
         """
         return _final_density_matrix(self._pulse, self.prepare_inputs(x), self.qlayer.weights)
-
-    def _noise_position_check(self, position: str, name: str) -> None:
-        """
-        Refuse ``"all"`` with ``gamma > 0``, here and in :mod:`hqnn_forge.noise`.
-
-        ``name`` is the argument's name in the caller, for the message.  See
-        *Dephasing during the pulse* in the module docstring.
-        """
-        if self.gamma > 0 and position == "all":
-            raise ValueError(
-                f"{name}='all' places a channel after every pulse segment, and with "
-                f"gamma > 0 the segments are evolved outside the circuit, which prepares only "
-                f"their final density matrix: there is no gate between segments to put the "
-                f"channel after, and the channel would act once, as at 'end'.  Use "
-                f"{name}='end' (once before measurement), or gamma=0."
-            )
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """

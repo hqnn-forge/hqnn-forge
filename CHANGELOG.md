@@ -426,16 +426,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Markovian dephasing `L_i = √γ n_i` during the pulse, the density matrix evolved segment by
   segment with `evolve`'s splitting (`n_steps` per segment, required with `gamma > 0`) and read
   out on `default.mixed`; `evolve` takes an initial state `rho0`, and
-  `AnalogRydbergLayer.density_matrices` returns the final state. With `gamma > 0` there is no
-  gate between segments, so noise at position `"all"` (which would act once, as at `"end"`) is
-  refused at construction and by `apply_depolarizing_noise` and `noise_sweep` (#699, #710)
+  `AnalogRydbergLayer.density_matrices` returns the final state (#699, #710)
 - `quantum_kernel_matrix`, `encoded_density_matrices` and `circuit_summary` on
   `AnalogRydbergLayer` with `gamma > 0`: the kernel is the Hilbert–Schmidt kernel
-  `Tr[ρ(x) ρ(y)]` of the dephased states at every `noise_level` (purities on the diagonal,
-  `noise_position="all"` refused as on the layer), and the summary counts the one
+  `Tr[ρ(x) ρ(y)]` of the dephased states at every `noise_level` (purities on the diagonal),
+  and the summary counts the one
   `QubitDensityMatrix` and the `3K` pulse values; `encoded_states` and
   `overlap_kernel_matrix`, which need a pure state, refuse the layer with a message naming the
   reason (#711, #722)
+- Noise at position `"all"` on `AnalogRydbergLayer` with `gamma > 0`: the channel acts on every
+  atom after every pulse segment, `K` times per atom as with `gamma = 0`, applied to ρ in torch
+  between the segments' `evolve` calls, for every channel, in training noise,
+  `apply_depolarizing_noise`, `noise_sweep` and the kernels. The refusal of `"all"` with
+  `gamma > 0` from #710 is lifted, except for `noise_method="trajectories"`, which stays
+  refused there: the layer holds ρ anyway, so trajectories would save no memory over the exact
+  channel. Every channel of `CHANNELS` carries its Kraus operators (`operators`) (#717, #743)
 - `readout_error=(p01, p10)` on `RydbergFeatureMap`: a detection error that reads each atom
   through the confusion matrix `[[1 − p01, p01], [p10, 1 − p10]]`, named, ordered and
   validated as on the encoding layers and recorded by `get_config()`. The exact features

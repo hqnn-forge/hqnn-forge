@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 from functools import reduce
+from typing import get_args
 
 import numpy as np
 import pytest
@@ -32,7 +33,7 @@ from hqnn_forge.models import (
     MulticlassHybridClassifier,
     ParallelHybridClassifier,
 )
-from hqnn_forge.noise import apply_depolarizing_noise, noise_sweep
+from hqnn_forge.noise import Channel, Position, apply_depolarizing_noise, noise_sweep
 from hqnn_forge.rydberg import AtomRegister
 
 F64 = torch.float64
@@ -341,10 +342,6 @@ class TestOptions:
             ({"gamma": 1.0, "n_steps": 0}, "n_steps must be an integer >= 1"),
             ({"gamma": 1.0, "n_steps": 2.0}, "n_steps must be an integer >= 1"),
             ({"gamma": 0.0, "n_steps": -1}, "n_steps must be an integer >= 1"),
-            (
-                {"gamma": 1.0, "n_steps": 3, "noise_level": 0.1},
-                "noise_position='all' places a channel after every pulse segment",
-            ),
         ],
     )
     def test_refuses_bad_options(self, kwargs: dict[str, object], match: str) -> None:
@@ -387,21 +384,100 @@ class TestOptions:
         torch.testing.assert_close(layer.train()(x), (1 - 0.15) * exact + (0.1 - 0.05))
 
 
+#: The Kraus operators of every channel of ``hqnn_forge.noise.CHANNELS`` at
+#: strength ``p``, typed in here from the channel definitions (PennyLane's
+#: ``DepolarizingChannel``, ``AmplitudeDamping``, ``PhaseDamping``,
+#: ``BitFlip``, ``PhaseFlip`` and ``ResetError(0, p)``), not taken from the
+#: library.
+KRAUS = {
+    "depolarizing": lambda p: [math.sqrt(1 - p) * EYE] + [math.sqrt(p / 3) * P for P in (X, Y, Z)],
+    "amplitude_damping": lambda p: [
+        np.array([[1.0, 0.0], [0.0, math.sqrt(1 - p)]], dtype=complex),
+        np.array([[0.0, math.sqrt(p)], [0.0, 0.0]], dtype=complex),
+    ],
+    "phase_damping": lambda p: [
+        np.array([[1.0, 0.0], [0.0, math.sqrt(1 - p)]], dtype=complex),
+        np.array([[0.0, 0.0], [0.0, math.sqrt(p)]], dtype=complex),
+    ],
+    "bit_flip": lambda p: [math.sqrt(1 - p) * EYE, math.sqrt(p) * X],
+    "phase_flip": lambda p: [math.sqrt(1 - p) * EYE, math.sqrt(p) * Z],
+    "atom_loss": lambda p: [
+        math.sqrt(1 - p) * EYE,
+        np.array([[0.0, 0.0], [math.sqrt(p), 0.0]], dtype=complex),  # |1⟩⟨0|
+        np.array([[0.0, 0.0], [0.0, math.sqrt(p)]], dtype=complex),  # |1⟩⟨1|
+    ],
+}
+CHANNEL_NAMES: list[Channel] = list(get_args(Channel))
+
+
+def _channel_on_every_atom(rho: np.ndarray, channel: str, p: float) -> np.ndarray:
+    """``ρ ← Σ_k K_k ρ K_k†`` on atom 0, then atom 1, …, with ``K_k`` on tensor factor ``i``."""
+    n = rho.shape[0].bit_length() - 1
+    for i in range(n):
+        ops = [_on(k, i, n) for k in KRAUS[channel](p)]
+        rho = sum(k @ rho @ k.conj().T for k in ops)
+    return rho
+
+
+def _reference_with_channel(
+    layer: AnalogRydbergLayer, x: np.ndarray, gamma: float, channel: str, p: float
+) -> np.ndarray:
+    """
+    ``ρ ← D^{⊗N}(e^(𝓛_k τ) ρ)`` for ``k = 0, …, K−1`` from ``|g…g⟩⟨g…g|``: the
+    Lindblad generator of each segment exponentiated by ``scipy.linalg.expm``,
+    then the channel's Kraus map on every atom (``γ = 0`` gives
+    ``U_k ρ U_k†`` exactly).
+    """
+    linalg = pytest.importorskip("scipy.linalg")
+    dim = 2**layer.n_qubits
+    rho = np.zeros((dim, dim), dtype=complex)
+    rho[0, 0] = 1.0
+    for h in _reference_hamiltonians(layer, x):
+        step = linalg.expm(_liouvillian(h, gamma) * layer.segment_duration)
+        rho = (step @ rho.reshape(-1)).reshape(dim, dim)  # row-major vec, as _liouvillian
+        rho = _channel_on_every_atom(rho, channel, p)
+    return rho
+
+
+def _z(rho: np.ndarray) -> list[float]:
+    n = rho.shape[0].bit_length() - 1
+    return [float(np.trace(rho @ _on(Z, i, n)).real) for i in range(n)]
+
+
 class TestEveryPulseSegment:
     """
-    ``position="all"`` means a channel after every pulse segment (#710).
+    ``position="all"`` means a channel after every pulse segment on every
+    atom, ``K`` times per atom, with and without dephasing (#710, #717).
 
-    With ``gamma > 0`` the circuit has one preparation and no gate between
-    segments, so ``"all"`` would act once, as ``"end"`` does, and is refused
-    on every path; with ``gamma = 0`` it acts ``K`` times, as before.
+    With ``gamma > 0`` the channel is applied to ρ in torch between the
+    segments' ``evolve`` calls; with ``gamma = 0`` ``qml.noise.insert`` puts
+    it after every ``QubitUnitary``.  Both are checked against the same
+    reference, :func:`_reference_with_channel`.
     """
 
-    MESSAGE = (
-        "position='all' places a channel after every pulse segment, and with gamma > 0 the "
-        "segments are evolved outside the circuit, which prepares only their final density "
-        "matrix: there is no gate between segments to put the channel after, and the channel "
-        "would act once, as at 'end'.  Use position='end' (once before measurement), or gamma=0."
-    )
+    P = 0.2
+    #: Two atoms with a strong but not blockading interaction, three
+    #: segments with different Ω, Δ, φ, different inputs: nothing symmetric.
+    REGISTER = AtomRegister([[0.0, 0.0], [1.0, 0.3]])
+    X_IN = np.array([0.3, -1.1])
+
+    def _layer(self, gamma: float, n_steps: int | None = None, **kwargs: object):
+        layer = _layer(
+            2,
+            3,
+            register=self.REGISTER,
+            c6=6.0,
+            omega_max=6.0,
+            segment_duration=0.4,
+            gamma=gamma,
+            n_steps=n_steps,
+            **kwargs,
+        )
+        layer.set_pulse(omega=[2.0, 3.5, 5.0], detuning=[0.8, -1.5, 0.3], phase=[0.0, 1.3, -0.4])
+        return layer
+
+    def _x(self) -> torch.Tensor:
+        return torch.tensor(self.X_IN[None], dtype=F64)
 
     def test_gamma_zero_acts_after_every_segment(self) -> None:
         """The hand-built ``ρ ← D^{⊗N}(U_k ρ U_k†)``, segment by segment, unchanged by #699."""
@@ -426,22 +502,92 @@ class TestEveryPulseSegment:
             every, torch.tensor([expected], dtype=F64), rtol=1e-10, atol=1e-12
         )
 
-    def test_post_hoc_all_is_refused_with_dephasing(self) -> None:
-        layer = _layer(2, 3, gamma=0.5, n_steps=4).eval()
-        x = torch.tensor([[0.3, -0.5]], dtype=F64)
-        qnode = layer.qlayer.qnode
-        with (
-            pytest.raises(ValueError) as error,
-            apply_depolarizing_noise(layer, 0.05, position="all"),
-        ):
-            pass
-        assert str(error.value) == self.MESSAGE
-        # Refused before the layer was touched: the same QNode, no block left open.
-        assert layer.qlayer.qnode is qnode
-        assert getattr(layer.qlayer, "_hqnn_noise_depth", 0) == 0
-        exact = layer(x)
-        with apply_depolarizing_noise(layer, 0.05, position="end"):
-            torch.testing.assert_close(layer(x), exact * (1 - 4 * 0.05 / 3), rtol=1e-10, atol=0)
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    def test_a_vanishing_rate_equals_all_on_the_unitary_layer(self, channel: Channel) -> None:
+        """
+        ``γ = 1e-12``: the channel applied in torch between the ``evolve``
+        calls against the hand-built ``ρ ← D^{⊗N}(U_k ρ U_k†)`` and against
+        PennyLane's channels inserted after every ``QubitUnitary`` of the
+        unitary layer (``γ = 0``).  ``O(γT) ≈ 1e-12``.
+        """
+        x = self._x()
+        reference = _z(_reference_with_channel(self._layer(0.0), self.X_IN, 0.0, channel, self.P))
+        unitary = self._layer(0.0).eval()
+        dephased = self._layer(1e-12, n_steps=3).eval()
+        assert dephased.qlayer.qnode.device.name == "default.mixed"
+        with apply_depolarizing_noise(unitary, self.P, position="all", channel=channel):
+            on_gates = unitary(x)
+        with apply_depolarizing_noise(dephased, self.P, position="all", channel=channel):
+            in_torch = dephased(x)
+        expected = torch.tensor([reference], dtype=F64)
+        torch.testing.assert_close(on_gates, expected, rtol=0, atol=1e-10)
+        torch.testing.assert_close(in_torch, expected, rtol=0, atol=1e-10)
+        torch.testing.assert_close(in_torch, on_gates, rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    def test_dephasing_against_the_liouvillian_then_the_kraus_map(self, channel: Channel) -> None:
+        """
+        ``γ = 1.5``: per segment ``expm`` of the Lindblad generator, then the
+        channel on every atom; ⟨Z_i⟩ through ``apply_depolarizing_noise``, and
+        for the depolarising channel the whole ρ through
+        ``encoded_density_matrices``.  ``n_steps = 2000`` puts the splitting
+        error far below the tolerance.
+        """
+        from hqnn_forge.kernels import encoded_density_matrices
+
+        gamma = 1.5
+        layer = self._layer(gamma, n_steps=2000).eval()
+        x = self._x()
+        expected = _reference_with_channel(layer, self.X_IN, gamma, channel, self.P)
+        with apply_depolarizing_noise(layer, self.P, position="all", channel=channel):
+            z = layer(x)
+        np.testing.assert_allclose(z[0].detach().numpy(), _z(expected), rtol=0, atol=4e-6)
+        if channel == "depolarizing":  # the kernels insert depolarising channels only
+            rho = encoded_density_matrices(x, layer, noise_level=self.P, noise_position="all")
+            np.testing.assert_allclose(rho[0].numpy(), expected, rtol=0, atol=2e-6)
+        # No channel, or one channel at the end only, is far from it.
+        noiseless = _reference_with_channel(layer, self.X_IN, gamma, channel, 0.0)
+        once = _channel_on_every_atom(noiseless, channel, self.P)
+        for other in (noiseless, once):
+            assert np.abs(expected - other).max() > 1e-3
+
+    def test_training_noise_acts_after_every_segment(self) -> None:
+        """``noise_position="all"`` at construction, in train mode only; same reference."""
+        gamma = 1.5
+        channel: Channel = "amplitude_damping"
+        layer = self._layer(
+            gamma,
+            n_steps=2000,
+            noise_level=self.P,
+            noise_position="all",
+            noise_channel=channel,
+        )
+        x = self._x()
+        expected = _reference_with_channel(layer, self.X_IN, gamma, channel, self.P)
+        noisy = layer.train()(x)
+        np.testing.assert_allclose(noisy[0].detach().numpy(), _z(expected), rtol=0, atol=4e-6)
+        noiseless = _reference_with_channel(layer, self.X_IN, gamma, channel, 0.0)
+        np.testing.assert_allclose(
+            layer.eval()(x)[0].detach().numpy(), _z(noiseless), rtol=0, atol=4e-6
+        )
+        assert "noise_position='all'" in repr(layer)
+
+    def test_training_noise_gradients_match_finite_differences(self) -> None:
+        layer = self._layer(1.3, n_steps=4, noise_level=0.1, noise_position="all").train()
+        x = self._x()
+        layer(x).sum().backward()
+        weights = layer.qlayer.weights
+        assert weights.grad is not None
+
+        def of_weights(value: torch.Tensor) -> float:
+            with torch.no_grad():
+                weights.copy_(value)
+                return float(layer(x).sum())
+
+        start = weights.detach().clone()
+        expected = _central_difference(of_weights, start)
+        torch.testing.assert_close(weights.grad, expected, rtol=1e-6, atol=1e-8)
+        assert weights.grad.abs().min().item() > 1e-4
 
     def test_post_hoc_all_at_p_zero_is_the_noiseless_layer(self) -> None:
         layer = _layer(2, 2, gamma=0.5, n_steps=4).eval()
@@ -450,36 +596,101 @@ class TestEveryPulseSegment:
         with apply_depolarizing_noise(layer, 0.0, position="all"):
             assert torch.equal(layer(x), exact)
 
-    def test_noise_sweep_refuses_before_the_first_evaluation(self) -> None:
+    def test_noise_sweep_reaches_every_segment(self) -> None:
+        torch.manual_seed(0)
         model = HybridBinaryClassifier(
             n_input_features=2,
             n_qubits=2,
-            n_layers=2,
+            n_layers=3,
             encoding_type="analog",
             gamma=0.5,
             n_steps=4,
-        )
-        calls = []
-        predict = model.predict_proba
+        ).double()
+        x = torch.randn(3, 2, dtype=F64, generator=torch.Generator().manual_seed(5))
+        points = noise_sweep(model, x, [0.0, 0.1], position="all")
+        with apply_depolarizing_noise(model, 0.1, position="all"):
+            every = model.predict_proba(x)
+        with apply_depolarizing_noise(model, 0.1, position="end"):
+            end = model.predict_proba(x)
+        assert [point.p for point in points] == [0.0, 0.1]
+        torch.testing.assert_close(points[0].probabilities, model.predict_proba(x))
+        torch.testing.assert_close(points[1].probabilities, every)
+        assert (every - end).abs().max() > 1e-4  # "all" is not "end"
 
-        def counting(x: torch.Tensor) -> torch.Tensor:
-            calls.append(x)
-            return predict(x)
+    def test_cz_is_still_refused(self) -> None:
+        layer = self._layer(0.5, n_steps=4).eval()
+        with (
+            pytest.raises(ValueError, match="this circuit has no CZ or CCZ"),
+            apply_depolarizing_noise(layer, 0.1, position="cz"),
+        ):
+            layer(self._x())
 
-        model.predict_proba = counting  # type: ignore[method-assign]
-        x = torch.zeros(1, 2)
+    TRAJECTORIES_MESSAGE = (
+        "noise_method='trajectories' at position 'all' is not available on a circuit that "
+        "evolves its segments outside the circuit (AnalogRydbergLayer with gamma > 0): "
+        "drawn after its one density-matrix preparation, the errors would act once, as "
+        "at 'end', not after every segment, and the circuit holds the 4^N density matrix "
+        "anyway, so sampling would save no memory.  Use noise_method='density', which "
+        "applies the channel exactly after every segment at that same cost, or position "
+        "'end'."
+    )
+
+    @pytest.mark.parametrize("channel", CHANNEL_NAMES)
+    def test_trajectories_at_all_are_refused(self, channel: Channel) -> None:
+        """
+        Decided on #743 (#717): refused by ``trajectory_noise_qnode``, and so
+        by the layer and the classifiers, for every channel.
+
+        Drawn after ``ρ(T)`` the errors would act once, as at ``"end"``; drawn
+        between the segments they would save no memory, since the circuit
+        holds ρ anyway (``noise`` module docstring, *Circuits without gates
+        between segments*).  The weighted-Kraus channels never reach this
+        check on the layer: ``check_kraus_trajectories`` refuses them on
+        ``default.mixed`` at any position, as before #717.
+        """
+        from hqnn_forge.noise import CHANNELS, trajectory_noise_qnode
+
+        qnode = AnalogRydbergLayer(2, 2, gamma=1.0, n_steps=3).qlayer.qnode
         with pytest.raises(ValueError) as error:
-            noise_sweep(model, x, [0.0, 0.05], position="all")
-        assert str(error.value) == self.MESSAGE
-        assert calls == []
-        points = noise_sweep(model, x, [0.0, 0.05], position="end")
-        assert [point.p for point in points] == [0.0, 0.05]
-        assert len(calls) == 2
+            trajectory_noise_qnode(qnode, 0.1, position="all", channel=channel)
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
 
-    def test_training_noise_names_its_own_argument(self) -> None:
+        def layer(gamma: float, position: Position) -> AnalogRydbergLayer:
+            return AnalogRydbergLayer(
+                2,
+                2,
+                gamma=gamma,
+                n_steps=3 if gamma > 0 else None,
+                noise_level=0.1,
+                noise_position=position,
+                noise_method="trajectories",
+                noise_channel=channel,
+            )
+
+        if CHANNELS[channel].paulis is None:
+            with pytest.raises(ValueError, match="trajectories apply non-unitary"):
+                layer(1.0, "end")
+            return
         with pytest.raises(ValueError) as error:
-            AnalogRydbergLayer(2, 2, gamma=1.0, n_steps=3, noise_level=0.1)
-        assert str(error.value) == self.MESSAGE.replace("position=", "noise_position=")
+            layer(1.0, "all")
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
+        with pytest.raises(ValueError) as error:
+            HybridBinaryClassifier(
+                n_input_features=2,
+                n_qubits=2,
+                encoding_type="analog",
+                gamma=1.0,
+                n_steps=3,
+                noise_level=0.1,
+                noise_position="all",
+                noise_method="trajectories",
+                noise_channel=channel,
+            )
+        assert str(error.value) == self.TRAJECTORIES_MESSAGE
+        # Not refused: "end" with gamma > 0, and "all" with gamma = 0, where
+        # the draws sit after every QubitUnitary.
+        assert layer(1.0, "end").noise_method == "trajectories"
+        assert layer(0.0, "all").noise_method == "trajectories"
 
 
 class TestClassifiers:
@@ -617,14 +828,29 @@ class TestKernelsAndSummary:
         torch.testing.assert_close(got, layer.qlayer.weights.grad)
         assert bool((got != 0).any())
 
-    def test_noise_at_all_is_refused_as_on_the_layer(self) -> None:
+    def test_noise_at_all_acts_after_every_segment(self) -> None:
+        """
+        ``noise_position="all"``: the depolarising channel on every atom after
+        every segment (#717), as in the layer's own noise; the kernel is
+        ``Tr[ρ ρ]`` of those states.
+        """
         from hqnn_forge.kernels import encoded_density_matrices, quantum_kernel_matrix
 
+        p = 0.1
         layer = self._dephased()
         x = self._inputs(2)
-        for function in (quantum_kernel_matrix, encoded_density_matrices):
-            with pytest.raises(ValueError, match="noise_position='all'.*gamma > 0"):
-                function(x, layer, noise_level=0.1, noise_position="all")
+        rho = np.stack(
+            [
+                _reference_with_channel(layer, row.numpy(), self.GAMMA, "depolarizing", p)
+                for row in x
+            ]
+        )
+        got = encoded_density_matrices(x, layer, noise_level=p, noise_position="all")
+        np.testing.assert_allclose(got.numpy(), rho, atol=2e-6)
+        kernel = quantum_kernel_matrix(x, layer, noise_level=p, noise_position="all")
+        np.testing.assert_allclose(
+            kernel.numpy(), np.einsum("aij,bji->ab", rho, rho).real, atol=4e-6
+        )
 
     def test_pure_state_functions_refuse_the_layer(self) -> None:
         from hqnn_forge.kernels import encoded_states, overlap_kernel_matrix
