@@ -450,6 +450,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states, i.e. the mean of the per-realisation features, and shots are drawn from its diagonal;
   a `readout_error` acts after the mixture. Without interactions the features are those
   without jitter, bit for bit. All three are recorded by `get_config()` (#731, #735)
+- `GlobalDrivePulseEncoding`, a device-compatible encoding `RydbergFeatureMap` takes in place
+  of `PulseEncoding`: a local detuning pattern `Δ_i = Δ_local · h_i` quantised to `levels`
+  values, `h_i = round(σ(x_i)(L − 1))/(L − 1)`, under a trapezoidal global `Ω(t)` with linear
+  edges of `t_ramp` each, the pulse area `ΩT` kept over `T + t_ramp`, and each edge evolved as
+  `n_ramp_segments` midpoint segments (error of second order). `levels=None, t_ramp=0` gives
+  the features of `PulseEncoding` bit for bit. `device_violations()` checks Ω, `|Δ_i|`, the
+  duration and the slew `Ω/t_ramp` against `DeviceLimits`, by default `AQUILA_LIMITS`, on
+  request only (#732)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
