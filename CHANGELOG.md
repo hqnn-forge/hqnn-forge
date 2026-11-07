@@ -439,7 +439,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between the segments' `evolve` calls, for every channel, in training noise,
   `apply_depolarizing_noise`, `noise_sweep` and the kernels. The refusal of `"all"` with
   `gamma > 0` from #710 is lifted, except for `noise_method="trajectories"`. Every channel of
-  `CHANNELS` carries its Kraus operators (`operators`) (#717, #PR)
+  `CHANNELS` carries its Kraus operators (`operators`) (#717, #743)
 - `readout_error=(p01, p10)` on `RydbergFeatureMap`: a detection error that reads each atom
   through the confusion matrix `[[1 − p01, p01], [p10, 1 − p10]]`, named, ordered and
   validated as on the encoding layers and recorded by `get_config()`. The exact features
