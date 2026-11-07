@@ -19,7 +19,10 @@ For one sample ``x ∈ ℝ^N`` and a register of ``N`` atoms::
          →  p01 + (1 − p01 − p10) F_i      (optional detection error)
 
 With ``position_jitter`` the third step evolves ``K`` displaced registers and
-reads their mixture ``ρ̄(T)`` (see *Position jitter*).
+reads their mixture ``ρ̄(T)`` (see *Position jitter*).  With a
+:class:`GlobalDrivePulseEncoding` the first step quantises the pattern,
+``Δ_i = Δ_local · h_i``, and Ω ramps up and down over ``T + t_ramp`` with
+the pulse area ``ΩT`` kept (see *A device-compatible pulse*).
 
 * **Which input feeds which atom.**  Column ``i`` of ``X`` sets the detuning
   of atom ``i``, the atom at row ``i`` of the register's positions, which is
@@ -225,6 +228,22 @@ is refused for coming closer than that.
 The solver runs ``K`` times per chunk, so the cost grows ``K`` times; the
 working memory grows by one tensor of the chunk's states, the sum.
 
+A device-compatible pulse
+-------------------------
+:class:`PulseEncoding` is an idealisation (*Hardware realism* in
+``docs/rydberg-model.md``).  :class:`GlobalDrivePulseEncoding` replaces it
+with what a device with a local detuning pattern can run: ``h_i`` on ``L``
+equally spaced levels, scaled by one ``Δ_local``, and a trapezoidal global
+``Ω(t)`` whose edges last ``t_ramp`` each, evolved as ``n_ramp_segments``
+constant segments per edge at their midpoints.  Its class docstring derives
+the level boundaries, the pulse area and the second-order error of the
+segments.  The map evolves the segments in time order, each with
+:func:`evolve` from the previous one's state, for every realisation of the
+register; the readout, the detection error and the mixture over positions
+act on the final state as above.  ``n_steps`` is the step count of every
+segment.  :meth:`GlobalDrivePulseEncoding.device_violations` checks the
+pulse against :data:`AQUILA_LIMITS`, on request only.
+
 Not an encoding layer
 ---------------------
 :class:`RydbergFeatureMap` is a preprocessing step, like
@@ -243,6 +262,7 @@ from __future__ import annotations
 import math
 import numbers
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -262,7 +282,13 @@ from hqnn_forge.rydberg.lindblad import (
 )
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 
-__all__ = ["PulseEncoding", "RydbergFeatureMap"]
+__all__ = [
+    "AQUILA_LIMITS",
+    "DeviceLimits",
+    "GlobalDrivePulseEncoding",
+    "PulseEncoding",
+    "RydbergFeatureMap",
+]
 
 #: Matrix entries one chunk may hold per tensor when ``chunk_size`` is not
 #: given: ``2^20`` ``complex128`` entries are 16 MiB.  A sample of ``N`` atoms
@@ -461,6 +487,431 @@ class PulseEncoding:
         )
 
 
+@dataclass(frozen=True)
+class DeviceLimits:
+    """
+    Bounds a device puts on a pulse, checked by :meth:`GlobalDrivePulseEncoding.device_violations`.
+
+    Attributes
+    ----------
+    omega_max : float
+        Largest Rabi frequency Ω, in rad/µs.
+    detuning_max : float
+        Largest ``|Δ_i|`` of any atom, in rad/µs.
+    duration_max : float
+        Longest pulse, from the start of the rising edge to the end of the
+        falling one, in µs.
+    omega_slew_max : float
+        Largest rate of change ``|dΩ/dt|``, in rad/µs².
+    """
+
+    omega_max: float
+    detuning_max: float
+    duration_max: float
+    omega_slew_max: float
+
+
+#: The bounds of QuEra's Aquila listed under *Hardware realism* in
+#: ``docs/rydberg-model.md`` (Wurtz et al. 2023; AWS 2024): ``Ω ≤ 15.8``
+#: rad/µs, ``|Δ| ≤ 125`` rad/µs, at most 4 µs, and Ω changing by at most 250
+#: rad/µs².  The slew bound makes the shortest edge of a pulse of amplitude Ω
+#: last ``Ω/250`` µs: 0.0503 µs at the reference ``Ω = 4π`` rad/µs, which the
+#: model page rounds to 0.05 µs (a 0.05 µs edge is a slew of 251 rad/µs²).
+#: The resolution and the magnitude limits of the local detuning pattern were
+#: not verified for the model page and are not part of it.
+AQUILA_LIMITS: DeviceLimits = DeviceLimits(
+    omega_max=15.8, detuning_max=125.0, duration_max=4.0, omega_slew_max=250.0
+)
+
+
+class GlobalDrivePulseEncoding:
+    """
+    A device-compatible pulse: a quantised local detuning pattern under a ramped global drive.
+
+    :class:`PulseEncoding` sets a detuning freely for every atom under a square
+    pulse.  On QuEra's Aquila (*Hardware realism* in ``docs/rydberg-model.md``)
+    Ω and the phase are global, a local detuning is a static pattern
+    ``0 ≤ h_i ≤ 1`` of finite resolution scaled by one waveform ``Δ_local``
+    shared by all atoms, and Ω changes at a bounded rate, so each edge of the
+    pulse is a ramp.  This encoding has those three features and is otherwise
+    :class:`PulseEncoding`: :class:`RydbergFeatureMap` takes either.  Units:
+    Ω and ``Δ_local`` in rad/µs, times in µs.
+
+    **The pattern.**  One input per atom; input column ``i`` sets ``h_i`` of
+    atom ``i``, and::
+
+        h_i = round(σ(x_i) · (L − 1)) / (L − 1)     (levels = L ≥ 2)
+        h_i = σ(x_i)                                (levels = None)
+
+        Δ_i = Δ_local · h_i,        σ(x) = 1 / (1 + e^(−x))
+
+    so ``0 ≤ Δ_i ≤ Δ_local``, one-signed as in :class:`PulseEncoding`, and
+    there is no global detuning.  With ``levels = L``, input ``x`` falls into
+    level ``m ∈ {0, …, L − 1}``, ``h = m/(L − 1)``, when
+    ``m − ½ < σ(x)(L − 1) < m + ½``.  σ is strictly increasing, and
+    ``σ(x) = p`` at ``x = ln(p/(1 − p))``, so with ``p = (2m − 1)/(2(L − 1))``
+    the boundary between levels ``m − 1`` and ``m`` is::
+
+        x_m = ln((2m − 1) / (2L − 2m − 1)),        m = 1, …, L − 1
+
+    Level 0 is ``x < x_1`` (``Δ_i = 0``, resonant), level ``L − 1`` is
+    ``x > x_(L−1)`` (``Δ_i = Δ_local``), and level ``m`` in between is
+    ``x_m < x < x_(m+1)``.  For ``L = 2`` the one boundary is ``x_1 = 0``.  An
+    input on a boundary goes to whichever neighbour the rounding of
+    ``σ(x)(L − 1)`` in ``float64`` and ``torch.round`` (half to even) give
+    it; ``x = 0`` at ``L = 2`` gives exactly ``½``, and level 0.  **Inputs in
+    the same level give the same detuning, bit for bit, and so the same
+    features**: the map sees only the level.  The levels are equally spaced in
+    ``h``, not in ``x``.
+
+    **The drive.**  A trapezoid ``Ω(t)``, the same for every atom, with linear
+    edges of duration ``t_ramp`` and the constant Ω between them::
+
+        Ω(t) = Ω t / t_ramp                   0 ≤ t ≤ t_ramp
+               Ω                              t_ramp ≤ t ≤ T
+               Ω (T + t_ramp − t) / t_ramp    T ≤ t ≤ T + t_ramp
+
+    **The pulse area is kept.**  The total duration is ``T + t_ramp``, and::
+
+        ∫ Ω dt = Ω t_ramp/2 + Ω (T − t_ramp) + Ω t_ramp/2 = Ω T
+
+    (two triangles of base ``t_ramp`` and height Ω, and the plateau), so the
+    default ``T = π/Ω`` is a π pulse with or without ramps.  This requires
+    ``0 ≤ t_ramp ≤ T``; ``t_ramp = T`` is a triangle without plateau.  The
+    detunings are constant over the whole pulse, ramps included.  For one
+    atom at ``Δ = 0`` every ``H(t) = Ω(t)/2 · X`` commutes with every other,
+    the propagator is ``exp(−i (∫Ω dt / 2) X)``, and ``⟨n⟩ = sin²(ΩT/2)`` for
+    any ramp.
+
+    **The segments.**  Each edge is evolved as ``n = n_ramp_segments``
+    piecewise-constant segments of duration ``τ = t_ramp / n``, each at the
+    value of Ω at its midpoint::
+
+        rising edge:    Ω_k = Ω (k + ½) / n,          k = 0, …, n − 1
+        plateau:        Ω, for T − t_ramp
+        falling edge:   Ω_k = Ω (n − k − ½) / n,      k = 0, …, n − 1
+
+    :meth:`segments` returns them in this order as ``(Ω_k, τ_k)``; the
+    plateau is left out when ``t_ramp = T > 0``.  Ω(t) is linear on each
+    segment, so its midpoint value is its mean, and each segment has the
+    exact area: ``Σ_k Ω_k τ_k = ΩT``, so the resonant result above holds for
+    the segments too, for every ``n``.  :class:`RydbergFeatureMap` evolves
+    the segments in order, each by :func:`~hqnn_forge.rydberg.evolve` from
+    the state the previous one returned (``rho0``), as the analog layer does
+    (:mod:`hqnn_forge.encoding.analog_rydberg`).
+
+    **The order of the discretisation error is two**: doubling ``n`` divides
+    it by 4.  On a segment centred at ``t_c``, ``H(t) = H_c + (t − t_c) Ḣ``
+    with ``Ḣ = ±(Ω/t_ramp) · ½ Σ_i X_i``.  The Magnus expansion of the exact
+    propagator is ``exp(M_1 + M_2 + …)`` with ``M_1 = −i ∫ H dt = −i H_c τ``
+    exactly, since H is linear, which is the segment's own exponent.  The
+    first term the segment misses is::
+
+        M_2 = −½ ∫_0^τ dt_1 ∫_0^(t_1) dt_2 [H(t_1), H(t_2)] = (τ³/12) [H_c, Ḣ]
+
+    (``[H(t_1), H(t_2)] = (t_1 − t_2) [Ḣ, H_c]`` and the integral of
+    ``t_1 − t_2`` over the triangle is ``τ³/6``), and ``M_3`` is ``O(τ⁴)``.
+    Each segment's propagator is thus off by ``O(τ³)`` and the ``n``
+    segments of an edge by ``n τ³/12 · ‖[H_c, Ḣ]‖ = t_ramp³/(12 n²) ·
+    ‖[H_c, Ḣ]‖`` to leading order.  For one atom
+    ``[H_c, Ḣ] = ∓(ΔΩ/(2 t_ramp)) [n, X]`` and ``‖[n, X]‖₂ = 1``, so each edge
+    is off by ``t_ramp² ΔΩ/(24 n²)`` in the operator norm.  The commutator
+    vanishes, and the segments are exact, when all ``H(t)`` commute: one atom
+    at ``Δ = 0``, or atoms without interactions at ``Δ_i = 0``.  The plateau
+    is one constant segment and is exact.  With dephasing every segment adds
+    the splitting error of :func:`~hqnn_forge.rydberg.evolve`, of second
+    order in its own step.
+
+    **The square-pulse limit.**  ``levels=None, t_ramp=0`` gives one segment
+    ``(Ω, T)`` and ``Δ_i = Δ_local · σ(x_i)``, the same expression
+    :class:`PulseEncoding` evaluates; the map makes the same calls with the
+    same numbers, so its features equal those of
+    ``PulseEncoding(n, omega=Ω, t=T, delta_max=Δ_local)`` bit for bit.
+
+    Parameters
+    ----------
+    n_features:
+        Width of the inputs, an integer ``>= 1``: the number of atoms.
+    omega:
+        Peak Rabi frequency Ω in rad/µs, finite and positive, the value on
+        the plateau.  Required, as for :class:`PulseEncoding`.
+    levels:
+        ``L``, the number of values of ``h_i``, an integer ``>= 2``, or
+        ``None`` for the continuous ``h_i = σ(x_i)``.  Required, without a
+        default: the resolution of a device's pattern was not verified for
+        ``docs/rydberg-model.md``, and none is assumed.
+    t_ramp:
+        Duration of each edge in µs, a finite number with
+        ``0 <= t_ramp <= t``.  Required, without a default; ``0`` is the
+        square pulse.  :data:`AQUILA_LIMITS` asks for at least ``Ω/250``.
+    n_ramp_segments:
+        Segments per edge, an integer ``>= 1``.  Required when
+        ``t_ramp > 0`` and refused when it is 0, where there is no edge.
+    t:
+        ``T`` in µs, finite and ``>= 0``, such that ``ΩT`` is the pulse
+        area; the pulse lasts ``T + t_ramp``.  Default: ``π/Ω``.
+    delta_local:
+        ``Δ_local`` in rad/µs, finite and positive, the detuning of an atom
+        with ``h_i = 1``.  Default: ``√3 Ω``, the ``delta_max`` default of
+        :class:`PulseEncoding`.
+
+    Attributes
+    ----------
+    n_features : int
+    omega, t, delta_local, t_ramp : float
+        ``t`` and ``delta_local`` resolved.
+    levels : int or None
+    n_ramp_segments : int or None
+    duration : float
+        ``T + t_ramp``, the whole pulse.
+
+    Raises
+    ------
+    ValueError
+        If ``n_features`` is not an integer ``>= 1``, ``omega`` or
+        ``delta_local`` is not a finite number ``> 0``, ``t`` is not a
+        finite number ``>= 0``, ``levels`` is neither ``None`` nor an
+        integer ``>= 2``, ``t_ramp`` is not a finite number in ``[0, t]``,
+        ``n_ramp_segments`` is not an integer ``>= 1``, is missing with
+        ``t_ramp > 0`` or given with ``t_ramp = 0``, or a default
+        (``π/Ω``, ``√3 Ω``) is not finite.
+
+    Examples
+    --------
+    >>> import math
+    >>> from hqnn_forge.rydberg import GlobalDrivePulseEncoding
+    >>> encoding = GlobalDrivePulseEncoding(
+    ...     2, omega=4 * math.pi, levels=3, t_ramp=0.0503, n_ramp_segments=4
+    ... )
+    >>> X = [[-1.5, 0.5], [-2.0, 0.9]]  # L = 3: boundaries at ±ln 3 = ±1.0986
+    >>> (encoding.detunings(X) / encoding.delta_local).tolist()
+    [[0.0, 0.5], [0.0, 0.5]]
+    >>> round(sum(o * tau for o, tau in encoding.segments()), 12) == round(math.pi, 12)
+    True
+    >>> encoding.device_violations()
+    []
+    """
+
+    def __init__(
+        self,
+        n_features: int,
+        *,
+        omega: float,
+        levels: int | None,
+        t_ramp: float,
+        n_ramp_segments: int | None = None,
+        t: float | None = None,
+        delta_local: float | None = None,
+    ) -> None:
+        # The validation and defaults of PulseEncoding, with Δ_local in place of Δ_max.
+        self._n_features = _positive_integer(n_features, "n_features")
+        self._omega = _finite_number(omega, "omega", positive=True)
+        self._t = math.pi / self._omega if t is None else _non_negative_number(t, "t")
+        self._delta_local = (
+            math.sqrt(3.0) * self._omega
+            if delta_local is None
+            else _finite_number(delta_local, "delta_local", positive=True)
+        )
+        if not (math.isfinite(self._t) and math.isfinite(self._delta_local)):
+            raise ValueError(
+                "omega must give a finite default t = π/Ω and delta_local = √3 Ω; "
+                f"got omega={self._omega!r}."
+            )
+        if levels is not None and (
+            isinstance(levels, bool) or not isinstance(levels, numbers.Integral) or levels < 2
+        ):
+            raise ValueError(f"levels must be an integer >= 2 or None; got {levels!r}.")
+        self._levels = None if levels is None else int(levels)
+        self._t_ramp = _non_negative_number(t_ramp, "t_ramp")
+        if self._t_ramp > self._t:
+            raise ValueError(
+                f"t_ramp must be at most t, so that the pulse keeps its area Ω t with a "
+                f"plateau of t - t_ramp >= 0; got t_ramp={self._t_ramp!r}, t={self._t!r}."
+            )
+        if self._t_ramp == 0:
+            if n_ramp_segments is not None:
+                raise ValueError(
+                    f"n_ramp_segments is used only with t_ramp > 0; got "
+                    f"n_ramp_segments={n_ramp_segments!r} with t_ramp={self._t_ramp!r}."
+                )
+            self._n_ramp_segments: int | None = None
+        else:
+            if n_ramp_segments is None:
+                raise ValueError(
+                    "n_ramp_segments is required when t_ramp > 0: each edge is evolved as that "
+                    "many constant segments, with an error of order 1/n_ramp_segments^2, and "
+                    "no count is assumed."
+                )
+            self._n_ramp_segments = _positive_integer(n_ramp_segments, "n_ramp_segments")
+
+    @property
+    def n_features(self) -> int:
+        """Width of the inputs: one per atom."""
+        return self._n_features
+
+    @property
+    def omega(self) -> float:
+        """Peak Rabi frequency Ω in rad/µs, on the plateau."""
+        return self._omega
+
+    @property
+    def t(self) -> float:
+        """``T`` in µs: the pulse area is ``ΩT``."""
+        return self._t
+
+    @property
+    def delta_local(self) -> float:
+        """``Δ_local`` in rad/µs, the detuning at ``h_i = 1``."""
+        return self._delta_local
+
+    @property
+    def levels(self) -> int | None:
+        """``L``, the number of values of ``h_i``, or ``None`` for the continuous pattern."""
+        return self._levels
+
+    @property
+    def t_ramp(self) -> float:
+        """Duration of each edge in µs."""
+        return self._t_ramp
+
+    @property
+    def n_ramp_segments(self) -> int | None:
+        """Segments per edge, or ``None`` without edges."""
+        return self._n_ramp_segments
+
+    @property
+    def duration(self) -> float:
+        """The whole pulse, ``T + t_ramp``, in µs."""
+        return self._t + self._t_ramp
+
+    def detunings(self, X: Any) -> torch.Tensor:
+        """
+        The detunings ``Δ_i = Δ_local · h_i`` of a batch of inputs.
+
+        ``h_i = round(σ(x_i)(L − 1))/(L − 1)``, or ``σ(x_i)`` with
+        ``levels=None``; the class docstring gives the level boundaries.
+
+        Parameters
+        ----------
+        X:
+            Inputs of shape ``(n_samples, n_features)``, any real-valued
+            array-like, converted to ``float64``.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``(n_samples, n_features)``, ``float64``, in rad/µs, in
+            ``[0, Δ_local]``, on the device of ``X`` and without a gradient:
+            entry ``[b, i]`` is the detuning of atom ``i`` for sample ``b``.
+
+        Raises
+        ------
+        TypeError
+            If ``X`` is complex or boolean.
+        ValueError
+            If ``X`` does not have shape ``(n_samples, n_features)`` or holds
+            a NaN or an infinity.
+        """
+        n = self._n_features
+        x = _finite_tensor(X, "X").detach()
+        if x.ndim != 2 or x.shape[1] != n:
+            raise ValueError(
+                f"X must have shape (n_samples, {n}), one input per atom; "
+                f"got shape {tuple(x.shape)}."
+            )
+        h = torch.sigmoid(x)
+        if self._levels is not None:
+            top = self._levels - 1
+            h = torch.round(h * top) / top
+        return self._delta_local * h
+
+    def segments(self) -> tuple[tuple[float, float], ...]:
+        """
+        The piecewise-constant drive as ``(Ω_k, τ_k)`` pairs, in rad/µs and µs, in time order.
+
+        The rising edge's ``n_ramp_segments`` segments at ``Ω (k + ½)/n``,
+        the plateau ``(Ω, T − t_ramp)`` and the falling edge at
+        ``Ω (n − k − ½)/n``, each edge segment lasting ``t_ramp/n`` (class
+        docstring).  Without ramps this is ``((Ω, T),)``; a triangle
+        (``t_ramp = T > 0``) has no plateau.
+        """
+        n = self._n_ramp_segments
+        if n is None:
+            return ((self._omega, self._t),)
+        tau = self._t_ramp / n
+        rising = tuple((self._omega * (k + 0.5) / n, tau) for k in range(n))
+        falling = tuple((self._omega * (n - k - 0.5) / n, tau) for k in range(n))
+        plateau = self._t - self._t_ramp
+        middle = ((self._omega, plateau),) if plateau > 0 else ()
+        return rising + middle + falling
+
+    def device_violations(self, limits: DeviceLimits = AQUILA_LIMITS) -> list[str]:
+        """
+        The device limits this pulse breaks, as messages naming each limit; empty if none.
+
+        Checked, in the field order of :class:`DeviceLimits`:
+
+        * ``omega_max``: the peak Ω;
+        * ``detuning_max``: the largest ``|Δ_i|``, which is ``Δ_local``
+          (``h_i = 1``; with ``levels=None`` it is approached, not reached);
+        * ``duration_max``: the whole pulse, ``T + t_ramp``;
+        * ``omega_slew_max``: the slope of the edges, ``Ω / t_ramp``,
+          infinite without ramps.
+
+        A value equal to its limit passes.  Each message starts with the
+        field name and a colon.  The check is never run by the map itself:
+        a pulse outside the limits is simulated as given.
+
+        Parameters
+        ----------
+        limits:
+            The bounds to check against; default :data:`AQUILA_LIMITS`.
+        """
+        slew = self._omega / self._t_ramp if self._t_ramp > 0 else math.inf
+        checks = (
+            ("omega_max", "Ω", self._omega, limits.omega_max, "rad/µs"),
+            (
+                "detuning_max",
+                "max |Δ_i| = Δ_local",
+                self._delta_local,
+                limits.detuning_max,
+                "rad/µs",
+            ),
+            ("duration_max", "T + t_ramp", self.duration, limits.duration_max, "µs"),
+            ("omega_slew_max", "Ω / t_ramp", slew, limits.omega_slew_max, "rad/µs²"),
+        )
+        return [
+            f"{name}: {what} = {value:.6g} {unit} exceeds {limit:.6g} {unit}"
+            for name, what, value, limit, unit in checks
+            if value > limit
+        ]
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        The constructor arguments, as a fresh JSON-serialisable dict.
+
+        ``t`` and ``delta_local`` are the resolved values.  The key
+        ``t_ramp``, which :class:`PulseEncoding` does not have, is how
+        :class:`RydbergFeatureMap` tells the two configs apart.
+        """
+        return {
+            "n_features": self._n_features,
+            "omega": self._omega,
+            "t": self._t,
+            "delta_local": self._delta_local,
+            "levels": self._levels,
+            "t_ramp": self._t_ramp,
+            "n_ramp_segments": self._n_ramp_segments,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"GlobalDrivePulseEncoding(n_features={self._n_features}, omega={self._omega!r}, "
+            f"t={self._t!r}, delta_local={self._delta_local!r}, levels={self._levels!r}, "
+            f"t_ramp={self._t_ramp!r}, n_ramp_segments={self._n_ramp_segments!r})"
+        )
+
+
 class RydbergFeatureMap:
     """
     A fixed map from a batch of inputs to the excitation probabilities of a Rydberg array.
@@ -484,9 +935,11 @@ class RydbergFeatureMap:
         or its positions in µm, shape ``(n_atoms, 2)``, as :meth:`get_config`
         records them.  1 to :data:`~hqnn_forge.rydberg.MAX_ATOMS` atoms.
     encoding:
-        The :class:`PulseEncoding` (detuning bound, Ω and ``T``), or its
-        ``get_config()`` dict.  Its ``n_features`` must equal the number of
-        atoms.
+        The :class:`PulseEncoding` (detuning bound, Ω and ``T``) or a
+        :class:`GlobalDrivePulseEncoding` (quantised pattern, ramped drive),
+        or the ``get_config()`` dict of either; a dict with the key
+        ``t_ramp`` builds the second.  Its ``n_features`` must equal the
+        number of atoms.
     c6:
         The ``C6`` coefficient in rad/µs · µm⁶, e.g.
         :data:`~hqnn_forge.rydberg.DEFAULT_C6`.  Required, also with
@@ -500,7 +953,9 @@ class RydbergFeatureMap:
         **Required when ``gamma > 0``, without a default** (see
         :func:`~hqnn_forge.rydberg.evolve` on how to choose it); not used
         when ``gamma = 0``, where the evolution is exact.  It is passed
-        unchanged to every solver call and never derived from the data, so
+        unchanged to every solver call, one per segment of the drive (the
+        plateau and each ramp segment of a
+        :class:`GlobalDrivePulseEncoding`), and never derived from the data, so
         the features of a sample do not depend, beyond rounding, on which
         other samples it is processed with (see :meth:`transform`).
     interactions:
@@ -547,7 +1002,8 @@ class RydbergFeatureMap:
         Width of the features: ``N``, or ``N + N(N−1)/2`` with
         ``correlations=True``.
     evolution_time : float
-        The pulse duration ``T`` in µs, ``encoding.t``.
+        The pulse duration in µs: ``encoding.t``, or ``encoding.duration``
+        (``T + t_ramp``) for a :class:`GlobalDrivePulseEncoding`.
     register, encoding, c6, gamma, n_steps, interactions, correlations, readout_error
         The settings, read-only; ``readout_error`` as a tuple of two
         ``float`` or ``None``.
@@ -558,9 +1014,11 @@ class RydbergFeatureMap:
     Raises
     ------
     TypeError
-        If ``encoding`` is neither a :class:`PulseEncoding` nor a mapping, is
-        a mapping with a key :class:`PulseEncoding` does not take or without
-        one it requires (``n_features``, ``omega``), or ``interactions`` or
+        If ``encoding`` is neither a :class:`PulseEncoding`, a
+        :class:`GlobalDrivePulseEncoding` nor a mapping, is a mapping with a
+        key the encoding it builds does not take or without one it requires
+        (``n_features``, ``omega``; also ``levels`` with ``t_ramp``), or
+        ``interactions`` or
         ``correlations`` is not a ``bool``.
     ValueError
         If the register has more than
@@ -575,8 +1033,8 @@ class RydbergFeatureMap:
         ``position_jitter > 0`` or given with ``position_jitter = 0``; if a
         displaced register has a coupling that is not finite (the message
         names the realisation); or if positions or an encoding config are
-        refused by :class:`~hqnn_forge.rydberg.AtomRegister` or
-        :class:`PulseEncoding`.
+        refused by :class:`~hqnn_forge.rydberg.AtomRegister`,
+        :class:`PulseEncoding` or :class:`GlobalDrivePulseEncoding`.
 
     Examples
     --------
@@ -613,7 +1071,7 @@ class RydbergFeatureMap:
     def __init__(
         self,
         register: Any,
-        encoding: PulseEncoding | Mapping[str, Any],
+        encoding: PulseEncoding | GlobalDrivePulseEncoding | Mapping[str, Any],
         *,
         c6: float,
         gamma: float,
@@ -632,11 +1090,15 @@ class RydbergFeatureMap:
         if not isinstance(register, AtomRegister):
             register = AtomRegister(register)
         if isinstance(encoding, Mapping):
-            encoding = PulseEncoding(**encoding)
-        elif not isinstance(encoding, PulseEncoding):
+            # Only GlobalDrivePulseEncoding has (and requires) t_ramp.
+            if "t_ramp" in encoding:
+                encoding = GlobalDrivePulseEncoding(**encoding)
+            else:
+                encoding = PulseEncoding(**encoding)
+        elif not isinstance(encoding, (PulseEncoding, GlobalDrivePulseEncoding)):
             raise TypeError(
-                f"encoding must be a PulseEncoding or its get_config() dict; "
-                f"got {type(encoding).__name__}."
+                f"encoding must be a PulseEncoding, a GlobalDrivePulseEncoding or the "
+                f"get_config() dict of one; got {type(encoding).__name__}."
             )
         n = register.n_atoms
         if n > MAX_ATOMS:
@@ -723,7 +1185,7 @@ class RydbergFeatureMap:
         return self._register
 
     @property
-    def encoding(self) -> PulseEncoding:
+    def encoding(self) -> PulseEncoding | GlobalDrivePulseEncoding:
         """The map from inputs to detunings, with Ω and ``T``."""
         return self._encoding
 
@@ -785,8 +1247,16 @@ class RydbergFeatureMap:
 
     @property
     def evolution_time(self) -> float:
-        """The pulse duration ``T`` in µs."""
+        """The pulse duration in µs: ``T``, or ``T + t_ramp`` with a ramped drive."""
+        if isinstance(self._encoding, GlobalDrivePulseEncoding):
+            return self._encoding.duration
         return self._encoding.t
+
+    def _segments(self) -> tuple[tuple[float, float], ...]:
+        """The drive as ``(Ω_k, τ_k)`` segments: one, ``(Ω, T)``, for a square pulse."""
+        if isinstance(self._encoding, GlobalDrivePulseEncoding):
+            return self._encoding.segments()
+        return ((self._encoding.omega, self._encoding.t),)
 
     def _chunk_size(self, chunk_size: int | None) -> int:
         if chunk_size is None:
@@ -803,22 +1273,37 @@ class RydbergFeatureMap:
         and divided by ``K`` once (not at all for ``K = 1``).  Without
         interactions the positions do not enter, and the register's own
         positions are evolved once, as without jitter.
+
+        Each register is evolved through the drive's segments in time order,
+        each segment by :func:`evolve` with ``n_steps`` from the state the
+        previous one returned; the first starts from ``|g…g⟩``.  A square
+        pulse is one segment, the single ``evolve`` call of the map without
+        a ramp.
         """
         registers = (
             self._jitter_registers
             if self._interactions and self._jitter_registers
             else (self._register,)
         )
+        segments = self._segments()
         total: torch.Tensor | None = None
         for register in registers:
-            hamiltonian = rydberg_hamiltonian(
-                register,
-                self._encoding.omega,
-                delta,
-                c6=self._c6,
-                interactions=self._interactions,
-            )
-            rho = evolve(hamiltonian, self._encoding.t, gamma=self._gamma, n_steps=self._n_steps)
+            rho: torch.Tensor | None = None
+            for omega, tau in segments:
+                hamiltonian = rydberg_hamiltonian(
+                    register,
+                    omega,
+                    delta,
+                    c6=self._c6,
+                    interactions=self._interactions,
+                )
+                if rho is None:  # from |g…g⟩: the one call of a square pulse, unchanged
+                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=self._n_steps)
+                else:
+                    rho = evolve(
+                        hamiltonian, tau, gamma=self._gamma, n_steps=self._n_steps, rho0=rho
+                    )
+            assert rho is not None
             total = rho if total is None else total + rho
         assert total is not None
         return total if len(registers) == 1 else total / len(registers)
@@ -1122,7 +1607,10 @@ class RydbergFeatureMap:
             The positions in µm, a list of ``[x, y]`` per atom.
         ``encoding``
             ``PulseEncoding.get_config()``: ``n_features``, Ω (``omega``),
-            ``T`` (``t``) and the bound ``delta_max``, in rad/µs and µs.
+            ``T`` (``t``) and the bound ``delta_max``, in rad/µs and µs; or
+            ``GlobalDrivePulseEncoding.get_config()``, which adds ``levels``,
+            ``t_ramp`` and ``n_ramp_segments`` and has ``delta_local`` in
+            place of ``delta_max``.
         ``c6``, ``gamma``, ``n_steps``, ``interactions``, ``correlations``
             As passed; ``n_steps`` is the solver's step count, ``None`` if
             none was given (``gamma = 0``).
