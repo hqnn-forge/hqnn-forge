@@ -18,6 +18,9 @@ For one sample ``x ∈ ℝ^N`` and a register of ``N`` atoms::
          →  F_i = ⟨n_i⟩ = Tr[ρ(T) n_i]                       (readout)
          →  p01 + (1 − p01 − p10) F_i      (optional detection error)
 
+With ``position_jitter`` the third step evolves ``K`` displaced registers and
+reads their mixture ``ρ̄(T)`` (see *Position jitter*).
+
 * **Which input feeds which atom.**  Column ``i`` of ``X`` sets the detuning
   of atom ``i``, the atom at row ``i`` of the register's positions, which is
   tensor factor (PennyLane wire) ``i`` of the Hamiltonian and feature column
@@ -151,6 +154,77 @@ column ``i`` to atom ``i``; a 0 reads 1 when ``u < p01``, a 1 reads 0 when
 ``u < p10``.  ``readout_error=(0, 0)`` draws no flips and is the map without
 the option bit for bit, on both paths and including the generator's state.
 
+Position jitter
+---------------
+By default every atom sits exactly at its register position.  On a device the
+positions vary from shot to shot.  With ``position_jitter=σ`` (in µm),
+``jitter_samples=K`` and ``jitter_seed`` the map uses ``K`` realisations of
+the register::
+
+    r_i^(k) = r_i + σ z_ki,        k = 0, …, K − 1,    z_ki ∈ ℝ²
+
+each coordinate of every ``z_ki`` an independent standard normal number, so
+each Cartesian coordinate of each atom is displaced by an independent
+``N(0, σ²)``.  The register lies in a plane, and only ``x`` and ``y`` are
+displaced; an out-of-plane displacement ``δz`` would change a distance ``a``
+by ``δz²/(2a)``, at second order only.
+
+**What is averaged.**  Realisation ``k`` has its own couplings
+``V_ij^(k) = C6 / |r_i^(k) − r_j^(k)|⁶`` and Hamiltonian ``H_k``, and
+``ρ_k(T)`` evolves under ``H_k`` from every atom in ``|g⟩``, with the same
+detunings, Ω, ``T`` and γ.  A shot that first takes a realisation ``k``
+uniformly and then a bitstring ``b`` with probability ``(ρ_k)_bb`` gives ``b``
+with probability ``(1/K) Σ_k (ρ_k)_bb = ρ̄_bb``, the diagonal of the mixture::
+
+    ρ̄ = (1/K) Σ_k ρ_k(T)
+
+and the map reads ``ρ̄``.  Every feature is a sum over the diagonal,
+``F[ρ] = Σ_b w(b) ρ_bb`` with ``w(b) = b_i`` (or ``b_i b_j``), linear in
+``ρ``, so ``F[ρ̄] = (1/K) Σ_k F[ρ_k]``: the exact features are the mean of the
+``K`` features computed on the displaced registers, and with ``shots`` the
+bitstrings are drawn from the diagonal of ``ρ̄``, as above.  The detection
+error acts on each bit read, after the mixture.  ``ρ̄`` is summed in the order
+``k = 0, …, K − 1`` and divided by ``K`` once, for each chunk of samples;
+``K = 1`` gives ``ρ_0`` without a division.  :meth:`RydbergFeatureMap.states`
+returns ``ρ̄``.
+
+**Drawn once.**  The ``K`` displacement patterns are drawn at construction,
+as one ``torch.randn((K, N, 2), dtype=float64)`` from a CPU
+``torch.Generator`` seeded with ``jitter_seed``, entry ``[k, i, c]`` for
+realisation ``k``, atom ``i`` and coordinate ``c`` (0 = ``x``, 1 = ``y``),
+and realisation ``k`` is ``AtomRegister(positions + σ · z[k])``.  The same
+``K`` registers serve every input sample and every call, so the map is a
+deterministic function of its input and its config, and no draw depends on
+the chunking.  ``ρ̄`` is therefore a Monte Carlo estimate, with ``K`` common
+draws, of the average of ``ρ(T)`` over Gaussian positions, not a device's
+fresh positions for every sample: its error, of order ``1/√K``, is the same
+for every sample and does not average out over a data set.  For the same
+reason ``jitter_seed`` has no unseeded default: like ``K`` it is required
+with ``σ > 0`` (and refused without), so ``get_config()`` fixes the draws,
+and torch's global generator is neither read nor advanced.
+
+**The spread of a coupling.**  For a pair at distance ``a`` along the unit
+vector ``e``, ``|r_i^(k) − r_j^(k)| = a + σ e·(z_ki − z_kj) + O(σ²/a)``, and
+``e·(z_ki − z_kj)`` is normal with variance 2.  ``V ∝ r⁻⁶`` gives
+``δV/V = −6 δr/a`` to first order, so the standard deviation of the coupling
+is ``6 √2 σ V / a``, the expression of the model page's *Hardware realism*.
+
+**Without interactions** the positions enter nothing (they reach the
+Hamiltonian only through ``V_ij``): all ``K`` Hamiltonians are the same
+matrix, and the map evolves the register's own positions once.  Its features,
+states and shot estimates are those of the map without jitter, bit for bit.
+
+A realisation that brings two atoms so close that ``C6/r⁶`` is not finite in
+``float64`` is refused at construction, with the error of
+:meth:`~hqnn_forge.rydberg.AtomRegister.interaction_matrix` (or of
+:class:`~hqnn_forge.rydberg.AtomRegister`) and the index of the realisation;
+without interactions nothing is checked.  The ``C6/r⁶`` form itself is
+long-distance (the model page does not use it below 4 µm), and no realisation
+is refused for coming closer than that.
+
+The solver runs ``K`` times per chunk, so the cost grows ``K`` times; the
+working memory grows by one tensor of the chunk's states, the sum.
+
 Not an encoding layer
 ---------------------
 :class:`RydbergFeatureMap` is a preprocessing step, like
@@ -201,6 +275,17 @@ def _positive_integer(value: Any, name: str, *, or_none: bool = False) -> int:
     if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 1:
         suffix = " or None" if or_none else ""
         raise ValueError(f"{name} must be an integer >= 1{suffix}; got {value!r}.")
+    return int(value)
+
+
+def _seed(value: Any, name: str) -> int:
+    """``value`` as a seed of ``torch.Generator.manual_seed``: an integer in ``[0, 2^64)``."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, numbers.Integral)
+        or not 0 <= int(value) < 2**64
+    ):
+        raise ValueError(f"{name} must be an integer in [0, 2^64); got {value!r}.")
     return int(value)
 
 
@@ -436,6 +521,23 @@ class RydbergFeatureMap:
         ``c = 1 − p01 − p10``; with ``shots`` each bit of each shot is
         flipped (see *Detection error* in the module docstring).  ``(0, 0)``
         gives the features without it, bit for bit.
+    position_jitter:
+        ``σ`` in µm, a finite number ``>= 0``.  ``0.0`` (default): every atom
+        sits at its register position.  ``σ > 0``: each Cartesian coordinate
+        of each atom is displaced by an independent ``N(0, σ²)`` in each of
+        ``jitter_samples`` realisations, and the features are read from the
+        mixture of the ``K`` evolved states (see *Position jitter* in the
+        module docstring).  With ``interactions=False`` it changes nothing.
+    jitter_samples:
+        ``K``, the number of displaced registers, an integer ``>= 1``.
+        Required when ``position_jitter > 0`` and refused when it is 0.
+    jitter_seed:
+        The seed the ``K`` displacement patterns are drawn from, once, at
+        construction, an integer in ``[0, 2^64)``.  Required when
+        ``position_jitter > 0`` and refused when it is 0, as ``jitter_samples``
+        is: there is no unseeded draw, so ``get_config()`` fixes the
+        positions, a map rebuilt from it draws the same ones, and building
+        the map takes nothing from torch's global generator.
 
     Attributes
     ----------
@@ -449,6 +551,9 @@ class RydbergFeatureMap:
     register, encoding, c6, gamma, n_steps, interactions, correlations, readout_error
         The settings, read-only; ``readout_error`` as a tuple of two
         ``float`` or ``None``.
+    position_jitter, jitter_samples, jitter_seed
+        The jitter settings, read-only: a ``float``, and an ``int`` each or
+        ``None`` without jitter.  ``register`` stays the undisplaced one.
 
     Raises
     ------
@@ -464,8 +569,14 @@ class RydbergFeatureMap:
         or ``gamma`` not a finite number ``>= 0``; if ``n_steps`` is not an
         integer ``>= 1``, or is missing with ``gamma > 0``; if
         ``readout_error`` is neither ``None`` nor a pair of numbers in
-        ``[0, 1]``; or if positions or an encoding config are refused by
-        :class:`~hqnn_forge.rydberg.AtomRegister` or :class:`PulseEncoding`.
+        ``[0, 1]``; if ``position_jitter`` is not a finite number ``>= 0``,
+        ``jitter_samples`` not an integer ``>= 1`` or ``jitter_seed`` not an
+        integer in ``[0, 2^64)``, or either of the two is missing with
+        ``position_jitter > 0`` or given with ``position_jitter = 0``; if a
+        displaced register has a coupling that is not finite (the message
+        names the realisation); or if positions or an encoding config are
+        refused by :class:`~hqnn_forge.rydberg.AtomRegister` or
+        :class:`PulseEncoding`.
 
     Examples
     --------
@@ -510,6 +621,9 @@ class RydbergFeatureMap:
         interactions: bool = True,
         correlations: bool = False,
         readout_error: tuple[float, float] | None = None,
+        position_jitter: float = 0.0,
+        jitter_samples: int | None = None,
+        jitter_seed: int | None = None,
     ) -> None:
         # Imported here: hqnn_forge.noise imports PennyLane, which the rest of
         # hqnn_forge.rydberg does not need.
@@ -548,6 +662,60 @@ class RydbergFeatureMap:
         self._interactions = _flag(interactions, "interactions")
         self._correlations = _flag(correlations, "correlations")
         self._readout_error = validate_readout_error(readout_error)
+        self._position_jitter = _non_negative_number(position_jitter, "position_jitter")
+        self._jitter_samples: int | None = None
+        self._jitter_seed: int | None = None
+        if self._position_jitter == 0:
+            for name, value in (("jitter_samples", jitter_samples), ("jitter_seed", jitter_seed)):
+                if value is not None:
+                    raise ValueError(
+                        f"{name} is used only with position_jitter > 0; got {name}={value!r} "
+                        f"with position_jitter={self._position_jitter!r}."
+                    )
+        else:
+            for name, value in (("jitter_samples", jitter_samples), ("jitter_seed", jitter_seed)):
+                if value is None:
+                    raise ValueError(
+                        f"{name} is required when position_jitter > 0: the displaced registers "
+                        "are drawn once, at construction, as jitter_samples realisations "
+                        "from jitter_seed, so that get_config() fixes them; pass integers, "
+                        "e.g. jitter_samples=16, jitter_seed=0."
+                    )
+            self._jitter_samples = _positive_integer(jitter_samples, "jitter_samples")
+            self._jitter_seed = _seed(jitter_seed, "jitter_seed")
+        self._jitter_registers = self._draw_registers()
+
+    def _draw_registers(self) -> tuple[AtomRegister, ...]:
+        """
+        The ``K`` displaced registers, or none without jitter or interactions.
+
+        One ``torch.randn((K, N, 2), dtype=float64)`` from a CPU generator
+        seeded with ``jitter_seed``: entry ``[k, i, c]`` displaces coordinate
+        ``c`` (0 = ``x``, 1 = ``y``) of atom ``i`` in realisation ``k``, and
+        realisation ``k`` is ``AtomRegister(positions + σ · z[k])``.  Each is
+        checked for finite couplings here, so that a failing realisation is
+        named once, at construction.  Without interactions the positions enter
+        nothing, so none is drawn or checked.
+        """
+        if self._jitter_samples is None or self._jitter_seed is None or not self._interactions:
+            return ()
+        n = self._register.n_atoms
+        generator = torch.Generator(device="cpu").manual_seed(self._jitter_seed)
+        z = torch.randn((self._jitter_samples, n, 2), generator=generator, dtype=torch.float64)
+        positions = self._register.positions
+        registers = []
+        for k in range(self._jitter_samples):
+            try:
+                register = AtomRegister(positions + self._position_jitter * z[k])
+                if self._interactions:
+                    register.interaction_matrix(self._c6)
+            except ValueError as error:
+                raise ValueError(
+                    f"position_jitter realisation {k} of {self._jitter_samples} "
+                    f"(jitter_seed={self._jitter_seed}) is refused: {error}"
+                ) from error
+            registers.append(register)
+        return tuple(registers)
 
     @property
     def register(self) -> AtomRegister:
@@ -590,6 +758,21 @@ class RydbergFeatureMap:
         return self._readout_error
 
     @property
+    def position_jitter(self) -> float:
+        """``σ`` in µm, the standard deviation of each displaced coordinate; 0 without jitter."""
+        return self._position_jitter
+
+    @property
+    def jitter_samples(self) -> int | None:
+        """``K``, the number of displaced registers, or ``None`` without jitter."""
+        return self._jitter_samples
+
+    @property
+    def jitter_seed(self) -> int | None:
+        """The seed of the displacements, or ``None`` without jitter."""
+        return self._jitter_seed
+
+    @property
     def n_features_in(self) -> int:
         """Width of the inputs: the number of atoms."""
         return self._register.n_atoms
@@ -612,15 +795,33 @@ class RydbergFeatureMap:
 
     @torch.no_grad()
     def _evolve(self, delta: torch.Tensor) -> torch.Tensor:
-        """``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``."""
-        hamiltonian = rydberg_hamiltonian(
-            self._register,
-            self._encoding.omega,
-            delta,
-            c6=self._c6,
-            interactions=self._interactions,
+        """
+        ``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``.
+
+        With jitter and interactions, the mixture ``ρ̄ = (1/K) Σ_k ρ_k(T)``
+        of the displaced registers, summed in the order ``k = 0, …, K − 1``
+        and divided by ``K`` once (not at all for ``K = 1``).  Without
+        interactions the positions do not enter, and the register's own
+        positions are evolved once, as without jitter.
+        """
+        registers = (
+            self._jitter_registers
+            if self._interactions and self._jitter_registers
+            else (self._register,)
         )
-        return evolve(hamiltonian, self._encoding.t, gamma=self._gamma, n_steps=self._n_steps)
+        total: torch.Tensor | None = None
+        for register in registers:
+            hamiltonian = rydberg_hamiltonian(
+                register,
+                self._encoding.omega,
+                delta,
+                c6=self._c6,
+                interactions=self._interactions,
+            )
+            rho = evolve(hamiltonian, self._encoding.t, gamma=self._gamma, n_steps=self._n_steps)
+            total = rho if total is None else total + rho
+        assert total is not None
+        return total if len(registers) == 1 else total / len(registers)
 
     def _active_readout_error(self) -> tuple[float, float] | None:
         """``(p01, p10)``, or ``None`` when no bit is ever misread (also for ``(0, 0)``)."""
@@ -788,7 +989,10 @@ class RydbergFeatureMap:
           (``16 · 4^N`` bytes per sample each; 16 MiB each at the default).
           With ``shots`` and a ``readout_error`` the counts of every sample,
           ``n_samples · 2^N`` ``int64``, are also held until all bitstrings
-          are drawn, since the flips are drawn after them.
+          are drawn, since the flips are drawn after them.  With
+          ``position_jitter`` (and interactions) the solver runs once per
+          realisation, and the chunk's mixture is one more tensor of that
+          size.
         * **Chunked and unchunked results are equal to rounding, not bit for
           bit.**  Every sample is evolved with the same ``T``, γ and
           ``n_steps`` whatever the chunk, and bitstrings are drawn sample by
@@ -866,6 +1070,8 @@ class RydbergFeatureMap:
         ``p01 + c ⟨n_i⟩`` and ``p01² + p01 c (⟨n_i⟩ + ⟨n_j⟩) + c² ⟨n_i n_j⟩``
         with ``c = 1 − p01 − p10``, derived under *Detection error* in the
         module docstring.  The states themselves carry no detection error.
+        With ``position_jitter`` (and interactions) each state is the mixture
+        ``ρ̄ = (1/K) Σ_k ρ_k(T)`` of the displaced registers.
 
         Parameters
         ----------
@@ -922,6 +1128,10 @@ class RydbergFeatureMap:
             none was given (``gamma = 0``).
         ``readout_error``
             ``[p01, p10]`` as a list of two floats, or ``None``.
+        ``position_jitter``, ``jitter_samples``, ``jitter_seed``
+            ``σ`` in µm, ``K`` and the seed, or ``0.0``, ``None`` and
+            ``None`` without jitter.  The seed fixes the displacements, so
+            the rebuilt map draws the same registers.
 
         The number of shots and the chunk size are arguments of
         :meth:`transform`, not settings of the map, and are not recorded.
@@ -935,6 +1145,9 @@ class RydbergFeatureMap:
             "interactions": self._interactions,
             "correlations": self._correlations,
             "readout_error": None if self._readout_error is None else list(self._readout_error),
+            "position_jitter": self._position_jitter,
+            "jitter_samples": self._jitter_samples,
+            "jitter_seed": self._jitter_seed,
         }
 
     def __repr__(self) -> str:
@@ -942,5 +1155,7 @@ class RydbergFeatureMap:
             f"RydbergFeatureMap(n_atoms={self._register.n_atoms}, encoding={self._encoding!r}, "
             f"c6={self._c6!r}, gamma={self._gamma!r}, n_steps={self._n_steps!r}, "
             f"interactions={self._interactions}, correlations={self._correlations}, "
-            f"readout_error={self._readout_error!r})"
+            f"readout_error={self._readout_error!r}, "
+            f"position_jitter={self._position_jitter!r}, jitter_samples={self._jitter_samples!r}, "
+            f"jitter_seed={self._jitter_seed!r})"
         )
