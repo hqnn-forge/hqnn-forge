@@ -274,6 +274,38 @@ class TestSquarePulseLimit:
         assert torch.equal(shots, square.transform(x, shots=50, generator=generator))
 
 
+class TestComposition:
+    """Position jitter (#731) and detection error (#730) act on the ramped pulse."""
+
+    def test_every_realisation_is_evolved_under_the_ramp(self) -> None:
+        # The mixture is the mean of maps without jitter, one per drawn register, each
+        # with the ramped encoding; the detection error then acts on that mixture.
+        p01, p10 = 0.02, 0.1
+        encoding = device_encoding(2, levels=None, t_ramp=0.08, n_ramp_segments=2)
+        settings: dict[str, object] = {
+            "position_jitter": 0.5,
+            "jitter_samples": 3,
+            "jitter_seed": 4,
+            "readout_error": (p01, p10),
+        }
+        jittered = device_map(TWO_ATOMS, encoding, **settings)
+        x = torch.tensor([[0.4, -0.7], [1.2, 0.3]], dtype=F64)
+        drawn = jittered._jitter_registers
+        assert len(drawn) == 3
+        first, second, third = (device_map(r, encoding).states(x) for r in drawn)
+        expected = (first + second + third) / 3
+        torch.testing.assert_close(jittered.states(x), expected, rtol=0, atol=1e-14)
+        torch.testing.assert_close(
+            jittered.transform(x),
+            p01 + (1 - p01 - p10) * readout(expected),
+            rtol=0,
+            atol=1e-14,
+        )
+        # The ramp matters here: the same draws under the square pulse differ.
+        square = device_map(TWO_ATOMS, device_encoding(2, levels=None, t_ramp=0.0), **settings)
+        assert (jittered.states(x) - square.states(x)).abs().max() > 1e-3
+
+
 class TestQuantisation:
     """``h_i = round(σ(x_i)(L − 1))/(L − 1)``."""
 
@@ -327,7 +359,7 @@ class TestDeviceLimits:
             ("omega_max", {"omega": 16.0, "t_ramp": 0.08}),
             ("detuning_max", {"delta_local": 130.0, "t_ramp": 0.0503}),
             ("duration_max", {"t": 4.0, "t_ramp": 0.0503}),
-            # 0.05 µs, the model page's rounded figure, is a slew of 251 rad/µs².
+            # 0.05 µs, 0.0503 rounded down, is a slew of 251 rad/µs².
             ("omega_slew_max", {"t_ramp": 0.05}),
             ("omega_slew_max", {"t_ramp": 0.0}),
         ],
@@ -343,6 +375,16 @@ class TestDeviceLimits:
         encoding = device_encoding(omega=20.0, delta_local=200.0, t=5.0, t_ramp=0.0)
         names = [v.split(":")[0] for v in encoding.device_violations()]
         assert names == ["omega_max", "detuning_max", "duration_max", "omega_slew_max"]
+
+    def test_a_value_at_its_limit_passes(self) -> None:
+        encoding = device_encoding(t_ramp=0.0503, n_ramp_segments=2)
+        exact = DeviceLimits(
+            omega_max=encoding.omega,
+            detuning_max=encoding.delta_local,
+            duration_max=encoding.duration,
+            omega_slew_max=encoding.omega / encoding.t_ramp,
+        )
+        assert encoding.device_violations(exact) == []
 
     def test_other_limits(self) -> None:
         loose = DeviceLimits(
