@@ -469,6 +469,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all of them, every line records `geometry` and `grid_shape`, a ring or a grid gets cache
   entries of its own while the default chain keeps its keys, and both summaries group by
   geometry (#733, #739)
+- The positive control of `examples/benchmark_rydberg_features.py` is labelled over the
+  nearest-neighbour bonds of the run's geometry (`nearest_neighbour_bonds`, `control_bonds`,
+  `bonds=` on `product_labels` and `positive_control`), so on a ring and a grid it asks for
+  the products that geometry's interactions form; the chain's labels, inputs and data
+  fingerprints are those from before. Every line records `label_bonds` (`null` for a UCI
+  dataset). A run with `positive-control`, `--quick` included, takes one geometry and refuses
+  several before any dataset is loaded (#738, #740)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
