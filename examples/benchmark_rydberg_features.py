@@ -190,13 +190,19 @@ and how far the next-nearest pairs are:
     divide ``N``, or a shape with a single row or column (a chain), is
     refused.
 
-The positive control's label stays the sum over the bonds of the chain,
-``z_i z_{i+1}``.  On a ring those are neighbours too (with one more pair,
-``0`` and ``N − 1``, that the label does not use); on a grid the pair
-``(cols − 1, cols)`` that ends one row and starts the next is
-``√(1 + (cols − 1)²) · a`` apart (``√2 a`` and ``V/8`` on ``2 × 2``), and
-the vertical pairs ``(k, k + cols)`` are not in the label.  A label that
-follows the geometry is #738.
+**The positive control's label follows the geometry** (#738): it is the
+sign of the sum of ``z_j z_k`` over the nearest-neighbour bonds of the
+run's geometry, :func:`control_bonds`, so it asks for exactly the products
+the interactions of that geometry form.  The chain's bonds are
+``(i, i + 1)`` and its label is the one from before ``--geometry``,
+sample by sample, so chain results stay comparable with earlier ones; the
+inputs do not depend on the geometry, only the label does.  A run with
+``positive-control`` therefore takes **one geometry**: a ring and a chain
+would label the same inputs differently, and arms B, C and D, which are
+shared across the geometries of a run, would have to be trained once per
+label.  A run of several geometries with the control is refused; run the
+control once per geometry, and the UCI datasets, whose labels do not
+depend on it, with all of them.
 
 Units: ħ = 1, angular frequencies (Ω, γ, ``C6/r⁶``) in rad/µs, lengths in
 µm, times in µs; inputs and features are dimensionless.
@@ -305,11 +311,15 @@ Data
 ----
 ``positive-control`` (:func:`positive_control`)
     A synthetic task whose label is the sign of
-    ``Σ_i z_i z_{i+1}``, a sum of products of latent variables that end up,
-    in this order, on neighbouring atoms.  No single input carries any
+    ``Σ_{(j, k)} z_j z_k`` over the bonds of the run's geometry
+    (:func:`control_bonds`; ``Σ_i z_i z_{i+1}`` on the chain), a sum of
+    products of latent variables that end up on neighbouring atoms.  On the
+    chain, a grid and a ring of even ``N`` no single input carries any
     information about the label, so the class means of arm B's features
     (and of the inputs) coincide, while those of arm A's features do not:
-    arm A can in principle beat arm B there.  It tells a null result on real
+    arm A can in principle beat arm B there.  On a ring of odd ``N`` only
+    the class means of the inputs are sure to coincide, and the classes are
+    unbalanced: a weaker check (:func:`positive_control`).  It tells a null result on real
     data ("interactions do not help") from a pipeline that could not have
     shown an effect.  That holds for the ``linear`` head.  An ``mlp`` head
     can form products of its inputs itself, on arm B's features as on the
@@ -398,7 +408,13 @@ at a limit of 20), which the line does not show; the Notes of
 :func:`hqnn_forge.diagnostics.separation_measures` say what that does to
 the measures.
 ``separation[part]['n_samples']`` records the actual number of rows used;
-the dataset's size and SHA-256; ``settings`` and ``environment``.
+the dataset's size and SHA-256 (``data_sha256``, over the inputs and the
+labels); ``label_bonds``, the bonds ``[j, k]`` the positive control's label
+was drawn with (:func:`control_bonds`; ``null`` for a UCI dataset).  The
+control's ``data_seed`` is the seed of its latents and inputs and is the
+same for every geometry, so ``label_bonds`` is what says which label a
+line was trained on; a control line written before the field existed used
+the chain's.  ``settings`` and ``environment``.
 
 **The file is strict JSON.**  A NaN is written as ``null`` (as
 :mod:`hqnn_forge.experiment` does) and an infinity as the string ``"inf"``
@@ -420,7 +436,8 @@ one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
 ``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
-``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.
+``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.  As it
+runs the positive control, ``--geometry`` takes one geometry there.
 """
 
 from __future__ import annotations
@@ -1071,12 +1088,14 @@ def load_dataset(
 
     ``data_seed`` is the seed the positive control was drawn with, derived
     from ``settings.random_state``, and ``None`` for a UCI dataset, which is
-    read from ``path`` as its loader documents.  ``settings.drop_duplicates``
-    reaches the Iranian Churn loader only.
+    read from ``path`` as its loader documents.  The control's label is over
+    :func:`control_bonds` of ``settings``, which refuses several geometries.
+    ``settings.drop_duplicates`` reaches the Iranian Churn loader only.
     """
     if name == "positive-control":
+        bonds = control_bonds(settings)
         data_seed = run_seeds(settings.random_state)["data_seed"]
-        control = positive_control(settings.n_atoms, settings.n_samples, data_seed)
+        control = positive_control(settings.n_atoms, settings.n_samples, data_seed, bonds=bonds)
         return control.X, control.y, data_seed
     loaders = {
         "iranian-churn": load_iranian_churn,
@@ -1392,6 +1411,30 @@ def nearest_neighbour_bonds(
             f"got {n_atoms}."
         )
     return _register(n_atoms, geometry, 1.0, grid_cols).interaction_graph(_BOND_RADIUS)
+
+
+def control_bonds(settings: Settings) -> list[tuple[int, int]]:
+    """
+    The bonds of the positive control's label in a run of ``settings``.
+
+    :func:`nearest_neighbour_bonds` of the run's one geometry (with
+    ``settings.grid_cols`` for a grid): ``(i, i + 1)`` on the chain, whose
+    label is therefore the one from before ``--geometry`` existed.
+
+    Raises
+    ------
+    ValueError
+        With more than one geometry in ``settings.geometries``.  Each would
+        give the same inputs another label, while arms B, C and D are
+        trained once per run and dataset, on one label (#738).
+    """
+    if len(settings.geometries) != 1:
+        raise ValueError(
+            "the positive control's label follows the geometry, so a run with "
+            f"positive-control takes one geometry; got {list(settings.geometries)}. "
+            "Run the control once per geometry."
+        )
+    return nearest_neighbour_bonds(settings.n_atoms, settings.geometries[0], settings.grid_cols)
 
 
 def feature_map(
@@ -2539,6 +2582,7 @@ def run_dataset(
     cache: FeatureCache,
     *,
     data_seed: int | None = None,
+    label_bonds: Sequence[Sequence[int]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Every record of one dataset: per fold, each representation and head.
@@ -2554,6 +2598,9 @@ def run_dataset(
         The run's settings and feature cache.
     data_seed:
         The seed the data was generated with, recorded with the other seeds.
+    label_bonds:
+        The bonds the labels were drawn over (:func:`control_bonds`),
+        recorded as ``label_bonds``; ``None`` for data without them.
 
     Yields
     ------
@@ -2574,6 +2621,7 @@ def run_dataset(
     data_info = {
         "dataset": name,
         "data_sha256": fingerprint(X, y),
+        "label_bonds": None if label_bonds is None else [[int(j), int(k)] for j, k in label_bonds],
         "n_samples": int(y.size),
         "n_positives": int(y.sum()),
         "n_raw_features": int(X.shape[1]),
@@ -2926,6 +2974,10 @@ def run(
     ----------
     datasets:
         Name → ``(X, y, data_seed)``, as :func:`load_dataset` returns them.
+        ``positive-control`` with a ``data_seed`` is the control
+        :func:`load_dataset` draws for ``settings``, and its lines record
+        :func:`control_bonds` of ``settings`` as ``label_bonds``, which
+        refuses a run of several geometries.
     settings:
         The run's settings.
     out:
@@ -2948,7 +3000,14 @@ def run(
     with contextlib.ExitStack() as stack:
         fh: TextIO | None = None
         for name, (X, y, data_seed) in datasets.items():
-            for record in run_dataset(name, X, y, settings, cache, data_seed=data_seed):
+            bonds = (
+                control_bonds(settings)
+                if name == "positive-control" and data_seed is not None
+                else None
+            )
+            for record in run_dataset(
+                name, X, y, settings, cache, data_seed=data_seed, label_bonds=bonds
+            ):
                 if fh is None:
                     fh = stack.enter_context(open(out, "w", encoding="utf-8"))
                 records.append(record)
@@ -3047,7 +3106,8 @@ def _parser() -> argparse.ArgumentParser:
         default=list(default.geometries),
         help=(
             "atom arrays to run, each over the whole grid, with V/Omega the nearest-neighbour "
-            "interaction in each; arm B is computed once for all of them"
+            "interaction in each; arm B is computed once for all of them. The positive "
+            "control's label follows the geometry, so a run with it (and --quick) takes one"
         ),
     )
     parser.add_argument(
@@ -3201,7 +3261,9 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, ``--separation-seed``, ``--geometry`` and
-    ``--grid-cols`` still apply.
+    ``--grid-cols`` still apply.  With ``positive-control`` among the
+    datasets, several geometries are refused (:func:`control_bonds`) before
+    any dataset is loaded.
 
     ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
     other option, ``--quick`` and ``--out`` included, is ignored.
@@ -3306,6 +3368,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         names = list(dict.fromkeys(args.dataset))
     if "positive-control" in names:
         check_positive_control_atoms(settings.n_atoms)
+        control_bonds(settings)
     check_writable(args.out)
     datasets = {
         name: load_dataset(name, settings, path=args.data_path, download=args.download)

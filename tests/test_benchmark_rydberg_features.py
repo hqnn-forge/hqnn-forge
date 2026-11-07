@@ -4063,6 +4063,7 @@ ROWS = [
 FIELDS = {
     "dataset",
     "data_sha256",
+    "label_bonds",
     "n_samples",
     "n_positives",
     "n_raw_features",
@@ -4915,7 +4916,8 @@ class TestGeometry:
             geometries=("chain", "ring", "grid"),
         )
         rng = np.random.RandomState(3)
-        data = {"positive-control": (rng.randn(40, 4), np.array([0, 1] * 20), 0)}
+        # Random data, not a control drawn for these settings: no data_seed, so no label bonds.
+        data = {"iranian-churn": (rng.randn(40, 4), np.array([0, 1] * 20), None)}
         calls: list[tuple[str, str]] = []
         original = bench.features_of
 
@@ -4951,22 +4953,16 @@ class TestGeometry:
         )
 
     @pytest.mark.slow
-    def test_quick_with_every_geometry_through_the_command_line(self, tmp_path: Path) -> None:
-        """One ``--quick`` run of all three: the lines carry the geometry, the keys differ."""
+    def test_quick_settings_with_every_geometry_in_one_run(self, tmp_path: Path) -> None:
+        """
+        One run of all three at ``QUICK``, on a dataset whose label does not depend on the
+        geometry (the positive control's does, so a run of it takes one, #738): the
+        lines carry the geometry, the keys differ.
+        """
         out, cache = tmp_path / "quick.jsonl", tmp_path / "cache"
-        records = bench.main(
-            [
-                "--quick",
-                "--geometry",
-                "chain",
-                "ring",
-                "grid",
-                "--out",
-                str(out),
-                "--cache-dir",
-                str(cache),
-            ]
-        )
+        X, y, _ = bench.load_dataset("positive-control", QUICK)
+        settings = _replace(QUICK, geometries=("chain", "ring", "grid"))
+        records = bench.run({"iranian-churn": (X, y, None)}, settings, out, cache_dir=cache)
         lines = bench.read_records(out)
         assert len(lines) == len(records) == 3 * 4 + 5  # A and B × 2 heads per geometry; C, D
         rydberg = [r for r in lines if r["arm"] in ("A", "B")]
@@ -5005,13 +5001,145 @@ class TestGeometry:
 
         monkeypatch.setattr(bench, "run", capture)
         out = str(tmp_path / "out.jsonl")
-        bench.main(["--quick", "--geometry", "grid", "ring", "grid", "--out", out, "--no-cache"])
+        bench.main(["--quick", "--geometry", "grid", "grid", "--out", out, "--no-cache"])
         bench.main(["--geometry", "grid", "--grid-cols", "2", "--out", out, "--no-cache"])
-        assert captured[0] == _replace(QUICK, geometries=("grid", "ring"))
+        assert captured[0] == _replace(QUICK, geometries=("grid",))
         assert (captured[1].geometries, captured[1].grid_cols) == (("grid",), 2)
+        # Several geometries, on a dataset whose label does not depend on them.
+        monkeypatch.setattr(bench, "load_dataset", lambda *args, **kwargs: (None, None, None))
+        bench.main(
+            ["--dataset", "iranian-churn", "--geometry", "grid", "ring", "grid"]
+            + ["--out", out, "--no-cache"]
+        )
+        assert captured[2].geometries == ("grid", "ring")
         assert bench.Settings().geometries == ("chain",)
         with pytest.raises(SystemExit):
             bench._parser().parse_args(["--geometry", "square"])
+
+
+class TestControlFollowsTheGeometry:
+    """
+    #738: a run labels the positive control over its geometry's bonds and records them.
+
+    The labels are checked against the sign of the bond sums written out by hand on
+    latents drawn independently of the runner; the chain's against the fingerprint of
+    ``main`` at 6080cde.
+    """
+
+    def test_the_bonds_of_a_run_typed_in(self) -> None:
+        def bonds(**changes: Any) -> list[tuple[int, int]]:
+            return bench.control_bonds(_replace(QUICK, **changes))
+
+        assert bonds() == [(0, 1), (1, 2), (2, 3)]
+        assert bonds(geometries=("ring",)) == [(0, 1), (0, 3), (1, 2), (2, 3)]
+        assert bonds(geometries=("grid",)) == [(0, 1), (0, 2), (1, 3), (2, 3)]
+        # 3 × 2: k = 2r + c, rows (0, 1), (2, 3), (4, 5) and columns (k, k + 2)
+        assert bonds(geometries=("grid",), n_atoms=6, grid_cols=2) == [
+            (0, 1),
+            (0, 2),
+            (1, 3),
+            (2, 3),
+            (2, 4),
+            (3, 5),
+            (4, 5),
+        ]
+
+    @pytest.mark.parametrize(
+        "geometries", [("chain", "ring"), ("ring", "grid"), ("grid", "chain")]
+    )
+    def test_a_control_of_several_geometries_is_refused(self, geometries: tuple[str, ...]) -> None:
+        settings = _replace(QUICK, geometries=geometries)
+        with pytest.raises(ValueError, match="takes one geometry"):
+            bench.control_bonds(settings)
+        with pytest.raises(ValueError, match="takes one geometry"):
+            bench.load_dataset("positive-control", settings)
+
+    @pytest.mark.parametrize(
+        ("geometry", "bond_sum"),
+        [
+            ("chain", lambda z: z[:, 0] * z[:, 1] + z[:, 1] * z[:, 2] + z[:, 2] * z[:, 3]),
+            (
+                "ring",
+                lambda z: (
+                    z[:, 0] * z[:, 1] + z[:, 1] * z[:, 2] + z[:, 2] * z[:, 3] + z[:, 3] * z[:, 0]
+                ),
+            ),
+            # 2 × 2: rows (0, 1), (2, 3), columns (0, 2), (1, 3)
+            (
+                "grid",
+                lambda z: (
+                    z[:, 0] * z[:, 1] + z[:, 2] * z[:, 3] + z[:, 0] * z[:, 2] + z[:, 1] * z[:, 3]
+                ),
+            ),
+        ],
+    )
+    def test_the_loaded_control_is_labelled_over_the_geometry(
+        self, geometry: str, bond_sum: Any
+    ) -> None:
+        settings = _replace(QUICK, geometries=(geometry,))
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        assert data_seed == bench.run_seeds(QUICK.random_state)["data_seed"]
+        # The latents as positive_control documents them: the first draw of its generator.
+        latent = np.random.default_rng(data_seed).standard_normal((QUICK.n_samples, 4))
+        np.testing.assert_array_equal(y, (bond_sum(latent) > 0).astype(np.int64))
+        chain_X, chain_y, _ = bench.load_dataset("positive-control", QUICK)
+        np.testing.assert_array_equal(X, chain_X)  # only the label follows the geometry
+        sha = fingerprint(X, y)
+        if geometry == "chain":
+            # positive_control(4, 160, ·) on main at 6080cde, before the geometry
+            assert sha == "9893f5fabce42b3762849c354a1a6bd5d98efebd7d2037f8239c62b14874b4b8"
+        else:
+            assert (y != chain_y).any() and sha != fingerprint(chain_X, chain_y)
+
+    def test_every_line_records_the_bonds_of_its_label(self, tmp_path: Path) -> None:
+        settings = _replace(QUICK, arms=("C",), n_trials=0, max_epochs=1, geometries=("ring",))
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        rng = np.random.RandomState(0)
+        datasets = {
+            "positive-control": (X, y, data_seed),
+            "iranian-churn": (rng.randn(80, 5), np.array([0, 1] * 40), None),
+        }
+        out = tmp_path / "out.jsonl"
+        records = bench.run(datasets, settings, out, cache_dir=None)
+        lines = bench.read_records(out)
+        assert len(lines) == len(records) == 4  # arm C, 2 heads, one fold, 2 datasets
+        control = [r for r in lines if r["dataset"] == "positive-control"]
+        assert [r["label_bonds"] for r in control] == [[[0, 1], [0, 3], [1, 2], [2, 3]]] * 2
+        assert {r["data_sha256"] for r in control} == {fingerprint(X, y)}
+        assert {r["seeds"]["data_seed"] for r in control} == {data_seed}
+        assert all(r["label_bonds"] is None for r in lines if r["dataset"] == "iranian-churn")
+
+    def test_a_run_of_a_drawn_control_and_several_geometries_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _replace(QUICK, arms=("C",), geometries=("chain", "ring"))
+        X, y, data_seed = bench.load_dataset("positive-control", QUICK)
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(ValueError, match="takes one geometry"):
+            bench.run({"positive-control": (X, y, data_seed)}, settings, out)
+        assert not out.exists()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--quick", "--geometry", "chain", "ring"],
+            ["--dataset", "iranian-churn", "positive-control", "--geometry", "ring", "grid"],
+        ],
+    )
+    def test_the_command_line_refuses_it_before_loading_a_dataset(
+        self, argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loaded: list[str] = []
+
+        def spy(name: str, *args: Any, **kwargs: Any) -> Any:
+            loaded.append(name)
+            raise AssertionError("loaded")
+
+        monkeypatch.setattr(bench, "load_dataset", spy)
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(ValueError, match="takes one geometry"):
+            bench.main([*argv, "--out", str(out), "--no-cache"])
+        assert loaded == [] and not out.exists()
 
 
 class TestSummary:
