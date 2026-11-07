@@ -146,6 +146,46 @@ its ``readout_error`` included, is
 suppressed inside it just as for ``p > 0``, but it does not count as a
 replaced QNode: a ``p > 0`` block may be opened inside it.
 
+Kraus operators
+---------------
+Each channel of :data:`CHANNELS` also carries its Kraus operators
+(``operators``), for a circuit that applies the channel to ρ in torch rather
+than as a gate (below).  At strength ``p``, with ``|0⟩`` first and
+``I, X, Y, Z`` the Pauli matrices::
+
+    depolarizing        sqrt(1 − p) I,  sqrt(p/3) X,  sqrt(p/3) Y,  sqrt(p/3) Z
+    amplitude_damping   [[1, 0], [0, sqrt(1 − p)]],  [[0, sqrt(p)], [0, 0]]
+    phase_damping       [[1, 0], [0, sqrt(1 − p)]],  [[0, 0], [0, sqrt(p)]]
+    bit_flip            sqrt(1 − p) I,  sqrt(p) X
+    phase_flip          sqrt(1 − p) I,  sqrt(p) Z
+    atom_loss           sqrt(1 − p) I,  sqrt(p) |1⟩⟨0|,  sqrt(p) |1⟩⟨1|
+
+These are the Kraus operators of ``qml.DepolarizingChannel``,
+``qml.AmplitudeDamping``, ``qml.PhaseDamping``, ``qml.BitFlip``,
+``qml.PhaseFlip`` and ``qml.ResetError(0, p)`` (whose two ``p0`` operators
+are zero and left out), the operations the density path inserts, and each
+set satisfies ``Σ_k K_k† K_k = I``.  The channel is
+``ρ → Σ_k K_k ρ K_k†`` on one wire; on ``N`` wires each operator acts on
+one tensor factor, wire 0 the most significant bit of a basis index, which
+is PennyLane's order (``_kraus_map_on_every_wire``).
+
+Circuits without gates between segments
+---------------------------------------
+:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0`` evolves
+its pulse segments in torch and its circuit only prepares the final ``ρ(T)``
+(#699), so there is no gate between segments for ``qml.noise.insert`` to put
+a channel after; inserted there, ``"all"`` would act once, as ``"end"``
+does.  For ``position="all"`` the noisy circuit is therefore the layer's
+own: its circuit function builds a version that applies the channel's Kraus
+map to ρ on every atom after every segment, ``K`` times per atom, as ``"all"``
+does on the circuit with ``gamma = 0`` (#717).  Every density path builds
+the noisy QNode through the same function, so training noise,
+:func:`apply_depolarizing_noise`, :func:`noise_sweep` and the kernels
+(:func:`hqnn_forge.kernels.quantum_kernel_matrix`) all get it.  ``"end"``
+and ``"cz"`` are inserted into the circuit as before: ``"end"`` acts once on
+``ρ(T)``, and ``"cz"`` raises, as the pulse has no CZ.  Trajectories at
+``"all"`` are refused on that circuit.
+
 Training-time noise
 -------------------
 The encoding layers and hybrid classifiers also take ``noise_level``,
@@ -329,6 +369,11 @@ class _ChannelSpec(NamedTuple):
     #: Largest meaningful strength: 3/4 is fully depolarizing, 1 is a full
     #: decay, dephasing, flip or loss.
     max_p: float
+    #: The channel's Kraus operators at strength p, shape ``(k, 2, 2)``,
+    #: ``complex128``: the same channel as ``op`` (see *Kraus operators* in
+    #: the module docstring), applied to a density matrix in torch by
+    #: ``_kraus_map_on_every_wire``.
+    operators: Callable[[float], torch.Tensor]
     #: (I, X, Y, Z) probabilities of a Pauli channel at strength p, or None:
     #: the channels the trajectory sampler draws as Pauli errors.
     paulis: Callable[[float], tuple[float, float, float, float]] | None
@@ -393,18 +438,129 @@ def _atom_loss_branches(p: float) -> tuple[torch.Tensor, tuple[float, ...]]:
     return torch.stack([identity, from_zero, from_one]), (q, q)
 
 
+def _kraus(*matrices: Sequence[Sequence[complex]]) -> torch.Tensor:
+    """Kraus operators written out as 2 × 2 nested lists, stacked to ``(k, 2, 2)``."""
+    return torch.tensor(matrices, dtype=torch.complex128)
+
+
+def _depolarizing_operators(p: float) -> torch.Tensor:
+    a, b = math.sqrt(1 - p), math.sqrt(p / 3)
+    return _kraus(
+        [[a, 0], [0, a]], [[0, b], [b, 0]], [[0, -1j * b], [1j * b, 0]], [[b, 0], [0, -b]]
+    )
+
+
+def _amplitude_damping_operators(gamma: float) -> torch.Tensor:
+    return _kraus([[1, 0], [0, math.sqrt(1 - gamma)]], [[0, math.sqrt(gamma)], [0, 0]])
+
+
+def _phase_damping_operators(gamma: float) -> torch.Tensor:
+    return _kraus([[1, 0], [0, math.sqrt(1 - gamma)]], [[0, 0], [0, math.sqrt(gamma)]])
+
+
+def _bit_flip_operators(p: float) -> torch.Tensor:
+    a, b = math.sqrt(1 - p), math.sqrt(p)
+    return _kraus([[a, 0], [0, a]], [[0, b], [b, 0]])
+
+
+def _phase_flip_operators(p: float) -> torch.Tensor:
+    a, b = math.sqrt(1 - p), math.sqrt(p)
+    return _kraus([[a, 0], [0, a]], [[b, 0], [0, -b]])
+
+
+def _atom_loss_operators(p: float) -> torch.Tensor:
+    # qml.ResetError(0, p) without its two p0 operators, which are zero.
+    a, b = math.sqrt(1 - p), math.sqrt(p)
+    return _kraus([[a, 0], [0, a]], [[0, 0], [b, 0]], [[0, 0], [0, b]])
+
+
 CHANNELS: dict[str, _ChannelSpec] = {
     "depolarizing": _ChannelSpec(
-        qml.DepolarizingChannel, MAX_P, lambda p: (1 - p, p / 3, p / 3, p / 3)
+        op=qml.DepolarizingChannel,
+        max_p=MAX_P,
+        operators=_depolarizing_operators,
+        paulis=lambda p: (1 - p, p / 3, p / 3, p / 3),
     ),
     "amplitude_damping": _ChannelSpec(
-        qml.AmplitudeDamping, 1.0, None, _amplitude_damping_branches
+        op=qml.AmplitudeDamping,
+        max_p=1.0,
+        operators=_amplitude_damping_operators,
+        paulis=None,
+        kraus=_amplitude_damping_branches,
     ),
-    "phase_damping": _ChannelSpec(qml.PhaseDamping, 1.0, _phase_damping_as_phase_flip),
-    "bit_flip": _ChannelSpec(qml.BitFlip, 1.0, lambda p: (1 - p, p, 0.0, 0.0)),
-    "phase_flip": _ChannelSpec(qml.PhaseFlip, 1.0, lambda p: (1 - p, 0.0, 0.0, p)),
-    "atom_loss": _ChannelSpec(_atom_loss, 1.0, None, _atom_loss_branches),
+    "phase_damping": _ChannelSpec(
+        op=qml.PhaseDamping,
+        max_p=1.0,
+        operators=_phase_damping_operators,
+        paulis=_phase_damping_as_phase_flip,
+    ),
+    "bit_flip": _ChannelSpec(
+        op=qml.BitFlip,
+        max_p=1.0,
+        operators=_bit_flip_operators,
+        paulis=lambda p: (1 - p, p, 0.0, 0.0),
+    ),
+    "phase_flip": _ChannelSpec(
+        op=qml.PhaseFlip,
+        max_p=1.0,
+        operators=_phase_flip_operators,
+        paulis=lambda p: (1 - p, 0.0, 0.0, p),
+    ),
+    "atom_loss": _ChannelSpec(
+        op=_atom_loss,
+        max_p=1.0,
+        operators=_atom_loss_operators,
+        paulis=None,
+        kraus=_atom_loss_branches,
+    ),
 }
+
+
+def _kraus_map_on_wire(rho: torch.Tensor, operators: torch.Tensor, wire: int) -> torch.Tensor:
+    """
+    ``ρ ← Σ_k K_k ρ K_k†`` with every ``K_k`` acting on ``wire`` alone.
+
+    ``rho`` has shape ``(*batch, 2^N, 2^N)`` and ``operators`` ``(k, 2, 2)``
+    (from :data:`CHANNELS`).  Wire ``w`` is bit ``N − 1 − w`` of a basis
+    index, so wire 0 is the most significant, the order in which
+    ``qml.QubitDensityMatrix`` on wires ``0, …, N−1`` reads ρ.  A row index
+    reshaped to ``(2^w, 2, 2^(N−1−w))`` therefore has wire ``w``'s bit on its
+    middle axis, and so has a column index, and the map is::
+
+        ρ'[x a y, u d v] = Σ_k Σ_(b, c) K_k[a, b] ρ[x b y, u c v] K_k*[d, c]
+
+    that is ``(1 ⊗ K_k ⊗ 1) ρ (1 ⊗ K_k ⊗ 1)†`` summed over ``k``, with
+    ``2^w`` and ``2^(N−1−w)`` the dimensions of the two identities.
+    """
+    dim = rho.shape[-1]
+    n_wires = dim.bit_length() - 1
+    batch = rho.shape[:-2]
+    ops = operators.to(rho.dtype)
+    left, right = 2**wire, 2 ** (n_wires - 1 - wire)
+    tensor = rho.reshape(*batch, left, 2, right, left, 2, right)
+    tensor = torch.einsum("kab,...xbyucv,kdc->...xayudv", ops, tensor, ops.conj())
+    return tensor.reshape(*batch, dim, dim)
+
+
+def _kraus_map_on_every_wire(rho: torch.Tensor, operators: torch.Tensor) -> torch.Tensor:
+    """
+    The channel of ``_kraus_map_on_wire`` on wire 0, then 1, …, N − 1.
+
+    The maps on different wires act on different tensor factors and commute,
+    so this is the channel on all wires at once, whatever the order, as
+    ``qml.noise.insert`` places it after a gate on all its wires.
+    """
+    for wire in range(rho.shape[-1].bit_length() - 1):
+        rho = _kraus_map_on_wire(rho, operators, wire)
+    return rho
+
+
+#: The attribute by which a circuit function that evolves its segments in
+#: torch (``AnalogRydbergLayer`` with ``gamma > 0``) builds its own noisy
+#: version for ``position="all"``: ``func.<name>(channel, p)`` returns the
+#: circuit function with the channel applied to ρ after every segment (see
+#: *Circuits without gates between segments* in the module docstring).
+_CHANNEL_AFTER_SEGMENTS = "_hqnn_channel_after_segments"
 
 
 def qnode_shots(qnode: object) -> int | None:
@@ -508,6 +664,13 @@ def _noisy_qnode(
     # density noise with shots is refused when the layer is built
     # (TrainingNoiseMixin._init_training_noise); revisit this if that ever changes.
     device = qml.device("default.mixed", wires=n_qubits, seed=None)
+    after_segments = getattr(qnode.func, _CHANNEL_AFTER_SEGMENTS, None)
+    if position == "all" and after_segments is not None:
+        # The circuit applies the channel to ρ itself, after every segment
+        # (module docstring, *Circuits without gates between segments*).
+        return qml.QNode(
+            after_segments(channel, p), device, diff_method="backprop", interface="torch"
+        )
     base = qml.QNode(qnode.func, device, diff_method="backprop", interface="torch")
     return _insert_noise(base, CHANNELS[channel].op, p, position=position)
 
@@ -684,12 +847,23 @@ def trajectory_noise_qnode(
     ValueError
         If ``p`` is 0 or out of range, ``position`` is unknown, or amplitude
         damping or atom loss is asked for on a ``qnode`` whose differentiation method,
-        device or shots :func:`check_kraus_trajectories` refuses.
+        device or shots :func:`check_kraus_trajectories` refuses; and at
+        ``"all"`` on the circuit of
+        :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``,
+        which has no gate between its segments (#717).
     """
     validate_noise(p, position, channel=channel)
     if p == 0.0:
         raise ValueError(
             "trajectory_noise_qnode needs p > 0; p = 0 is the noiseless QNode itself."
+        )
+    if position == "all" and hasattr(qnode.func, _CHANNEL_AFTER_SEGMENTS):
+        raise ValueError(
+            "noise_method='trajectories' at position 'all' is not available on a circuit that "
+            "evolves its segments outside the circuit (AnalogRydbergLayer with gamma > 0): "
+            "drawn after its one density-matrix preparation, the errors would act once, as "
+            "at 'end', not after every segment.  Use noise_method='density', which applies "
+            "the channel after every segment, or position 'end'."
         )
     if not _kraus_sampled(channel):
         return _pauli_trajectories(qnode, p=p, position=position, channel=channel)
@@ -1268,21 +1442,6 @@ def apply_readout_error(model: nn.Module, p01: float, p10: float) -> Iterator[nn
         qlayer._hqnn_readout_error = None
 
 
-def _check_noise_position(layer: object, position: str) -> None:
-    """
-    Let ``layer`` refuse a ``position`` it cannot place channels at.
-
-    A layer may define ``_noise_position_check(position, name)``, raising
-    ``ValueError`` where its circuit has no sites with the meaning
-    ``position`` documents: :class:`~hqnn_forge.encoding.AnalogRydbergLayer`
-    with ``gamma > 0`` refuses ``"all"``, which on its circuit would act once,
-    as at ``"end"``, instead of after every pulse segment (#710).
-    """
-    check = getattr(layer, "_noise_position_check", None)
-    if check is not None:
-        check(position, "position")
-
-
 @contextmanager
 def apply_depolarizing_noise(
     model: nn.Module,
@@ -1323,10 +1482,7 @@ def apply_depolarizing_noise(
     TypeError
         If ``model`` has no quantum layer.
     ValueError
-        If ``p`` or ``position`` is out of range, or with ``p > 0`` if the
-        layer has no sites for ``position``
-        (:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``
-        at ``"all"``).
+        If ``p`` or ``position`` is out of range.
     RuntimeError
         If the layer is already running a replaced QNode (nested use).
 
@@ -1337,9 +1493,7 @@ def apply_depolarizing_noise(
     fine-tune under noise.
     """
     validate_noise(p, position, channel=channel)
-    layer, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
-    if p > 0.0:
-        _check_noise_position(layer, position)
+    _, qlayer, n_qubits = resolve_encoding_layer(model, "apply_depolarizing_noise")
     # Two separate markers.  _hqnn_noise_depth counts open blocks of any p and
     # is what tells run_with_training_noise to skip a layer's train-mode
     # channel.  _hqnn_noise_original is set only while a p > 0 block has
@@ -1445,10 +1599,9 @@ def noise_sweep(
     ------
     ValueError
         If only one of ``y`` and ``score_fn`` is given, if ``channel`` is
-        neither a noise channel nor ``"readout"``, if any level is out
-        of range, or if a level is ``> 0`` and the layer has no sites for
-        ``position`` (see :func:`apply_depolarizing_noise`) -- checked before
-        the first evaluation, not as the sweep reaches it.
+        neither a noise channel nor ``"readout"``, or if any level is out
+        of range -- checked before the first evaluation, not as the sweep
+        reaches it.
     TypeError
         If ``model`` has no ``predict_proba``, or with ``channel="readout"``
         if its quantum layer is not a :class:`TrainingNoiseMixin` (see
@@ -1485,9 +1638,6 @@ def noise_sweep(
         invalid = [p for p in levels if not 0.0 <= p <= max_p]
         if invalid:
             raise ValueError(f"every p must lie in [0, {max_p}] for {channel!r}; got {invalid}.")
-        if any(p > 0.0 for p in levels):
-            layer, _, _ = resolve_encoding_layer(model, "noise_sweep")
-            _check_noise_position(layer, position)
         blocks = [
             (
                 p,
