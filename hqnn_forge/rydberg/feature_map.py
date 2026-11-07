@@ -515,8 +515,8 @@ class DeviceLimits:
 #: ``docs/rydberg-model.md`` (Wurtz et al. 2023; AWS 2024): ``Ω ≤ 15.8``
 #: rad/µs, ``|Δ| ≤ 125`` rad/µs, at most 4 µs, and Ω changing by at most 250
 #: rad/µs².  The slew bound makes the shortest edge of a pulse of amplitude Ω
-#: last ``Ω/250`` µs: 0.0503 µs at the reference ``Ω = 4π`` rad/µs, which the
-#: model page rounds to 0.05 µs (a 0.05 µs edge is a slew of 251 rad/µs²).
+#: last ``Ω/250`` µs: 0.0503 µs at the reference ``Ω = 4π`` rad/µs, about a fifth
+#: of ``T = 0.25`` µs (a 0.05 µs edge would be a slew of 251 rad/µs²).
 #: The resolution and the magnitude limits of the local detuning pattern were
 #: not verified for the model page and are not part of it.
 AQUILA_LIMITS: DeviceLimits = DeviceLimits(
