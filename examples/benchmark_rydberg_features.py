@@ -321,9 +321,10 @@ Data
     the class means of the inputs are sure to coincide, and the classes are
     unbalanced: a weaker check (:func:`positive_control`).  The control
     tells a null result on real data ("interactions do not help") from a
-    pipeline that could not have shown an effect.  That holds for the ``linear`` head.  An ``mlp`` head
-    can form products of its inputs itself, on arm B's features as on the
-    inputs, so its ``A − B`` on this task is no check of the pipeline.
+    pipeline that could not have shown an effect.  That holds for the
+    ``linear`` head.  An ``mlp`` head can form products of its inputs
+    itself, on arm B's features as on the inputs, so its ``A − B`` on this
+    task is no check of the pipeline.
     It has ``2^N − 1`` raw columns, so ``N`` is at most
     :data:`POSITIVE_CONTROL_MAX_ATOMS` (12) on it with any arms: each PCA
     fit of a fold takes their covariance, about 0.7 GiB at 12 atoms and
