@@ -924,9 +924,10 @@ features, the stated tuning budget and these two datasets only.
       (15 linear, 1 MLP), against one on the chain.
     - None of this is significant in the family of 526 (*Statistics*). It is a description of
       13 folds, not a test.
-2. **On Iranian Churn no Rydberg row beats a classical baseline in any geometry.** No A row is
-   above C/linear (MCC 0.574) by more than +0.009 (grid, MLP, `V/Ω = 100`, `γ/Ω = 1`), and every
-   A row is below C/mlp (0.632). Arm B is as in #502: its rows are identical across geometries,
+2. **On Iranian Churn no Rydberg row beats a classical baseline in any geometry.** No ring or
+   grid A row is above C/linear (MCC 0.574) by more than +0.009 (grid, MLP, `V/Ω = 100`,
+   `γ/Ω = 1`), and no chain A row by more than +0.024 (MLP, `V/Ω = 30`, `γ/Ω = 0`), both with
+   Holm p 1.0000. Every A row is below C/mlp (0.632). Arm B is as in #502: its rows are identical across geometries,
    and it is within 0.044 of C/linear.
 3. **On the positive control the interactions help a linear head less clearly on the ring and the
    grid than on the chain.**
@@ -1187,8 +1188,9 @@ Geometry `grid-2x2`:
 
   Where the linear head loses most, at `V/Ω = 1`, `γ/Ω = 0`, arm A's Fisher ratio is 0.099
   (ring) and 0.182 (grid), against B's 2.190: on those features the classes have nearly lost
-  their mean separation. The one ring cell with A's Fisher ratio above B's (2.609 at `V/Ω = 3`,
-  `γ/Ω = 0`) has an A − B of only −0.026, against −0.236 to −0.442 at `V/Ω` = 1, 10, 30 and 100.
+  their mean separation. At `γ/Ω = 0` the one ring cell with A's Fisher ratio above B's (2.609
+  at `V/Ω = 3`; at `V/Ω = 3` it is also above B's for `γ/Ω` = 0.1 and 1) has an A − B of only
+  −0.026, against −0.236 to −0.442 at `V/Ω` = 1, 10, 30 and 100.
 - **Positive control, linear head:** as on the chain, its gains go with the distance ratio, the
   Fisher ratio and the kernel alignment:
     - ring: ρ = 0.64, 0.60 and 0.65, p ≤ 6.00e-04;
@@ -1198,8 +1200,10 @@ Geometry `grid-2x2`:
   effective rank instead (ρ = 0.83 in #502). Here that correlation is 0.18 (ring) and 0.22
   (grid), not distinguishable from none.
 
-So in all three geometries the linear head's A − B moves with the class-separation measures. On
-Iranian Churn the ring and the grid move those measures down, and the score with them.
+So the linear head's A − B moves with the class-separation measures on the control in all three
+geometries, and on Iranian Churn most clearly on the ring and the grid (on the chain only the
+Fisher ratio, ρ = 0.48). There the ring and the grid move those measures down, and the score with
+them.
 
 ## Limits
 
