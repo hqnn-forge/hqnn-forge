@@ -821,7 +821,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset and each fingerprint with its number of lines. Two positive-control runs of different
   geometries or seeds read together used to be merged into one section without a word, arm B,
   C and D from whichever run came last, paired by fold with arm A of the other data in one
-  Holm family (#742)
+  Holm family (#742, #744)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
