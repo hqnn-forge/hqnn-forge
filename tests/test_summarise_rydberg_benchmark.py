@@ -11,6 +11,7 @@ and the Holm family against :func:`holm_correction` called directly.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import math
 import sys
@@ -264,3 +265,108 @@ def test_one_geometry_prints_what_it_printed_before_and_two_print_each() -> None
     # The grid's A − B table, ΔMCC 1.36 at V/Ω = 1, its Holm p 14 · 2/2^13.
     grid_section = text.split("Head `linear`, geometry `grid-2x2`:")[1]
     assert grid_section.split("\n\n")[1].splitlines()[2].startswith("| 1 | +1.360 (0.0034 ✓) |")
+
+
+# ---------------------------------------------------------------------------
+# One dataset, one data fingerprint (#742)
+# ---------------------------------------------------------------------------
+
+bench = summary._runner()
+
+#: ``fingerprint`` of the default positive control (4 atoms, 600 samples, random_state 0,
+#: chain), as pinned in tests/test_benchmark_rydberg_features.py and recorded in every
+#: control line of docs/results/rydberg_features_benchmark.jsonl.xz.
+CHAIN_CONTROL_SHA = "0f76549d09e84e908f062cdaf914bbcc0470a9cde46fbea4a27bccd17695e593"
+#: Lines per fold of :func:`_records`: A at two V/Ω, B computed and reused, C with two heads.
+LINES_PER_FOLD = 6
+
+
+def _control_run(**changes: Any) -> tuple[list[dict[str, Any]], str]:
+    """
+    :func:`_records` as the lines of one positive-control run of ``bench.Settings(**changes)``.
+
+    Each line carries the fingerprint of the control that run draws (``load_dataset``) and its
+    ``label_bonds``; arm A carries the run's geometry, as the runner writes them.
+    """
+    settings = bench.Settings(**changes)
+    X, y, _ = bench.load_dataset("positive-control", settings)
+    sha: str = bench.fingerprint(X, y)
+    (geometry,) = settings.geometries
+    bonds = [[j, k] for j, k in bench.control_bonds(settings)]
+    lines = []
+    for r in _records():
+        line = {**r, "dataset": "positive-control", "data_sha256": sha, "label_bonds": bonds}
+        if r["arm"] == "A":
+            line["geometry"] = geometry
+        lines.append(line)
+    return lines, sha
+
+
+def test_two_control_runs_of_different_geometries_in_one_input_are_refused() -> None:
+    chain, chain_sha = _control_run(geometries=("chain",))
+    ring, ring_sha = _control_run(geometries=("ring",))
+    # The chain's is the committed control's fingerprint; the ring's label differs.
+    assert chain_sha == CHAIN_CONTROL_SHA
+    assert ring_sha != chain_sha
+    assert chain[0]["label_bonds"] != ring[0]["label_bonds"]
+    with pytest.raises(ValueError, match="'positive-control'") as caught:
+        summary.summarise(chain + ring, permutations=99)
+    message = str(caught.value)
+    assert chain_sha in message and ring_sha in message
+    assert message.count(f"({LINES_PER_FOLD * N_FOLDS} lines)") == 2
+    # Either order of the files is refused alike, and each run alone is summarised.
+    with pytest.raises(ValueError, match="2 data fingerprints"):
+        summary.summarise(ring + chain, permutations=99)
+    assert summary.summarise(chain, permutations=99).startswith("## positive-control")
+    assert summary.summarise(ring, permutations=99).startswith("## positive-control")
+
+
+def test_two_control_runs_of_different_seeds_in_one_input_are_refused() -> None:
+    first, first_sha = _control_run(geometries=("chain",))
+    second, second_sha = _control_run(geometries=("chain",), random_state=1)
+    assert first_sha == CHAIN_CONTROL_SHA != second_sha
+    # Same geometry, so the same label_bonds: only the fingerprint tells the two apart.
+    assert first[0]["label_bonds"] == second[0]["label_bonds"]
+    with pytest.raises(ValueError, match="'positive-control'") as caught:
+        summary.summarise(first + second, permutations=99)
+    assert first_sha in str(caught.value) and second_sha in str(caught.value)
+
+
+def test_lines_without_a_fingerprint_and_lines_with_one_are_refused() -> None:
+    """A line written without ``data_sha256`` is not known to share the others' data."""
+    run, sha = _control_run(geometries=("chain",))
+    unrecorded = [
+        {**{k: v for k, v in r.items() if k != "data_sha256"}, "dataset": "positive-control"}
+        for r in _records()
+    ]
+    with pytest.raises(ValueError, match="not recorded") as caught:
+        summary.summarise(run + unrecorded, permutations=99)
+    assert sha in str(caught.value)
+    assert summary.data_fingerprints(unrecorded) == {None: LINES_PER_FOLD * N_FOLDS}
+
+
+def test_each_dataset_may_have_its_own_fingerprint() -> None:
+    """The guard is per dataset: two datasets of one fingerprint each are summarised as before."""
+    run, sha = _control_run(geometries=("chain",))
+    other = [{**r, "data_sha256": "f" * 64} for r in _records()]
+    assert summary.data_fingerprints(run) == {sha: LINES_PER_FOLD * N_FOLDS}
+    text = summary.summarise(run + other, permutations=99)
+    assert text.count("Holm family: 8 comparisons") == 2
+    assert text.endswith(summary.summarise(other, permutations=99))
+
+
+def test_the_committed_results_summarise_as_before() -> None:
+    """
+    The summary of the committed results, ``--long`` with 99 permutations, is byte for byte
+    that of ``main`` at 29c8931, before the fingerprint guard (#742): the SHA-256 below is that
+    of the script's output there.
+    """
+    records = summary.read_records(ROOT / "docs/results/rydberg_features_benchmark.jsonl.xz")
+    assert {r["dataset"]: r["data_sha256"] for r in records}["positive-control"] == (
+        CHAIN_CONTROL_SHA
+    )
+    text = summary.summarise(records, permutations=99, long=True)
+    assert (
+        hashlib.sha256(text.encode()).hexdigest()
+        == "171f37e71e738a6378621c86e241243d6d5f451610ba6cc83d5ebd19c818c315"
+    )

@@ -816,6 +816,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `jacfwd` through a register returned zeros; a list or tuple holding a tensor that requires
   grad is refused whatever the grad mode, where `no_grad` and `inference_mode` used to let it
   through (#531, #724)
+- `examples/summarise_rydberg_benchmark.py` refuses a dataset whose lines carry more than one
+  `data_sha256` (a line without it counting as one more), with a `ValueError` naming the
+  dataset and each fingerprint with its number of lines. Two positive-control runs of different
+  geometries or seeds read together used to be merged into one section without a word, arm B,
+  C and D from whichever run came last, paired by fold with arm A of the other data in one
+  Holm family (#742, #744)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
