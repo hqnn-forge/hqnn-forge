@@ -370,3 +370,69 @@ def test_the_committed_results_summarise_as_before() -> None:
         hashlib.sha256(text.encode()).hexdigest()
         == "171f37e71e738a6378621c86e241243d6d5f451610ba6cc83d5ebd19c818c315"
     )
+
+
+#: The committed results of the ring and grid run (#737): one file per geometry of the
+#: positive control (a run with the control takes one geometry, #738) and one of Iranian Churn
+#: over all three.  Per file: its datasets, each with its data fingerprint and label bonds
+#: (``None`` for a UCI dataset), the geometries of its A lines, and the SHA-256 of its
+#: ``--long`` summary with 99 permutations.
+GEOMETRY_RESULTS: tuple[tuple[str, dict[str, tuple[str, Any]], set[str], str], ...] = (
+    (
+        "rydberg_features_geometries_control_chain.jsonl.xz",
+        {"positive-control": (CHAIN_CONTROL_SHA, [[0, 1], [1, 2], [2, 3]])},
+        {"chain"},
+        "ea7f09e360aa4bb89889bfd78c4e07a4e86a0bf05a3c84ca758707d79e0deb36",
+    ),
+    (
+        "rydberg_features_geometries_control_ring.jsonl.xz",
+        {
+            "positive-control": (
+                "c76aa50e12d80c25a2b3c58f7575f656fdfa46f3c499bcd554dcddf9d77994a2",
+                [[0, 1], [0, 3], [1, 2], [2, 3]],
+            )
+        },
+        {"ring"},
+        "250d77f21b6e75d806bbd9f9ce38f2a477df582e92404ce1733fdf7d1d12b336",
+    ),
+    (
+        "rydberg_features_geometries_control_grid.jsonl.xz",
+        {
+            "positive-control": (
+                "c0da2581bc06e975bc4cddacc8b93247b7614b47c0e64cfe20ce39909eaccfa9",
+                [[0, 1], [0, 2], [1, 3], [2, 3]],
+            )
+        },
+        {"grid-2x2"},
+        "934726139f32e050bb120c9bac0d8de0c1e45afc2f9854b5516b3904dcdf1752",
+    ),
+    (
+        "rydberg_features_geometries_iranian_churn.jsonl.xz",
+        {
+            "iranian-churn": (
+                "1c24f5e361662ad22e66d998438378c873a403193804090212314ff0d7acae63",
+                None,
+            )
+        },
+        {"chain", "ring", "grid-2x2"},
+        "daf2f4cf7c25c4c6bf97d69a3354bd129fabb961faeb872982bd5ef0956b5369",
+    ),
+)
+
+
+@pytest.mark.parametrize(("name", "datasets", "geometries", "digest"), GEOMETRY_RESULTS)
+def test_the_committed_geometry_results_summarise(
+    name: str, datasets: dict[str, tuple[str, Any]], geometries: set[str], digest: str
+) -> None:
+    """
+    Each results file of the ring and grid run (#737) holds one data fingerprint per dataset
+    (the guard of #742 refuses anything else), the label bonds of its geometry, A lines of
+    the stated geometries and 13 folds, and summarises without error to a fixed output.
+    """
+    records = summary.read_records(ROOT / "docs/results" / name)
+    found = {(r["dataset"], r["data_sha256"], repr(r.get("label_bonds"))) for r in records}
+    assert found == {(d, sha, repr(bonds)) for d, (sha, bonds) in datasets.items()}
+    assert {bench.geometry_label(r) for r in records if r["arm"] == "A"} == geometries
+    assert {r["n_splits"] for r in records} == {13}
+    text = summary.summarise(records, permutations=99, long=True)
+    assert hashlib.sha256(text.encode()).hexdigest() == digest
