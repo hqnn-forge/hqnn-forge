@@ -717,9 +717,10 @@ pipeline to detect anything.
   Iranian Churn) is one side winning all 13 folds, and the next possible p-value, `4.88e-4`
   (12 of 13 folds, the lost one smallest), was not significant after Holm anywhere (adjusted
   0.0542 at best).
-- **Not tried:** pair correlations as features, a second geometry, time-dependent pulses,
-  differentiable pulse training (#420), device constraints, shots, more than four atoms, a
-  tuned architecture, more than 4 tuning trials.
+- **Not tried:** pair correlations as features, a second geometry (since run on a ring and a
+  `2 × 2` grid in [a companion note](rydberg-geometries-benchmark.md), #737),
+  time-dependent pulses, differentiable pulse training (#420), device constraints, shots,
+  more than four atoms, a tuned architecture, more than 4 tuning trials.
 
 ## References
 
