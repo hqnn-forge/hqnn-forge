@@ -476,6 +476,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fingerprints are those from before. Every line records `label_bonds` (`null` for a UCI
   dataset). A run with `positive-control`, `--quick` included, takes one geometry and refuses
   several before any dataset is loaded (#738, #740)
+- A results page, `docs/results/rydberg-geometries-benchmark.md`: the run of #502 repeated on
+  the chain, the ring and the `2 × 2` grid, same folds and seeds, raw output xz-compressed as
+  `docs/results/rydberg_features_geometries_*.jsonl.xz` (Iranian Churn in one run, the positive
+  control once per geometry). On Iranian Churn the ring and the grid gave no gain either and
+  lost more than the chain, descriptively: in one Holm family of 526 per dataset, 13 folds
+  cannot reach α (#746). The chain lines reproduce #502's (#737, #745)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor

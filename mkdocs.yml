@@ -73,6 +73,7 @@ nav:
       - Trajectory training collapse: results/trajectory-collapse-study.md
       - Published SHNN reproduction: results/published-shnn-reproduction.md
       - Rydberg features benchmark: results/rydberg-features-benchmark.md
+      - Rydberg features on three geometries: results/rydberg-geometries-benchmark.md
   - API reference:
       - Encoding layers: api/encoding.md
       - Models: api/models.md
