@@ -43,6 +43,15 @@ column, every grid and mechanism table is printed once per geometry, and
 the comparisons of all geometries of one dataset still form **one** Holm
 family.
 
+**One dataset, one data** (#742).  Lines are grouped by ``dataset`` alone,
+so every line of a dataset must carry the same ``data_sha256``: two
+positive-control runs of different geometries (another label, #738) or of
+different ``--seed`` or ``--samples``, read together, would otherwise be
+paired by fold index across data in one Holm family.  The script refuses
+such input with a ``ValueError`` naming the dataset and each fingerprint
+with its number of lines (a line without the field counts as one more,
+``not recorded``) before printing anything; summarise each run on its own.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
@@ -178,6 +187,42 @@ def spearman(
 # ---------------------------------------------------------------------------
 
 Key = tuple[str, str, Any, Any, Any]  # arm, head, geometry, V/Ω, γ/Ω
+
+
+def data_fingerprints(records: Iterable[Mapping[str, Any]]) -> dict[str | None, int]:
+    """
+    ``{data_sha256: number of lines}`` over ``records``, in the order first seen.
+
+    ``None`` stands for lines without the field, whose data is not recorded.
+    """
+    counts: dict[str | None, int] = {}
+    for r in records:
+        sha = r.get("data_sha256")
+        counts[sha] = counts.get(sha, 0) + 1
+    return counts
+
+
+def _check_one_fingerprint(dataset: str, records: Sequence[Mapping[str, Any]]) -> None:
+    """
+    Refuse ``records`` of ``dataset`` unless they all carry the same ``data_sha256``.
+
+    The folds, arm B's row of each γ/Ω and the Holm family are keyed by the
+    dataset's name, so lines of other data under that name, e.g. two
+    positive-control runs of different geometries (another label) or seeds,
+    would be paired by fold index across data.  Every line without the field
+    counts as one more fingerprint, ``not recorded``, so it is not merged
+    with lines that have one.
+    """
+    counts = data_fingerprints(records)
+    if len(counts) > 1:
+        found = ", ".join(
+            f"{'not recorded' if sha is None else sha} ({n} lines)" for sha, n in counts.items()
+        )
+        raise ValueError(
+            f"dataset {dataset!r} has lines of {len(counts)} data fingerprints "
+            f"(data_sha256): {found}.  Its folds and Holm family would pair lines of "
+            "different data; summarise each run's lines on their own."
+        )
 
 
 def geometry_label(record: Mapping[str, Any]) -> str:
@@ -505,10 +550,19 @@ def summarise(
     A dataset with arm A in several geometries gets a ``geometry`` column in
     its scores, and its grid and mechanism tables once per geometry; with one
     geometry the output is that of a file from before ``--geometry``.
+
+    Raises
+    ------
+    ValueError
+        If the lines of one dataset carry more than one ``data_sha256``
+        (a line without it counting as one more), naming the dataset and
+        the fingerprints; nothing is printed then.
     """
     by_dataset: dict[str, list[Mapping[str, Any]]] = {}
     for r in records:
         by_dataset.setdefault(r["dataset"], []).append(r)
+    for dataset, recs in by_dataset.items():
+        _check_one_fingerprint(dataset, recs)
     sections: list[str] = []
     for dataset, recs in by_dataset.items():
         rows = _rows(recs)
