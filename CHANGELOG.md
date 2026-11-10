@@ -487,7 +487,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EIGENVALUE_GAP_WARN` raising its warning. Every line of `examples/benchmark_rydberg_features.py`
   records them as `pca` (`relative_gaps`, `min_relative_gap`, `gap_threshold`, `degenerate`),
   for the fold's fit and, under `tuning`, for each tuning fold's, and its summary counts per row
-  the folds with a degenerate fit (`deg`) and with a degenerate tuning fit (`t-deg`) (#525)
+  the folds with a degenerate fit (`deg`) and with a degenerate tuning fit (`t-deg`) (#525, #748)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
