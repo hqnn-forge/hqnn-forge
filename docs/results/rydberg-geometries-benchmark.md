@@ -47,9 +47,11 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
     ```
 
     Summarise each file on its own. The three control files hold three different labels under
-    one dataset name, and the summariser refuses them read together (#742). Every table below
-    is that output, with its headings moved down a level and its separation measures moved to
-    *Mechanism*.
+    one dataset name. The summariser refused them read together when this note was written
+    (#742); since #741 it prints them as three sections, one per `label_bonds`, each its own
+    family of 190 and identical to that file's summary apart from its heading. Every table
+    below is that output, with its headings moved down a level and its separation measures
+    moved to *Mechanism*.
 - **The chain reproduces #502.** Every chain line of the two new runs equals the line of #502's
   file for the same arm, head, grid point and fold in `mcc`, `pr_auc` and `data_sha256`: 1,521
   of 1,521 on each dataset. The chain control, summarised alone, prints #502's positive-control

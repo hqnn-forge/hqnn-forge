@@ -646,6 +646,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint saved with such a value no longer loads as is; `load_checkpoint` names the fix,
   `load_checkpoint(path, dropout_p=0.0)`. `ClassicalBaseline` now words its `dropout_p` error
   the same way (#651)
+- `examples/summarise_rydberg_benchmark.py` groups lines by `(dataset, label_bonds)` (`groups`,
+  `label_bonds`), with one section and one Holm family per group, and checks the data
+  fingerprint per group. Positive-control lines of several labels read together, such as the
+  chain, ring and grid control files of #737, are summarised one label after the other, each
+  as on its own under a heading that adds its `label_bonds`, where they used to be refused. A
+  line without `label_bonds` (a UCI dataset, or a control written before #738) is keyed `None`;
+  a dataset of one group prints exactly what it printed before (#741)
 
 ### Fixed
 - `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same

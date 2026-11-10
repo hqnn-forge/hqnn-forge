@@ -302,23 +302,42 @@ def _control_run(**changes: Any) -> tuple[list[dict[str, Any]], str]:
     return lines, sha
 
 
-def test_two_control_runs_of_different_geometries_in_one_input_are_refused() -> None:
+def test_two_control_runs_of_different_geometries_in_one_input_are_two_groups() -> None:
+    """
+    #741: lines of two labels of one dataset are two groups, keyed by ``label_bonds``, each
+    with its one fingerprint.  Each prints what it prints on its own, under a heading that
+    names its bonds, in the order first seen.
+    """
     chain, chain_sha = _control_run(geometries=("chain",))
     ring, ring_sha = _control_run(geometries=("ring",))
     # The chain's is the committed control's fingerprint; the ring's label differs.
     assert chain_sha == CHAIN_CONTROL_SHA
     assert ring_sha != chain_sha
     assert chain[0]["label_bonds"] != ring[0]["label_bonds"]
-    with pytest.raises(ValueError, match="'positive-control'") as caught:
-        summary.summarise(chain + ring, permutations=99)
-    message = str(caught.value)
-    assert chain_sha in message and ring_sha in message
-    assert message.count(f"({LINES_PER_FOLD * N_FOLDS} lines)") == 2
-    # Either order of the files is refused alike, and each run alone is summarised.
-    with pytest.raises(ValueError, match="2 data fingerprints"):
-        summary.summarise(ring + chain, permutations=99)
-    assert summary.summarise(chain, permutations=99).startswith("## positive-control")
-    assert summary.summarise(ring, permutations=99).startswith("## positive-control")
+    alone = {
+        "chain": summary.summarise(chain, permutations=99),
+        "ring": summary.summarise(ring, permutations=99),
+    }
+    assert all(text.startswith("## positive-control\n") for text in alone.values())
+    bonds = {"chain": "[[0, 1], [1, 2], [2, 3]]", "ring": "[[0, 1], [0, 3], [1, 2], [2, 3]]"}
+    headed = {
+        name: text.replace(
+            "## positive-control\n", f"## positive-control, label_bonds {bonds[name]}\n", 1
+        )
+        for name, text in alone.items()
+    }
+    assert summary.summarise(chain + ring, permutations=99) == "\n".join(
+        (headed["chain"], headed["ring"])
+    )
+    assert summary.summarise(ring + chain, permutations=99) == "\n".join(
+        (headed["ring"], headed["chain"])
+    )
+    groups = summary.groups(ring + chain)
+    assert list(groups) == [
+        ("positive-control", ((0, 1), (0, 3), (1, 2), (2, 3))),
+        ("positive-control", ((0, 1), (1, 2), (2, 3))),
+    ]
+    assert [len(g) for g in groups.values()] == [LINES_PER_FOLD * N_FOLDS] * 2
 
 
 def test_two_control_runs_of_different_seeds_in_one_input_are_refused() -> None:
@@ -329,20 +348,130 @@ def test_two_control_runs_of_different_seeds_in_one_input_are_refused() -> None:
     assert first[0]["label_bonds"] == second[0]["label_bonds"]
     with pytest.raises(ValueError, match="'positive-control'") as caught:
         summary.summarise(first + second, permutations=99)
-    assert first_sha in str(caught.value) and second_sha in str(caught.value)
+    message = str(caught.value)
+    assert first_sha in message and second_sha in message
+    assert "(label_bonds [[0, 1], [1, 2], [2, 3]])" in message
 
 
 def test_lines_without_a_fingerprint_and_lines_with_one_are_refused() -> None:
     """A line written without ``data_sha256`` is not known to share the others' data."""
     run, sha = _control_run(geometries=("chain",))
     unrecorded = [
-        {**{k: v for k, v in r.items() if k != "data_sha256"}, "dataset": "positive-control"}
+        {
+            **{k: v for k, v in r.items() if k != "data_sha256"},
+            "dataset": "positive-control",
+            "label_bonds": run[0]["label_bonds"],
+        }
         for r in _records()
     ]
     with pytest.raises(ValueError, match="not recorded") as caught:
         summary.summarise(run + unrecorded, permutations=99)
     assert sha in str(caught.value)
     assert summary.data_fingerprints(unrecorded) == {None: LINES_PER_FOLD * N_FOLDS}
+
+
+def test_a_line_without_label_bonds_is_a_group_of_its_own() -> None:
+    """
+    A line without ``label_bonds`` (missing or ``null``: a UCI dataset, or a control written
+    before #738, whose label is the chain's) is keyed ``None``.  It is not merged with control
+    lines that record the chain's bonds, even of the same data, and the guard applies within
+    the ``None`` group too.
+    """
+    run, sha = _control_run(geometries=("chain",))
+    old = [{**r, "dataset": "positive-control", "data_sha256": sha} for r in _records()]
+    null = [{**r, "label_bonds": None} for r in old]
+    assert "label_bonds" not in old[0]
+    assert list(summary.groups(run + old + null)) == [
+        ("positive-control", ((0, 1), (1, 2), (2, 3))),
+        ("positive-control", None),
+    ]
+    assert len(summary.groups(old + null)[("positive-control", None)]) == 2 * len(old)
+    text = summary.summarise(run + old, permutations=99)
+    assert text.count("## positive-control, label_bonds [[0, 1], [1, 2], [2, 3]]\n") == 1
+    assert text.count("## positive-control, label_bonds not recorded\n") == 1
+    assert text.count("Holm family: 8 comparisons") == 2
+    # A dataset of one group keeps the heading from before #741, whatever its bonds.
+    assert summary.summarise(old, permutations=99).startswith("## positive-control\n")
+    other = [{**r, "data_sha256": "f" * 64} for r in old]
+    with pytest.raises(ValueError, match="'positive-control' has lines of 2"):
+        summary.summarise(old + other, permutations=99)
+
+
+def _family_line(fold: int, arm: str, head: str, mcc: float, bonds: Any, sha: str) -> dict:
+    v, gamma = (1.0, 0.1) if arm in ("A", "B") else (None, None)
+    # The chain of 4 atoms has 3 bonds, the ring 4.
+    geometry = None if arm != "A" else ("chain" if len(bonds) == 3 else "ring")
+    return {
+        **_line(arm, head, fold, mcc, v=v, gamma=gamma),
+        "dataset": "positive-control",
+        "data_sha256": sha,
+        "label_bonds": bonds,
+        "geometry": geometry,
+    }
+
+
+def test_two_labels_form_two_holm_families_by_hand() -> None:
+    """
+    Two labels of one control, six folds each, arm A and B linear at one grid point and both
+    baselines at MCC 0, so each group has m = 5 comparisons: A − B, A and B against C/linear
+    and C/mlp.  The exact two-sided signed-rank p-values over 6 untied pairs, by hand:
+
+    * every pair won: one sign pattern of 2^6 reaches W− = 0, ``p = 2 · 1/64 = 0.03125``;
+    * one lost, of rank 1: W− ≤ 1 for ∅ and {1}, ``p = 2 · 2/64 = 0.0625``;
+    * every pair tied: undefined, a slot of ``p = 1`` in its family.
+
+    Chain: A = 0.1 … 0.6, B = A − (−0.01, 0.02, …, 0.06): A − B 0.0625, the four against
+    the baselines 0.03125.  Holm over m = 5, ascending: 5 · 0.03125, then
+    max(0.15625, 4 · 0.03125), … and max(0.15625, 1 · 0.0625), so 0.15625 throughout.
+    Ring: A = B = 0.6 … 0.1: A − B undefined (1), the others 0.03125, so 0.15625 four times
+    and max(0.15625, 1 · 1) = 1.  One family of the ten would instead give the chain's
+    smallest 10 · 0.03125 = 0.3125.
+    """
+    chain_bonds = [[0, 1], [1, 2], [2, 3]]
+    ring_bonds = [[0, 1], [0, 3], [1, 2], [2, 3]]
+    lines = []
+    for fold in range(6):
+        a = 0.1 * (fold + 1)
+        b = a - (-0.01 if fold == 0 else 0.01 * (fold + 1))
+        ring_a = 0.1 * (6 - fold)
+        for bonds, sha, mccs in (
+            (chain_bonds, "a" * 64, {"A": a, "B": b}),
+            (ring_bonds, "b" * 64, {"A": ring_a, "B": ring_a}),
+        ):
+            lines.append(_family_line(fold, "A", "linear", mccs["A"], bonds, sha))
+            lines.append(_family_line(fold, "B", "linear", mccs["B"], bonds, sha))
+            lines.append(_family_line(fold, "C", "linear", 0.0, bonds, sha))
+            lines.append(_family_line(fold, "C", "mlp", 0.0, bonds, sha))
+    groups = summary.groups(lines)
+    families = {key[1]: summary.comparisons(summary._rows(recs)) for key, recs in groups.items()}
+    chain, ring = families[((0, 1), (1, 2), (2, 3))], families[((0, 1), (0, 3), (1, 2), (2, 3))]
+
+    def by_name(family: list[dict[str, Any]]) -> dict[tuple[str, str], tuple[float, float]]:
+        return {(c["a"][0], c["b"][0] + c["b"][1]): (c["p"], c["p_holm"]) for c in family}
+
+    assert by_name(chain) == {
+        ("A", "Blinear"): (pytest.approx(0.0625), pytest.approx(0.15625)),
+        ("A", "Clinear"): (pytest.approx(0.03125), pytest.approx(0.15625)),
+        ("A", "Cmlp"): (pytest.approx(0.03125), pytest.approx(0.15625)),
+        ("B", "Clinear"): (pytest.approx(0.03125), pytest.approx(0.15625)),
+        ("B", "Cmlp"): (pytest.approx(0.03125), pytest.approx(0.15625)),
+    }
+    ring_p = by_name(ring)
+    assert math.isnan(ring_p.pop(("A", "Blinear"))[0])
+    assert next(c["p_holm"] for c in ring if c["kind"] == "A − B") == 1.0
+    assert ring_p == dict.fromkeys(
+        [("A", "Clinear"), ("A", "Cmlp"), ("B", "Clinear"), ("B", "Cmlp")],
+        (pytest.approx(0.03125), pytest.approx(0.15625)),
+    )
+    # As printed: one family of 5 per label, the chain's A − B at Holm p 0.15625.
+    text = summary.summarise(lines, permutations=99, long=True)
+    assert text.count("Holm family: 5 comparisons") == 2
+    chain_text, ring_text = text.split("## positive-control, label_bonds ")[1:]
+    assert chain_text.startswith("[[0, 1], [1, 2], [2, 3]]\n")
+    # Mean ΔMCC 0.19/6; floor 2/2^6; r_rb = (20 − 1)/21 = +0.90.
+    row = "| A/linear V/Ω=1 γ/Ω=0.1 | B/linear γ/Ω=0.1 | 6 |"
+    assert f"{row} +0.032 | 6 | 0.0625 | 0.0312 | 0.1562 | +0.90 |" in chain_text
+    assert f"{row} +0.000 | 0 | – | – | 1.0000 | +0.00 |" in ring_text
 
 
 def test_each_dataset_may_have_its_own_fingerprint() -> None:
@@ -436,3 +565,26 @@ def test_the_committed_geometry_results_summarise(
     assert {r["n_splits"] for r in records} == {13}
     text = summary.summarise(records, permutations=99, long=True)
     assert hashlib.sha256(text.encode()).hexdigest() == digest
+
+
+def test_the_three_committed_controls_read_together_are_three_families() -> None:
+    """
+    #741: the three control files of #737 read as one input (refused by #742's guard before)
+    print each file's own summary, pinned above, one after the other, each headed by its
+    label bonds: three families of 190, not one of 570.
+    """
+    controls = GEOMETRY_RESULTS[:3]
+    records = [
+        r for name, *_ in controls for r in summary.read_records(ROOT / "docs/results" / name)
+    ]
+    text = summary.summarise(records, permutations=99, long=True)
+    sections = text.split("\n## positive-control, label_bonds ")
+    assert sections[0].startswith("## positive-control, label_bonds ")
+    sections[0] = sections[0].removeprefix("## positive-control, label_bonds ")
+    assert len(sections) == 3
+    for section, (_, datasets, _, digest) in zip(sections, controls, strict=True):
+        bonds = datasets["positive-control"][1]
+        assert section.startswith(f"{bonds}\n")
+        alone = "## positive-control" + section.removeprefix(str(bonds))
+        assert hashlib.sha256(alone.encode()).hexdigest() == digest
+    assert text.count("Holm family: 190 comparisons") == 3
