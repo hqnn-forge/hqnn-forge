@@ -1242,11 +1242,24 @@ def fit_inputs(
         As :func:`standardise_features` (a value on ``fit_rows`` that is not
         finite, say) and :meth:`PCANormalizer.fit`.
     """
-    scaled = standardise_features(X, fit_rows)
+    inputs, pca, _ = _preprocess(X, fit_rows, n_components)
+    return inputs, pca
+
+
+def _preprocess(
+    X: FloatArray, fit_rows: RowArray, n_components: int
+) -> tuple[FloatArray, dict[str, Any], list[int]]:
+    """
+    :func:`fit_inputs`, and the raw columns its standardisation only centred.
+
+    The list is that of :func:`_standardise` for the call that scaled ``X``,
+    so it names the columns of the standardisation actually applied.
+    """
+    scaled, centred = _standardise(X, fit_rows)
     normalizer = PCANormalizer(n_components=n_components, scale_to_pi=True)
     normalizer.fit(scaled[fit_rows])
     inputs: FloatArray = normalizer.transform(scaled).double().numpy()
-    return inputs, pca_degeneracy(normalizer)
+    return inputs, pca_degeneracy(normalizer), centred
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1282,12 @@ class Split:
         The degeneracy of the PCA fit behind ``inputs``
         (:func:`pca_degeneracy`); ``None`` for a split not made by
         :func:`make_split`.
+    raw_constant_columns:
+        The raw columns (indices into the columns of ``X``) that the
+        standardisation of step 2 only centred although their computed
+        variance on the fitting rows is nonzero, in increasing order: those
+        of the :func:`standardise_features` call :func:`make_split` prepared
+        the inputs with, recorded as a line's ``raw_constant_columns``.
     """
 
     inputs: FloatArray
@@ -1278,6 +1297,7 @@ class Split:
     n_val: int
     n_test: int
     pca: Mapping[str, Any] | None = None
+    raw_constant_columns: tuple[int, ...] = ()
 
     @property
     def train(self) -> slice:
@@ -1329,8 +1349,10 @@ def make_split(
     oversampled with :func:`smote` in input space.  An outer fold passes
     its training part as ``fit_rows``; a tuning fold passes its fitting
     rows as both ``fit_rows`` and ``train_rows`` and no test rows.
+    The raw columns only centred on ``fit_rows`` are kept with the split
+    (:attr:`Split.raw_constant_columns`).
     """
-    inputs, pca = fit_inputs(X, fit_rows, n_components)
+    inputs, pca, raw_constant_columns = _preprocess(X, fit_rows, n_components)
     oversampled = smote(inputs[train_rows], y[train_rows], random_state=smote_seed)
     blocks = [oversampled.X, inputs[val_rows]]
     labels = [np.asarray(oversampled.y, dtype=np.int64), y[val_rows]]
@@ -1345,6 +1367,7 @@ def make_split(
         n_val=int(val_rows.size),
         n_test=0 if test_rows is None else int(test_rows.size),
         pca=pca,
+        raw_constant_columns=tuple(raw_constant_columns),
     )
 
 
@@ -2304,6 +2327,21 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
         If ``features`` is not two-dimensional, ``fit_rows`` is empty, or a
         fitting row holds a value that is not finite.
     """
+    return _standardise(features, fit_rows)[0]
+
+
+def _standardise(features: npt.ArrayLike, fit_rows: RowArray) -> tuple[FloatArray, list[int]]:
+    """
+    :func:`standardise_features`, and the columns it only centred despite a nonzero variance.
+
+    The second value lists, in increasing order, the columns ``j`` whose
+    computed variance on ``fit_rows`` is above 0 but at or below the
+    rounding bound of "Constant columns", taken from the same mask the
+    first value was divided with: the ``raw_constant_columns`` (step 2) or
+    ``feature_constant_columns`` (step 4) of a line.  A column with
+    computed variance exactly 0 is only centred as well, by either rule,
+    and is not listed.
+    """
     matrix = np.asarray(features, dtype=np.float64)
     if matrix.ndim != 2:
         raise ValueError(f"features must have shape (n_rows, d); got {matrix.shape}.")
@@ -2316,7 +2354,7 @@ def standardise_features(features: npt.ArrayLike, fit_rows: RowArray) -> FloatAr
     mean, var, constant = _standardisation_stats(fitted)
     std = np.where(constant, 1.0, np.sqrt(var))
     result: FloatArray = (matrix - mean) / std
-    return result
+    return result, np.flatnonzero(constant & (var > 0)).tolist()
 
 
 def _standardisation_stats(
@@ -2334,12 +2372,6 @@ def _standardisation_stats(
     return mean, var, constant
 
 
-def _centred_constant_columns(features: FloatArray, fit_rows: RowArray) -> list[int]:
-    """Indices only centred by the rounding bound despite nonzero computed variance."""
-    _, var, constant = _standardisation_stats(features[fit_rows])
-    return np.flatnonzero(constant & (var > 0)).tolist()
-
-
 def head_features(features: FloatArray, split: Split, standardise: bool) -> FloatArray:
     """
     The matrix a head is trained, stopped and scored on (step 4 of the module docstring).
@@ -2348,9 +2380,22 @@ def head_features(features: FloatArray, split: Split, standardise: bool) -> Floa
     (:func:`standardise_features` with :attr:`Split.real_train`), or
     ``features`` itself if ``standardise`` is false.
     """
+    return _head_features(features, split, standardise)[0]
+
+
+def _head_features(
+    features: FloatArray, split: Split, standardise: bool
+) -> tuple[FloatArray, list[int]]:
+    """
+    :func:`head_features`, and the feature columns its standardisation only centred.
+
+    The list is that of :func:`_standardise` for the call that produced the
+    matrix, recorded as a line's ``feature_constant_columns``; empty if
+    ``standardise`` is false.
+    """
     if not standardise:
-        return features
-    return standardise_features(features, split.real_train)
+        return features, []
+    return _standardise(features, split.real_train)
 
 
 # ---------------------------------------------------------------------------
@@ -2717,16 +2762,9 @@ def run_dataset(
             smote_seed=seeds["smote_seed"],
         )
         tuning_splits: list[Split] = []
-        tuning_raw_constant_columns: list[list[int]] = []
         candidates: list[dict[str, Any]] = []
         if settings.n_trials:
             tuning_splits = inner_splits(X, y, train_part, settings, seeds["tune_seed"])
-            tuning_raw_constant_columns = [
-                _centred_constant_columns(X, train_part[fit])
-                for fit, _ in stratified_kfold(
-                    y[train_part], settings.inner_folds, random_state=seeds["tune_seed"]
-                )
-            ]
             candidates = sample_configs(
                 settings.search_space, settings.n_trials, seeds["tune_seed"]
             )
@@ -2738,7 +2776,7 @@ def run_dataset(
             "test_idx": np.sort(test_idx),
             "n_synthetic": split.n_synthetic,
             "pca": split.pca,
-            "raw_constant_columns": _centred_constant_columns(X, train_part),
+            "raw_constant_columns": list(split.raw_constant_columns),
             "seeds": {
                 "random_state": settings.random_state,
                 "split_seed": split_seed,
@@ -2772,10 +2810,7 @@ def run_dataset(
             # As the map returns them: for the separation measures and the feature dimension.
             matrix = cached.features
             standardise = settings.standardise and rep.standardise
-            head_matrix = head_features(matrix, split, standardise)
-            feature_constant_columns = (
-                _centred_constant_columns(matrix, split.real_train) if standardise else []
-            )
+            head_matrix, feature_constant_columns = _head_features(matrix, split, standardise)
             separation = {
                 "train": separation_measures(
                     matrix[split.real],
@@ -2791,14 +2826,12 @@ def run_dataset(
                 ).to_dict(),
             }
             tuning_cached = [features_of(rep, s, cache) for s in tuning_splits]
-            tuning_features = [
-                head_features(c.features, s, standardise)
+            tuning_standardised = [
+                _head_features(c.features, s, standardise)
                 for c, s in zip(tuning_cached, tuning_splits, strict=True)
             ]
-            tuning_feature_constant_columns = [
-                _centred_constant_columns(c.features, s.real_train) if standardise else []
-                for c, s in zip(tuning_cached, tuning_splits, strict=True)
-            ]
+            tuning_features = [features for features, _ in tuning_standardised]
+            tuning_feature_constant_columns = [centred for _, centred in tuning_standardised]
             arm_b_records: list[dict[str, Any]] = []
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
@@ -2820,7 +2853,9 @@ def run_dataset(
                         "inner_folds": settings.inner_folds,
                         "candidates": candidates,
                         "scores": scores,
-                        "raw_constant_columns": tuning_raw_constant_columns,
+                        "raw_constant_columns": [
+                            list(s.raw_constant_columns) for s in tuning_splits
+                        ],
                         "pca": [s.pca for s in tuning_splits],
                         "feature_constant_columns": tuning_feature_constant_columns,
                         "feature_cache_hits": [c.hit for c in tuning_cached],

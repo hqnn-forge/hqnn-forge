@@ -3292,7 +3292,9 @@ class TestStandardiseFeatures:
         assert values.var() <= (rows.size * np.finfo(np.float64).eps * values.mean()) ** 2
         result = bench.standardise_features(features, rows)
         np.testing.assert_allclose(result.std(), 1.0, rtol=1e-12)
-        assert bench._centred_constant_columns(features, rows) == []
+        scaled, centred = bench._standardise(features, rows)
+        np.testing.assert_array_equal(scaled, result)
+        assert centred == []
 
     def test_the_column_means_are_summed_pairwise(self) -> None:
         # 5000 copies of one float64 next to a second column: summed row by row,
@@ -3311,7 +3313,9 @@ class TestStandardiseFeatures:
         assert neighbours.std() > 0
         result = bench.standardise_features(features, rows)
         np.testing.assert_array_equal(result[:, 0], neighbours - neighbours.mean())
-        assert bench._centred_constant_columns(features, rows) == [0]
+        scaled, centred = bench._standardise(features, rows)
+        np.testing.assert_array_equal(scaled, result)
+        assert centred == [0]
 
     def test_a_matrix_by_hand(self) -> None:
         # Column 0 on the fitting rows: 1, 2, 3, so μ = 2 and σ² = (1 + 0 + 1)/3.
@@ -3382,6 +3386,8 @@ class TestStandardiseFeatures:
         assert np.isfinite(result).all()
         np.testing.assert_array_equal(result[:, 0], [0.0, 0.0, 0.0, 0.25, -0.25])
         np.testing.assert_allclose(result[:, 1], (features[:, 1] - 1.0) / math.sqrt(2 / 3))
+        # Computed variance exactly 0: only centred by either rule, so not listed.
+        assert bench._standardise(features, np.array([0, 1, 2]))[1] == []
 
     def test_a_column_constant_up_to_rounding_is_only_centred(self) -> None:
         """
@@ -3405,6 +3411,9 @@ class TestStandardiseFeatures:
         np.testing.assert_allclose(result[rows, 1].std(), 1.0, rtol=1e-9)
         expected = StandardScaler().fit(features[rows]).transform(features)
         np.testing.assert_allclose(result, expected, rtol=0, atol=1e-9)
+        # Only centred although its computed variance is not 0: the one column listed.
+        assert ulp[rows, 0].var() > 0
+        assert bench._standardise(features, rows)[1] == [0]
 
     @pytest.mark.parametrize(
         ("features", "rows", "message"),
@@ -3566,8 +3575,8 @@ class TestStandardisationInARun:
         calls: list[tuple[int, np.ndarray]] = []
         raw_calls: list[np.ndarray] = []
         in_preprocess = False
-        original = bench.standardise_features
-        original_preprocess = bench.fit_inputs
+        original = bench._standardise
+        original_preprocess = bench._preprocess
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
             if in_preprocess:
@@ -3587,8 +3596,9 @@ class TestStandardisationInARun:
         settings = _replace(QUICK, arms=("A", "C"))
         X, y, _ = bench.load_dataset("positive-control", settings)
         fold = _fold_by_hand(X, y, settings, 0)  # before the spies: it standardises too
-        monkeypatch.setattr(bench, "standardise_features", spy)
-        monkeypatch.setattr(bench, "fit_inputs", preprocess_spy)
+        # Every standardisation, the public function included, goes through these two.
+        monkeypatch.setattr(bench, "_standardise", spy)
+        monkeypatch.setattr(bench, "_preprocess", preprocess_spy)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
         n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
         inner = stratified_kfold(
@@ -3661,6 +3671,146 @@ class TestStandardisationInARun:
             bench.main(["--quick", *flags, "--out", out, "--no-cache"])
             assert seen[-1].standardise is expected
             assert seen[-1].n_atoms == QUICK.n_atoms
+
+
+def _spy_on_make_split(monkeypatch: pytest.MonkeyPatch) -> list[tuple[np.ndarray, Any]]:
+    """Every ``(fit_rows, split)`` that :func:`make_split` is called with and returns, in order."""
+    made: list[tuple[np.ndarray, Any]] = []
+    original = bench.make_split
+
+    def spy(X: Any, y: Any, fit_rows: Any, *args: Any, **kwargs: Any) -> Any:
+        split = original(X, y, fit_rows, *args, **kwargs)
+        made.append((np.asarray(fit_rows), split))
+        return split
+
+    monkeypatch.setattr(bench, "make_split", spy)
+    return made
+
+
+class TestRecordedConstantColumns:
+    """
+    ``raw_constant_columns`` and ``feature_constant_columns`` are the
+    columns of the standardisation that was applied (#692): each split's
+    own, outer fold and tuning folds alike, on the rows it was fitted on.
+    """
+
+    def test_a_split_keeps_the_raw_columns_only_centred_on_its_fitting_rows(self) -> None:
+        """
+        Column 0 holds ``1.5`` and its float64 neighbour ``1.5 + 2⁻⁵²`` on
+        rows 0 to 89, a variance of about ``1e-32``, nonzero but below the
+        rounding bound ``(2 ceil(log2(n)) ε μ)² ≈ 2.2e-29`` for 90 rows, and
+        ``2.5`` on row 100.  Fitted on rows 0 to 89 it is only centred and
+        listed; fitted on rows that include row 100 it is scaled and not.
+        """
+        rng = np.random.default_rng(692)
+        X = rng.standard_normal((120, 6))
+        X[:, 0] = np.where(np.arange(120) % 3 == 0, np.nextafter(1.5, 2.0), 1.5)
+        X[100, 0] = 2.5
+        y = (np.arange(120) % 4 == 0).astype(np.int64)
+        assert 0 < X[:90, 0].var() < (2 * 7 * np.finfo(np.float64).eps * 1.5) ** 2
+        train, val, test = np.arange(0, 70), np.arange(70, 90), np.arange(90, 120)
+        split = bench.make_split(
+            X, y, np.arange(90), train, val, test, n_components=4, smote_seed=3
+        )
+        assert split.raw_constant_columns == (0,)
+        wider = bench.make_split(
+            X, y, np.arange(110), train, val, None, n_components=4, smote_seed=3
+        )
+        assert wider.raw_constant_columns == ()
+
+    def test_each_tuning_fold_records_the_raw_columns_of_the_rows_it_was_fitted_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Raw column 0 is ``1e9`` or its float64 neighbour on every row except
+        one row ``r`` of the training part, where it is ``1e9 + 1e3``.  A
+        set of fitting rows that holds ``r`` scales it, one without ``r``
+        only centres it: so the outer fold and every tuning fold fitted on
+        ``r`` record ``[]``, and the one tuning fold that holds ``r`` out
+        records ``[0]``.  Which fold that is follows from the fitting rows
+        :func:`make_split` was actually called with, not from a second
+        computation of the folds.
+        """
+        settings = _replace(QUICK, arms=("C",), max_epochs=1, inner_folds=3)
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        train_part = _fold_by_hand(X, y, settings, 0).train_part
+        r = int(train_part[0])
+        X[:, 0] = 1e9 + np.where(np.arange(X.shape[0]) % 2 == 0, 0.0, np.spacing(1e9))
+        X[r, 0] = 1e9 + 1e3
+        made = _spy_on_make_split(monkeypatch)
+        records = list(
+            bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None))
+        )
+        (outer_fit, _), *tuning = made
+        np.testing.assert_array_equal(outer_fit, train_part)
+        assert len(tuning) == settings.inner_folds
+        expected = [[] if r in fit else [0] for fit, _ in tuning]
+        assert expected.count([0]) == 1  # the fold that holds r out
+        assert records
+        for record in records:
+            assert record["raw_constant_columns"] == []
+            assert record["tuning"]["raw_constant_columns"] == expected
+            line = json.loads(bench.to_json_line(record))
+            assert line["tuning"]["raw_constant_columns"] == expected
+
+    def test_a_feature_constant_up_to_rounding_on_the_real_training_rows_is_recorded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A map whose feature 0 is ``½`` or ``½ + 2⁻⁵³`` on every real row and
+        ``¾`` on every synthetic SMOTE row; features 1 to N are ``tanh`` of
+        the inputs.  On the ``n`` real training rows, ``k`` of them at
+        ``½ + 2⁻⁵³``, its variance is ``k (n − k)/n² · 2⁻¹⁰⁶ ≤ 2⁻¹⁰⁸ ≈ 3.1e-33``,
+        nonzero and below the rounding bound ``(2 ceil(log2(n)) ε · ½)²``,
+        at least ``ε² ≈ 4.9e-32``: only centred, so every line records
+        ``[0]``, and every tuning fold too.  Fitted with the synthetic rows,
+        whose ``¾`` gives a variance of order ``1e-2``, it would be scaled
+        and nothing recorded.
+
+        The data are the positive control with two thirds of its positive
+        rows dropped, so SMOTE adds synthetic rows to every split.
+        """
+        settings = _replace(QUICK, arms=("A",), max_epochs=1)
+        X, y, _ = bench.load_dataset("positive-control", settings)
+        keep = (y == 0) | (np.cumsum(y) % 3 == 0)
+        X, y = X[keep], y[keep]
+        made = _spy_on_make_split(monkeypatch)
+
+        def compute(inputs: np.ndarray) -> np.ndarray:
+            split = next(s for _, s in made if s.inputs is inputs)
+            synthetic = np.zeros(inputs.shape[0], dtype=bool)
+            synthetic[split.n_train - split.n_synthetic : split.n_train] = True
+            rounding = 0.5 + np.where(inputs[:, 0] > 0, 2.0**-53, 0.0)
+            return np.column_stack([np.where(synthetic, 0.75, rounding), np.tanh(inputs)])
+
+        rep = bench.Representation(
+            arm="A",
+            kind="rounding",
+            heads=bench.HEADS,
+            config={"feature_map": "rounding"},
+            compute=compute,
+        )
+        monkeypatch.setattr(bench, "representations", lambda s: [rep])
+        records = list(
+            bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None))
+        )
+
+        eps = np.finfo(np.float64).eps
+        assert len(made) == 1 + settings.inner_folds
+        for _, split in made:
+            assert split.n_synthetic > 0
+            column = compute(split.inputs)[:, 0]
+            real = column[split.real_train]
+            n, k = real.size, int((real > 0.5).sum())
+            assert 0 < k < n
+            variance = k * (n - k) / n**2 * 2.0**-106
+            assert variance < (2 * math.ceil(math.log2(n)) * eps * 0.5) ** 2
+            assert column[split.train].var() > 1e-3
+        assert records
+        for record in records:
+            assert record["feature_constant_columns"] == [0]
+            assert record["tuning"]["feature_constant_columns"] == [[0]] * settings.inner_folds
+            assert json.loads(bench.to_json_line(record))["feature_constant_columns"] == [0]
 
 
 # ---------------------------------------------------------------------------
@@ -4141,24 +4291,20 @@ class TestQuick:
         }
         lines = quick.text.splitlines()
         assert len(lines) == len(ROWS)
+        # The control's raw columns are continuous draws, none of them near
+        # constant (σ ≥ 0.9 against values of at most 3.8 here), so no fitting
+        # rows of the run leave one only centred.  A nonzero list is tested in
+        # ``TestRecordedConstantColumns``.
+        assert quick.X.std(axis=0).min() > 0.1 * np.abs(quick.X).max()
         for line, record in zip(lines, quick.lines, strict=True):
             assert set(_strict_loads(line)) == FIELDS == set(record)
-            assert record["raw_constant_columns"] == bench._centred_constant_columns(
-                quick.X, quick.fold.train_part
-            )
+            assert record["raw_constant_columns"] == []
             assert record["feature_constant_columns"] == [] or all(
                 0 <= column < record["feature_dim"]
                 for column in record["feature_constant_columns"]
             )
             tuning = record["tuning"]
-            assert tuning["raw_constant_columns"] == [
-                bench._centred_constant_columns(quick.X, quick.fold.train_part[fit])
-                for fit, _ in bench.stratified_kfold(
-                    quick.y[quick.fold.train_part],
-                    QUICK.inner_folds,
-                    random_state=quick.fold.seeds["tune_seed"],
-                )
-            ]
+            assert tuning["raw_constant_columns"] == [[]] * QUICK.inner_folds
             assert len(tuning["feature_constant_columns"]) == QUICK.inner_folds
             assert len(tuning["pca"]) == QUICK.inner_folds
 
