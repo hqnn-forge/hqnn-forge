@@ -22,8 +22,10 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
       `--geometry chain ring grid` in one run. Arm A runs per geometry. Arm B is computed once
       and recorded per geometry with `reused_from_geometry`. C and D have no geometry.
     - `rydberg_features_geometries_control_{chain,ring,grid}.jsonl.xz`: the positive control,
-      once per geometry. Since #738 a run with the control takes one geometry, because its label
-      follows the geometry's bonds.
+      once per geometry. When they were run (#738), a run with the control took one geometry,
+      because its label follows the geometry's bonds. Since #741 one run with
+      `--geometry chain ring grid` runs the control once per geometry and writes the lines of the
+      three runs, apart from `settings` and the timings.
 - **Reproduce:**
 
     ```bash
@@ -1225,7 +1227,8 @@ datasets, fold intervals). In addition:
 - **The controls are three tasks.** Each geometry's control has its own label, and so its own B,
   C and D rows and its own family of 190. The control's detection on the chain and its
   weaker results on the ring and the grid are about each geometry on its own task, not one task
-  across geometries. A multi-geometry control run is #741.
+  across geometries. Since #741 one run can hold all three, and each label still gets its
+  own B, C and D lines.
 - **One input order.** Input `i` is the `i`-th principal component. Which components become
   neighbours is fixed by that order, and other assignments, beyond the ring/grid exchange of
   inputs 2 and 3, were not tried.

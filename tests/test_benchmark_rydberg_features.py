@@ -5153,7 +5153,7 @@ class TestGeometry:
     def test_quick_settings_with_every_geometry_in_one_run(self, tmp_path: Path) -> None:
         """
         One run of all three at ``QUICK``, on a dataset whose label does not depend on the
-        geometry (the positive control's does, so a run of it takes one, #738): the
+        geometry (the positive control's does, so it is run once per geometry, #741): the
         lines carry the geometry, the keys differ.
         """
         out, cache = tmp_path / "quick.jsonl", tmp_path / "cache"
@@ -5244,12 +5244,18 @@ class TestControlFollowsTheGeometry:
     @pytest.mark.parametrize(
         "geometries", [("chain", "ring"), ("ring", "grid"), ("grid", "chain")]
     )
-    def test_a_control_of_several_geometries_is_refused(self, geometries: tuple[str, ...]) -> None:
+    def test_a_control_of_several_geometries_is_labelled_over_the_first(
+        self, geometries: tuple[str, ...]
+    ) -> None:
+        """#741: ``control_bonds`` and ``load_dataset`` are those of the first geometry alone."""
         settings = _replace(QUICK, geometries=geometries)
-        with pytest.raises(ValueError, match="takes one geometry"):
-            bench.control_bonds(settings)
-        with pytest.raises(ValueError, match="takes one geometry"):
-            bench.load_dataset("positive-control", settings)
+        alone = _replace(QUICK, geometries=geometries[:1])
+        assert bench.control_bonds(settings) == bench.control_bonds(alone)
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        X1, y1, seed1 = bench.load_dataset("positive-control", alone)
+        np.testing.assert_array_equal(X, X1)
+        np.testing.assert_array_equal(y, y1)
+        assert data_seed == seed1
 
     @pytest.mark.parametrize(
         ("geometry", "bond_sum"),
@@ -5306,37 +5312,167 @@ class TestControlFollowsTheGeometry:
         assert {r["seeds"]["data_seed"] for r in control} == {data_seed}
         assert all(r["label_bonds"] is None for r in lines if r["dataset"] == "iranian-churn")
 
-    def test_a_run_of_a_drawn_control_and_several_geometries_is_refused(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("geometries", "grid_cols"), [(("chain", "ring"), None), (("ring", "grid"), 2)]
+    )
+    def test_the_labels_of_a_control_of_several_geometries(
+        self, geometries: tuple[str, ...], grid_cols: int | None
     ) -> None:
+        """
+        #741: one label per geometry, in order, each over its geometry's bonds and run
+        with the settings of that geometry alone, on the same inputs.  The labels are
+        checked against the sign of the bond sums written out by hand on latents drawn
+        independently of the runner, as in
+        ``test_the_loaded_control_is_labelled_over_the_geometry``.
+        """
+        settings = _replace(QUICK, geometries=geometries, grid_cols=grid_cols)
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        labels = bench.labels_of("positive-control", X, y, data_seed, settings)
+        z = np.random.default_rng(data_seed).standard_normal((QUICK.n_samples, 4))
+        by_hand = {
+            "chain": z[:, 0] * z[:, 1] + z[:, 1] * z[:, 2] + z[:, 2] * z[:, 3],
+            "ring": z[:, 0] * z[:, 1] + z[:, 1] * z[:, 2] + z[:, 2] * z[:, 3] + z[:, 3] * z[:, 0],
+            # 2 × 2: rows (0, 1), (2, 3), columns (0, 2), (1, 3)
+            "grid": z[:, 0] * z[:, 1] + z[:, 2] * z[:, 3] + z[:, 0] * z[:, 2] + z[:, 1] * z[:, 3],
+        }
+        bonds = {
+            "chain": [(0, 1), (1, 2), (2, 3)],
+            "ring": [(0, 1), (0, 3), (1, 2), (2, 3)],
+            "grid": [(0, 1), (0, 2), (1, 3), (2, 3)],
+        }
+        assert [s.geometries for _, s, _ in labels] == [(g,) for g in geometries]
+        for geometry, (labels_y, alone, label_bonds) in zip(geometries, labels, strict=True):
+            np.testing.assert_array_equal(labels_y, (by_hand[geometry] > 0).astype(np.int64))
+            assert label_bonds == bonds[geometry]
+            assert alone == _replace(
+                settings,
+                geometries=(geometry,),
+                grid_cols=grid_cols if geometry == "grid" else None,
+            )
+        np.testing.assert_array_equal(labels[0][0], y)
+        assert not np.array_equal(labels[0][0], labels[1][0])
+        # One geometry, or a dataset without a data_seed: the entry as it is, once.
+        alone = _replace(QUICK, geometries=geometries[:1])
+        X1, y1, seed1 = bench.load_dataset("positive-control", alone)
+        ((only_y, only_settings, only_bonds),) = bench.labels_of(
+            "positive-control", X1, y1, seed1, alone
+        )
+        assert only_y is y1 and only_settings is alone and only_bonds == bonds[geometries[0]]
+        ((uci_y, uci_settings, uci_bonds),) = bench.labels_of(
+            "iranian-churn", X, y, None, settings
+        )
+        assert uci_y is y and uci_settings is settings and uci_bonds is None
+
+    @pytest.mark.parametrize("entry", ["other inputs", "the second label"])
+    def test_a_run_of_several_geometries_refuses_a_control_it_cannot_redraw(
+        self, entry: str, tmp_path: Path
+    ) -> None:
+        """
+        The second label is drawn from ``data_seed``, so ``(X, y)`` must be the control
+        drawn at it, labelled over the first geometry; a file is not opened.
+        """
         settings = _replace(QUICK, arms=("C",), geometries=("chain", "ring"))
-        X, y, data_seed = bench.load_dataset("positive-control", QUICK)
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        if entry == "other inputs":
+            X = X + 1.0
+        else:
+            _, y, _ = bench.load_dataset("positive-control", _replace(QUICK, geometries=("ring",)))
         out = tmp_path / "out.jsonl"
-        with pytest.raises(ValueError, match="takes one geometry"):
+        with pytest.raises(ValueError, match="must be load_dataset's control"):
             bench.run({"positive-control": (X, y, data_seed)}, settings, out)
         assert not out.exists()
 
     @pytest.mark.parametrize(
-        "argv",
-        [
-            ["--quick", "--geometry", "chain", "ring"],
-            ["--dataset", "iranian-churn", "positive-control", "--geometry", "ring", "grid"],
-        ],
+        ("geometries", "grid_cols"), [(("chain", "ring"), None), (("ring", "grid"), 2)]
     )
-    def test_the_command_line_refuses_it_before_loading_a_dataset(
-        self, argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_run_of_two_geometries_writes_the_lines_of_two_runs_of_one(
+        self, geometries: tuple[str, ...], grid_cols: int | None, tmp_path: Path
     ) -> None:
-        loaded: list[str] = []
+        """
+        #741: the control of a two-geometry run against two runs of one geometry each,
+        and a UCI-like dataset beside it whose arm B is still computed once.  Every line
+        of a label equals that of its single run but for ``settings``, which is the run's,
+        and the timings; B and C are trained per label, on the label's own folds.
+        """
+        settings = _replace(
+            QUICK, arms=FAST, n_trials=0, geometries=geometries, grid_cols=grid_cols
+        )
+        multi = bench.run(
+            {"positive-control": bench.load_dataset("positive-control", settings)},
+            settings,
+            tmp_path / "multi.jsonl",
+        )
+        multi_lines = bench.read_records(tmp_path / "multi.jsonl")
+        timings = {"feature_seconds", "train_seconds", "tuning_seconds"}
+        singles: list[dict[str, Any]] = []
+        for geometry in geometries:
+            alone = _replace(
+                settings,
+                geometries=(geometry,),
+                grid_cols=grid_cols if geometry == "grid" else None,
+            )
+            out = tmp_path / f"{geometry}.jsonl"
+            bench.run(
+                {"positive-control": bench.load_dataset("positive-control", alone)}, alone, out
+            )
+            lines = bench.read_records(out)
+            assert all(r["settings"] == json.loads(json.dumps(alone.as_dict())) for r in lines)
+            singles.extend(lines)
+        # A, B (linear, mlp) and C (linear, mlp) per label, one fold.
+        assert len(multi) == len(multi_lines) == len(singles) == 2 * 6
+        for got, want in zip(multi_lines, singles, strict=True):
+            assert list(got) == list(want)
+            assert got["settings"] == json.loads(json.dumps(settings.as_dict()))
+            assert {k for k in got if got[k] != want[k]} <= {"settings"} | timings
+        first, second = multi_lines[:6], multi_lines[6:]
+        assert all(r["label_bonds"] != first[0]["label_bonds"] for r in second)
+        assert first[0]["test_idx"] != second[0]["test_idx"]  # the folds follow the label
+        b_lines = [r for r in multi_lines if r["arm"] == "B"]
+        assert [r["reused_from_geometry"] for r in b_lines] == [None] * 4
+        assert [r["geometry"] for r in b_lines] == [g for g in geometries for _ in range(2)]
+        # Beside it, a dataset without a data_seed: one label, B computed once.
+        rng = np.random.RandomState(0)
+        mixed = bench.run(
+            {
+                "positive-control": bench.load_dataset("positive-control", settings),
+                "iranian-churn": (rng.randn(80, 5), np.array([0, 1] * 40), None),
+            },
+            settings,
+            tmp_path / "mixed.jsonl",
+        )
+        churn = [r for r in mixed if r["dataset"] == "iranian-churn"]
+        churn_b = [r["reused_from_geometry"] for r in churn if r["arm"] == "B"]
+        assert churn_b == [None, None, geometries[0], geometries[0]]
+        assert all(r["label_bonds"] is None for r in churn)
+        # The printed summary keeps the labels apart: one row per label and arm C head.
+        table = bench.summarise(multi_lines)
+        names = ["grid-2x2" if g == "grid" else g for g in geometries]
+        c_rows = [line.split() for line in table.splitlines()[1:] if line.split()[4] == "C"]
+        assert [(r[1], r[-1]) for r in c_rows] == [(f"({g})", "1") for g in names for _ in "ab"]
+        alone_table = bench.summarise(singles[:6])
+        assert [line.split()[1] for line in alone_table.splitlines()[1:]] == [names[0]] * 4 + [
+            "-"
+        ] * 2
 
-        def spy(name: str, *args: Any, **kwargs: Any) -> Any:
-            loaded.append(name)
-            raise AssertionError("loaded")
+    def test_the_command_line_loads_the_control_once_for_several_geometries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[Any] = []
 
-        monkeypatch.setattr(bench, "load_dataset", spy)
-        out = tmp_path / "out.jsonl"
-        with pytest.raises(ValueError, match="takes one geometry"):
-            bench.main([*argv, "--out", str(out), "--no-cache"])
-        assert loaded == [] and not out.exists()
+        def capture(datasets: Any, settings: Any, out: Any, **kwargs: Any) -> list[Any]:
+            captured.append((datasets, settings))
+            return []
+
+        monkeypatch.setattr(bench, "run", capture)
+        argv = ["--quick", "--geometry", "chain", "ring", "--no-cache"]
+        bench.main([*argv, "--out", str(tmp_path / "out.jsonl")])
+        ((datasets, settings),) = captured
+        assert settings.geometries == ("chain", "ring") and list(datasets) == ["positive-control"]
+        X, y, data_seed = datasets["positive-control"]
+        X1, y1, seed1 = bench.load_dataset("positive-control", QUICK)
+        np.testing.assert_array_equal(X, X1)
+        np.testing.assert_array_equal(y, y1)
+        assert data_seed == seed1
 
 
 class TestSummary:
