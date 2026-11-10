@@ -3558,7 +3558,7 @@ class TestStandardisationInARun:
         Each call fits on the first rows of its split's training block, as
         many as the split has real training rows (counted here from the
         folds rebuilt by hand): no synthetic, validation or test row.  Arm C
-        is standardised too; ``D-hybrid`` never is.  :func:`preprocess`
+        is standardised too; ``D-hybrid`` never is.  :func:`fit_inputs`
         standardises the raw columns with the same function (step 2, #580):
         its calls are told apart by a flag it sets, and fit on the outer
         fold's training part and on each tuning fold's fitting rows.
@@ -3567,7 +3567,7 @@ class TestStandardisationInARun:
         raw_calls: list[np.ndarray] = []
         in_preprocess = False
         original = bench.standardise_features
-        original_preprocess = bench.preprocess
+        original_preprocess = bench.fit_inputs
 
         def spy(features: Any, fit_rows: np.ndarray) -> Any:
             if in_preprocess:
@@ -3588,7 +3588,7 @@ class TestStandardisationInARun:
         X, y, _ = bench.load_dataset("positive-control", settings)
         fold = _fold_by_hand(X, y, settings, 0)  # before the spies: it standardises too
         monkeypatch.setattr(bench, "standardise_features", spy)
-        monkeypatch.setattr(bench, "preprocess", preprocess_spy)
+        monkeypatch.setattr(bench, "fit_inputs", preprocess_spy)
         list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
         n_outer = fold.train_inputs.shape[0] + fold.val_idx.size + fold.test_idx.size
         inner = stratified_kfold(
@@ -4093,6 +4093,7 @@ FIELDS = {
     "val_idx",
     "test_idx",
     "n_synthetic",
+    "pca",
     "seeds",
     "feature_dim",
     "n_parameters",
@@ -4159,6 +4160,7 @@ class TestQuick:
                 )
             ]
             assert len(tuning["feature_constant_columns"]) == QUICK.inner_folds
+            assert len(tuning["pca"]) == QUICK.inner_folds
 
     def test_every_arm_has_the_same_fold_rows_and_seeds(self, quick: Any) -> None:
         """Compared between the lines, and against the fold rebuilt by hand."""
@@ -5197,6 +5199,44 @@ class TestSummary:
         widths = {len(line) for line in table.splitlines()[1:]}
         assert len(widths) == 1  # a "-" keeps the columns aligned
 
+    def test_degenerate_folds_are_counted_per_row(self) -> None:
+        """
+        ``deg`` counts the lines (folds) of a row whose own PCA fit was
+        degenerate, ``t-deg`` those with a degenerate tuning fold (#525);
+        lines without the field (an older file) are not counted, and a row
+        none of whose lines records it shows ``-``.
+        """
+
+        def pca(degenerate: bool) -> dict[str, Any]:
+            return {"degenerate": degenerate}
+
+        def tuning(*flags: bool) -> dict[str, Any]:
+            return {"pca": [pca(flag) for flag in flags]}
+
+        records = [
+            # three folds of A: one degenerate, one with a degenerate tuning fold
+            self._line(1.0, "A", 1.0, 1.0, pca=pca(True), tuning=tuning(False, False)),
+            self._line(1.0, "A", 1.0, 1.0, pca=pca(False), tuning=tuning(False, True)),
+            self._line(1.0, "A", 1.0, 1.0, pca=pca(False), tuning=tuning(False, False)),
+            # two folds of B, both degenerate, without tuning
+            self._line(1.0, "B", 1.0, 1.0, pca=pca(True), tuning=None),
+            self._line(1.0, "B", 1.0, 1.0, pca=pca(True), tuning=None),
+            # an older file: no field
+            self._line(None, "C", 0.0, 1.0),
+            # a line without the field next to one with it
+            self._line(2.0, "A", 1.0, 1.0),
+            self._line(2.0, "A", 1.0, 1.0, pca=pca(True), tuning=tuning(True, True)),
+        ]
+        table = bench.summarise(records)
+        header = table.splitlines()[0].split()
+        assert header[header.index("params") + 1 : header.index("params") + 3] == ["deg", "t-deg"]
+        # columns: ..., dim, params, deg, t-deg, feat s, fit s, n
+        assert self._row(table, "1", "A")[-5:-3] == ["1", "1"]
+        assert self._row(table, "1", "B")[-5:-3] == ["2", "-"]
+        assert self._row(table, "-", "C")[-5:-3] == ["-", "-"]
+        assert self._row(table, "2", "A")[-5:-3] == ["1", "1"]
+        assert len({len(line) for line in table.splitlines()}) == 1
+
 
 class TestSeparationSubsamplingIntegration:
     def test_parser_options(self) -> None:
@@ -5389,3 +5429,184 @@ class TestSeparationSubsamplingIntegration:
         sep1 = r1[0]["separation"]["train"]["mean_within_distance"]
         sep2 = r2[0]["separation"]["train"]["mean_within_distance"]
         assert sep1 != sep2
+
+
+# ---------------------------------------------------------------------------
+# PCA degeneracy per fold (#525)
+# ---------------------------------------------------------------------------
+
+
+def _relative_gaps_by_hand(X: np.ndarray, fit_rows: np.ndarray, n_components: int) -> np.ndarray:
+    """
+    The relative eigenvalue gaps of step 2's PCA fit on ``fit_rows``, by SVD.
+
+    The raw columns standardised by hand with their mean and population
+    standard deviation on ``fit_rows`` (none of the data here has a constant
+    column); the eigenvalues of the fit are the squared singular values of
+    the centred rows, up to the common factor ``1/(n − 1)`` that the
+    relative gaps divide out.
+    """
+    rows = X[fit_rows]
+    scaled = (rows - rows.mean(axis=0)) / rows.std(axis=0)
+    lam = np.linalg.svd(scaled - scaled.mean(axis=0), compute_uv=False) ** 2
+    return np.asarray((lam[:n_components] - lam[1 : n_components + 1]) / lam[0])
+
+
+def _with_correlation(rng: np.random.Generator, n: int, corr: np.ndarray) -> np.ndarray:
+    """
+    ``n`` rows whose sample covariance is exactly ``corr`` (unit diagonal).
+
+    Orthonormal centred columns (QR of centred Gaussians) times
+    ``√(n − 1) · corr^½``: their covariance is ``corr`` up to rounding, and
+    with unit variances the column standardisation of step 2 changes the
+    spectrum by one common factor only.
+    """
+    G = rng.standard_normal((n, corr.shape[0]))
+    Q, _ = np.linalg.qr(G - G.mean(axis=0))
+    w, V = np.linalg.eigh(corr)
+    return np.asarray(Q @ (V * np.sqrt((n - 1) * w)) @ V.T)
+
+
+class TestPcaDegeneracy:
+    """
+    Every line records the degeneracy of its fold's PCA fit, read off
+    ``PCANormalizer.eigenvalue_gaps_`` and not from the warning (#525).
+
+    The degenerate data: two blocks of two columns with correlation ½ and
+    one with ⅕, so the spectrum of the correlation matrix is ``1 ± ½``
+    twice and ``1 ± ⅕``: ``1.5, 1.5, 1.2, 0.8, 0.5, 0.5``.  With four
+    components the relative gaps among them and at the cutoff are
+    ``0, 0.3, 0.4, 0.3`` over ``1.5``: the leading pair is degenerate.
+    """
+
+    CORR = np.array(
+        [
+            [1.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.2],
+            [0.0, 0.0, 0.0, 0.0, 0.2, 1.0],
+        ]
+    )
+    GAPS: ClassVar[list[float]] = [0.0, 0.3 / 1.5, 0.4 / 1.5, 0.3 / 1.5]
+    SETTINGS = _replace(QUICK, arms=("C",), max_epochs=1)
+
+    def _data(self, degenerate_rows: Any) -> tuple[np.ndarray, np.ndarray, Any]:
+        """
+        Labels, raw features with the degenerate spectrum on the rows
+        ``degenerate_rows(fold, y)`` picks from fold 0 rebuilt by hand and
+        Gaussian rows elsewhere, and that fold.
+        """
+        rng = np.random.default_rng(525)
+        n = QUICK.n_samples
+        y = (np.arange(n) % 2).astype(np.int64)
+        dataset_index = bench.DATASETS.index("iranian-churn")
+        fold = _fold_by_hand(rng.standard_normal((n, 6)), y, self.SETTINGS, dataset_index)
+        rows = degenerate_rows(fold, y)
+        X = rng.standard_normal((n, 6))
+        X[rows] = _with_correlation(rng, rows.size, self.CORR)
+        return X, y, fold
+
+    @staticmethod
+    def _tuning_fit_rows(fold: Any, y: np.ndarray) -> list[np.ndarray]:
+        inner = stratified_kfold(
+            y[fold.train_part], QUICK.inner_folds, random_state=fold.seeds["tune_seed"]
+        )
+        return [fold.train_part[fit] for fit, _ in inner]
+
+    def _run(self, X: np.ndarray, y: np.ndarray) -> list[dict[str, Any]]:
+        # The warning is hidden here: the flag must not depend on it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return list(
+                bench.run_dataset("iranian-churn", X, y, self.SETTINGS, bench.FeatureCache(None))
+            )
+
+    def test_the_construction_has_the_spectrum(self) -> None:
+        X, _, fold = self._data(lambda fold, y: fold.train_part)
+        np.testing.assert_allclose(
+            _relative_gaps_by_hand(X, fold.train_part, 4), self.GAPS, rtol=0, atol=1e-12
+        )
+
+    def test_two_equal_leading_eigenvalues_set_the_flag_on_every_line(self) -> None:
+        X, y, fold = self._data(lambda fold, y: fold.train_part)
+        records = self._run(X, y)
+        assert [(r["arm"], r["head"]) for r in records] == [("C", "linear"), ("C", "mlp")]
+        for record in records:
+            pca = record["pca"]
+            assert pca["degenerate"] is True
+            assert pca["gap_threshold"] == 1e-12
+            np.testing.assert_allclose(pca["relative_gaps"], self.GAPS, rtol=0, atol=1e-12)
+            assert pca["min_relative_gap"] == min(pca["relative_gaps"]) < 1e-12
+            # Only the outer fit is degenerate: a tuning fold fits a subset of its rows.
+            for tuning_pca, rows in zip(
+                record["tuning"]["pca"], self._tuning_fit_rows(fold, y), strict=True
+            ):
+                assert tuning_pca["degenerate"] is False
+                np.testing.assert_allclose(
+                    tuning_pca["relative_gaps"],
+                    _relative_gaps_by_hand(X, rows, 4),
+                    rtol=1e-8,
+                    atol=1e-14,
+                )
+            line = json.loads(bench.to_json_line(record))
+            assert line["pca"]["degenerate"] is True
+            assert line["tuning"]["pca"][0]["degenerate"] is False
+        assert bench.summarise(records).splitlines()[1].split()[-5:-3] == ["1", "0"]
+
+    def test_the_run_warns_as_well(self) -> None:
+        X, y, _ = self._data(lambda fold, y: fold.train_part)
+        with pytest.warns(RuntimeWarning, match=r"eigenvalues 0 and 1 are degenerate"):
+            list(bench.run_dataset("iranian-churn", X, y, self.SETTINGS, bench.FeatureCache(None)))
+
+    def test_a_degenerate_tuning_fold_is_recorded_in_tuning_only(self) -> None:
+        """
+        Tuning fold 0's fitting rows carry the degenerate spectrum; the outer
+        fit, over those rows and the held-out ones, does not.
+        """
+        X, y, fold = self._data(lambda fold, y: self._tuning_fit_rows(fold, y)[0])
+        records = self._run(X, y)
+        _, second_fit = self._tuning_fit_rows(fold, y)
+        for record in records:
+            assert record["pca"]["degenerate"] is False
+            np.testing.assert_allclose(
+                record["pca"]["relative_gaps"],
+                _relative_gaps_by_hand(X, fold.train_part, 4),
+                rtol=1e-8,
+                atol=1e-14,
+            )
+            first, second = record["tuning"]["pca"]
+            assert first["degenerate"] is True
+            np.testing.assert_allclose(first["relative_gaps"], self.GAPS, rtol=0, atol=1e-12)
+            assert second["degenerate"] is False
+            np.testing.assert_allclose(
+                second["relative_gaps"],
+                _relative_gaps_by_hand(X, second_fit, 4),
+                rtol=1e-8,
+                atol=1e-14,
+            )
+        assert bench.summarise(records).splitlines()[1].split()[-5:-3] == ["0", "1"]
+
+    @pytest.mark.slow
+    def test_the_positive_control_is_not_degenerate(self, quick: Any) -> None:
+        """
+        On the ``--quick`` run (every arm), each line's gaps are those of an
+        SVD of the fold's training part and of its tuning folds' fitting
+        rows, and none is near the threshold.
+        """
+        fold = quick.fold
+        outer = _relative_gaps_by_hand(quick.X, fold.train_part, QUICK.n_atoms)
+        tuning = [
+            _relative_gaps_by_hand(quick.X, rows, QUICK.n_atoms)
+            for rows in self._tuning_fit_rows(fold, quick.y)
+        ]
+        assert min(outer.min(), *(g.min() for g in tuning)) > 1e-6
+        for record in quick.lines:
+            assert record["pca"]["degenerate"] is False
+            np.testing.assert_allclose(record["pca"]["relative_gaps"], outer, rtol=1e-8)
+            assert record["pca"]["min_relative_gap"] == pytest.approx(outer.min(), rel=1e-8)
+            for got, want in zip(record["tuning"]["pca"], tuning, strict=True):
+                assert got["degenerate"] is False
+                np.testing.assert_allclose(got["relative_gaps"], want, rtol=1e-8)
+        assert bench.summarise(quick.records).splitlines()[1].split()[-5:-3] == ["0", "0"]

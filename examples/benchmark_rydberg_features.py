@@ -365,14 +365,22 @@ for a reused line, and the cache holds no entry under its own
 and ``true`` on a warm one, as its source line's is); ``measurement`` and
 ``shots``; the fold (``fold``, ``n_splits``,
 ``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
-dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
+dataset, ``n_synthetic``); ``pca``, the degeneracy of the fold's PCA fit
+of step 2 (:func:`pca_degeneracy`: the relative eigenvalue gaps among the
+retained components and at the cutoff, the smallest of them, the
+threshold and the flag ``degenerate``; a degenerate fit makes the
+assignment of components to atoms, and with it ``A − B``, arbitrary);
+every seed (``seeds``); ``feature_dim``,
 ``raw_constant_columns`` (raw column indices only centred in step 2 despite
 nonzero computed variance) and ``feature_constant_columns`` (the analogous
 indices for step 4, empty when that standardisation is off);
 ``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
 and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
 with their scores, the analogous ``raw_constant_columns`` and
-``feature_constant_columns`` per tuning fold, and whether its features were a cache hit
+``feature_constant_columns`` per tuning fold, its ``pca`` per tuning fold
+(the tuning folds' fits give the inputs every trial is trained and scored
+on, so a degenerate one can change which candidate is chosen, but not the
+inputs of the fold itself), and whether its features were a cache hit
 and the ``environment()`` they were computed in (``feature_cache_hits``,
 ``feature_environments``, like the fields of the fold below); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
@@ -489,6 +497,7 @@ from hqnn_forge.models import (
     LinearClassifier,
 )
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
+from hqnn_forge.preprocessing.pca_normalizer import EIGENVALUE_GAP_WARN
 from hqnn_forge.rydberg import (
     DEFAULT_C6,
     MAX_ATOMS,
@@ -1159,6 +1168,52 @@ def preprocess(X: FloatArray, fit_rows: RowArray, n_components: int) -> FloatArr
     """
     The bounded inputs of every row of ``X``, fitted on ``fit_rows`` only.
 
+    The inputs of :func:`fit_inputs`, without the record of the PCA fit.
+    """
+    return fit_inputs(X, fit_rows, n_components)[0]
+
+
+def pca_degeneracy(normalizer: PCANormalizer) -> dict[str, Any]:
+    """
+    Whether a fitted :class:`PCANormalizer` is degenerate, as a line records it (``pca``).
+
+    Read off :attr:`PCANormalizer.eigenvalue_gaps_`, never from the text of
+    the warning :meth:`PCANormalizer.fit` emits on the same condition.  With
+    ``λ_0 ≥ λ_1 ≥ …`` the eigenvalues of the fit's covariance and ``N`` the
+    number of components:
+
+    * ``relative_gaps``: ``(λ_i − λ_{i+1}) / λ_0`` for ``i = 0 … N − 1``,
+      dimensionless and ``≥ 0`` (the eigenvalues are sorted); entries
+      ``0 … N − 2`` are among the retained components (entry ``i`` is the
+      pair of inputs ``i`` and ``i + 1``, on atoms ``i`` and ``i + 1``),
+      and entry ``N − 1`` is the gap at the cutoff to the first excluded
+      eigenvalue.  Data with exactly ``N`` raw columns has no cutoff, and
+      the list then ends at ``N − 2``.
+    * ``min_relative_gap``: the smallest of them.
+    * ``gap_threshold``: :data:`~hqnn_forge.preprocessing.pca_normalizer.EIGENVALUE_GAP_WARN`
+      (``1e-12``), the bound below which the warning is issued.
+    * ``degenerate``: ``min_relative_gap < gap_threshold``.  The components
+      of a degenerate pair are then any rotation within their eigenspace,
+      chosen by the LAPACK build, and at the cutoff which component is kept
+      at all: **which input, and so which atom, a direction of the data
+      drives is arbitrary**, and with it ``A − B``.
+    """
+    gaps = np.asarray(normalizer.eigenvalue_gaps_, dtype=np.float64)
+    return {
+        "relative_gaps": [float(g) for g in gaps],
+        "min_relative_gap": float(gaps.min()),
+        "gap_threshold": EIGENVALUE_GAP_WARN,
+        "degenerate": bool(gaps.min() < EIGENVALUE_GAP_WARN),
+    }
+
+
+def fit_inputs(
+    X: FloatArray, fit_rows: RowArray, n_components: int
+) -> tuple[FloatArray, dict[str, Any]]:
+    """
+    The bounded inputs of every row of ``X``, fitted on ``fit_rows`` only,
+    and the degeneracy of that fit (:func:`pca_degeneracy`).
+
     Each raw column is standardised by :func:`standardise_features` with
     ``fit_rows``: centred and divided by its population standard deviation
     on ``X[fit_rows]``.  A column constant on those rows, which by the rule
@@ -1173,10 +1228,13 @@ def preprocess(X: FloatArray, fit_rows: RowArray, n_components: int) -> FloatArr
 
     Returns
     -------
-    numpy.ndarray
+    inputs : numpy.ndarray
         Shape ``(n_samples, n_components)``, float64, in ``(−π, π)`` (at
         the float32 precision ``PCANormalizer`` returns).  Column ``i`` is
         component ``i``, in order of decreasing variance.
+    pca : dict
+        :func:`pca_degeneracy` of the fitted normaliser.  The fit's
+        ``RuntimeWarning`` on a degenerate fit is issued as well, not hidden.
 
     Raises
     ------
@@ -1188,7 +1246,7 @@ def preprocess(X: FloatArray, fit_rows: RowArray, n_components: int) -> FloatArr
     normalizer = PCANormalizer(n_components=n_components, scale_to_pi=True)
     normalizer.fit(scaled[fit_rows])
     inputs: FloatArray = normalizer.transform(scaled).double().numpy()
-    return inputs
+    return inputs, pca_degeneracy(normalizer)
 
 
 @dataclass(frozen=True)
@@ -1207,6 +1265,10 @@ class Split:
     n_train, n_synthetic, n_val, n_test:
         Block sizes; ``n_train`` includes the synthetic rows.  With
         ``n_test = 0`` (a tuning fold) the validation rows are scored.
+    pca:
+        The degeneracy of the PCA fit behind ``inputs``
+        (:func:`pca_degeneracy`); ``None`` for a split not made by
+        :func:`make_split`.
     """
 
     inputs: FloatArray
@@ -1215,6 +1277,7 @@ class Split:
     n_synthetic: int
     n_val: int
     n_test: int
+    pca: Mapping[str, Any] | None = None
 
     @property
     def train(self) -> slice:
@@ -1261,12 +1324,13 @@ def make_split(
     """
     Steps 2 and 3 of the module docstring for one set of rows.
 
-    The inputs are fitted on ``fit_rows`` (:func:`preprocess`) and the
-    training rows oversampled with :func:`smote` in input space.  An outer
-    fold passes its training part as ``fit_rows``; a tuning fold passes its
-    fitting rows as both ``fit_rows`` and ``train_rows`` and no test rows.
+    The inputs are fitted on ``fit_rows`` (:func:`fit_inputs`, whose record
+    of the fit is kept as :attr:`Split.pca`) and the training rows
+    oversampled with :func:`smote` in input space.  An outer fold passes
+    its training part as ``fit_rows``; a tuning fold passes its fitting
+    rows as both ``fit_rows`` and ``train_rows`` and no test rows.
     """
-    inputs = preprocess(X, fit_rows, n_components)
+    inputs, pca = fit_inputs(X, fit_rows, n_components)
     oversampled = smote(inputs[train_rows], y[train_rows], random_state=smote_seed)
     blocks = [oversampled.X, inputs[val_rows]]
     labels = [np.asarray(oversampled.y, dtype=np.int64), y[val_rows]]
@@ -1280,6 +1344,7 @@ def make_split(
         n_synthetic=int(oversampled.sources.shape[0]),
         n_val=int(val_rows.size),
         n_test=0 if test_rows is None else int(test_rows.size),
+        pca=pca,
     )
 
 
@@ -2672,6 +2737,7 @@ def run_dataset(
             "val_idx": np.sort(val_idx),
             "test_idx": np.sort(test_idx),
             "n_synthetic": split.n_synthetic,
+            "pca": split.pca,
             "raw_constant_columns": _centred_constant_columns(X, train_part),
             "seeds": {
                 "random_state": settings.random_state,
@@ -2755,6 +2821,7 @@ def run_dataset(
                         "candidates": candidates,
                         "scores": scores,
                         "raw_constant_columns": tuning_raw_constant_columns,
+                        "pca": [s.pca for s in tuning_splits],
                         "feature_constant_columns": tuning_feature_constant_columns,
                         "feature_cache_hits": [c.hit for c in tuning_cached],
                         "feature_environments": [c.environment for c in tuning_cached],
@@ -2832,6 +2899,23 @@ def geometry_label(record: Mapping[str, Any]) -> str | None:
     return None if geometry is None else str(geometry)
 
 
+def _degenerate_folds(rows: Sequence[Mapping[str, Any]], tuning: bool, width: int) -> str:
+    """
+    How many of ``rows`` (one per fold) have a degenerate PCA fit, as a column of ``width``.
+
+    With ``tuning`` false the fold's own fit (``pca``), else any of its
+    tuning folds (``tuning["pca"]``).  Lines that do not record it (an
+    older file, or no tuning) are not counted; ``-`` if none does.
+    """
+    if tuning:
+        recorded = [r["tuning"]["pca"] for r in rows if r.get("tuning") and r["tuning"].get("pca")]
+        count = sum(any(fit["degenerate"] for fit in fits) for fits in recorded)
+    else:
+        recorded = [r["pca"] for r in rows if r.get("pca") is not None]
+        count = sum(bool(fit["degenerate"]) for fit in recorded)
+    return format(str(count) if recorded else "-", f">{width}s")
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     """
     Mean and fold spread of MCC and PR-AUC per dataset, geometry, arm, head and grid point.
@@ -2844,6 +2928,14 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     is therefore in the row of the geometry and ``V/Ω`` it was computed at:
     the first values given to ``--geometry`` and ``--v-over-omega``, which
     need not be the smallest.
+
+    ``deg`` is the number of folds of the row whose PCA fit was degenerate
+    (``pca["degenerate"]``, :func:`pca_degeneracy`): there the assignment of
+    components to atoms, and ``A − B``, is arbitrary.  ``t-deg`` is the
+    number of folds with at least one degenerate tuning fold
+    (``tuning["pca"]``), whose choice of hyperparameters may then depend on
+    the platform.  A line without the field is not counted, and ``-`` means
+    no line of the row records it.
     """
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for record in records:
@@ -2858,7 +2950,8 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
         groups.setdefault(key, []).append(record)
     header = (
         f"{'dataset':22s} {'geometry':10s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
-        f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'feat s':>7s} {'fit s':>6s}  n"
+        f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'deg':>4s} {'t-deg':>5s} "
+        f"{'feat s':>7s} {'fit s':>6s}  n"
     )
     lines = [header]
     for (dataset, geometry, v, gamma, arm, head), rows in groups.items():
@@ -2872,6 +2965,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
             f"{'-' if gamma is None else format(gamma, 'g'):>6s} {arm:8s} {head:6s} "
             f"{mcc.mean():7.3f} ± {spread:5.3f} {ap:7.3f} {rows[0]['feature_dim']:4d} "
             f"{rows[0]['n_parameters']:6d} "
+            f"{_degenerate_folds(rows, False, 4)} {_degenerate_folds(rows, True, 5)} "
             f"{_mean_seconds(computed, 'feature_seconds', 7)} "
             f"{_mean_seconds(computed, 'train_seconds', 6)}  {len(rows)}"
         )

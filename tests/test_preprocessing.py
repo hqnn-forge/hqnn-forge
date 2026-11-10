@@ -668,3 +668,72 @@ class TestDegenerateEigenvalueWarning:
         with pytest.warns(RuntimeWarning, match=r"degenerate") as record:
             getattr(PCANormalizer(n_components=4), method)(X)
         assert record[0].filename == __file__
+
+
+class TestEigenvalueGaps:
+    """
+    ``eigenvalue_gaps_`` holds the gaps the degeneracy warning checks, so a
+    caller can record them without parsing the warning (#525): entry ``i`` is
+    ``(λ_i − λ_{i+1}) / λ_0`` for the eigenvalues ``λ`` of the covariance in
+    descending order, over the retained ones and the first excluded one.
+    """
+
+    def test_gaps_of_a_known_spectrum(self) -> None:
+        # Kept 8, 6, 6, 4; first excluded 2 (the cutoff gap); 1 is not looked at.
+        X = _data_with_spectrum([8.0, 6.0, 6.0, 4.0, 2.0, 1.0])
+        with pytest.warns(RuntimeWarning, match=r"eigenvalues 1 and 2"):
+            pca = PCANormalizer(n_components=4).fit(X)
+        np.testing.assert_allclose(
+            pca.eigenvalue_gaps_, [2 / 8, 0.0, 2 / 8, 2 / 8], rtol=0, atol=1e-12
+        )
+        assert pca.eigenvalue_gaps_[1] < EIGENVALUE_GAP_WARN
+
+    @pytest.mark.filterwarnings("error")
+    def test_degeneracy_beyond_the_cutoff_is_not_among_them(self) -> None:
+        pca = PCANormalizer(n_components=4).fit(
+            _data_with_spectrum([8.0, 6.0, 5.0, 3.0, 1.0, 1.0])
+        )
+        np.testing.assert_allclose(
+            pca.eigenvalue_gaps_, [2 / 8, 1 / 8, 2 / 8, 2 / 8], rtol=0, atol=1e-12
+        )
+
+    @pytest.mark.filterwarnings("error")
+    def test_all_features_kept_has_no_cutoff_gap(self) -> None:
+        pca = PCANormalizer(n_components=6).fit(
+            _data_with_spectrum(TestDegenerateEigenvalueWarning.WELL_SEPARATED)
+        )
+        np.testing.assert_allclose(pca.eigenvalue_gaps_, [1 / 8] * 5, rtol=0, atol=1e-12)
+
+    def test_gaps_match_an_svd_of_the_centred_data(self, training_data: np.ndarray) -> None:
+        # Another route to the eigenvalues: the squared singular values over n - 1.
+        pca = PCANormalizer(n_components=N_COMPONENTS).fit(training_data)
+        s = np.linalg.svd(training_data - training_data.mean(axis=0), compute_uv=False)
+        lam = s**2 / (N_SAMPLES - 1)
+        expected = (lam[:N_COMPONENTS] - lam[1 : N_COMPONENTS + 1]) / lam[0]
+        np.testing.assert_allclose(pca.eigenvalue_gaps_, expected, rtol=1e-10, atol=0)
+
+    @pytest.mark.parametrize(
+        ("spectrum", "warns"),
+        [
+            ([8.0, 6.0, 6.0, 4.0, 2.0, 1.0], True),
+            ([8.0, 6.0, 5.0, 3.0, 3.0, 1.0], True),
+            ([8.0, 6.0, 5.0, 3.0, 1.0, 1.0], False),
+            ([8.0, 6.0, 6.0 * (1 - 10 * EIGENVALUE_GAP_WARN), 4.0, 2.0, 1.0], False),
+        ],
+    )
+    def test_the_warning_fires_exactly_when_a_gap_is_below_the_threshold(
+        self, spectrum: list[float], warns: bool
+    ) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pca = PCANormalizer(n_components=4).fit(_data_with_spectrum(spectrum))
+        assert bool(caught) is warns
+        assert bool((pca.eigenvalue_gaps_ < EIGENVALUE_GAP_WARN).any()) is warns
+
+    def test_a_failed_refit_keeps_the_gaps(self) -> None:
+        X = _data_with_spectrum(TestDegenerateEigenvalueWarning.WELL_SEPARATED)
+        pca = PCANormalizer(n_components=4).fit(X)
+        before = pca.eigenvalue_gaps_.copy()
+        with pytest.raises(ValueError):
+            pca.fit(np.ones((50, 6)))
+        np.testing.assert_array_equal(pca.eigenvalue_gaps_, before)
