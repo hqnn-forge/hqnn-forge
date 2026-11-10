@@ -9,7 +9,8 @@ correlator, a density matrix built by hand in NumPy, an enumeration of every
 trajectory branch weighted by its probability, and a Monte Carlo mean within
 a stated number of standard errors.  The erasure derivation in the module
 docstring (#702) is checked the same way: the kept fraction ``(1 − p)^k``
-computed by hand, and the no-loss branch against the noiseless circuit.
+computed by hand, and the no-loss branch against the noiseless circuit; the
+site count ``k`` behind it against gate widths counted by hand.
 
 Index conventions, as in PennyLane: wire 0 is the most significant bit of a
 basis index, ``|0⟩`` has ``Z = +1`` and ``|1⟩`` (the dark state a lost atom
@@ -29,11 +30,13 @@ import pennylane as qml
 import pytest
 import torch
 
-from hqnn_forge.encoding import QuantumEncodingLayer
+from hqnn_forge.encoding import AnalogRydbergLayer, QuantumEncodingLayer
 from hqnn_forge.models import HybridBinaryClassifier
 from hqnn_forge.noise import (
     CHANNELS,
     Position,
+    _erasure_kept_fraction,
+    _noise_site_count,
     apply_depolarizing_noise,
     noise_sweep,
     training_noise_qnode,
@@ -493,6 +496,126 @@ class TestErasureDerivation:
         # The flagged draws are not: their mean is far from the clean value,
         # so the post-selection is what makes the difference.
         assert ((out[flagged].mean(0) - clean).abs() > 0.05).any()
+
+
+def _three_qubit() -> Any:
+    """RX on 0, CNOT(0, 1), Toffoli, CZ(1, 2), CCZ: 1 + 2 + 3 + 2 + 3 = 11 sites at "all"."""
+    device = qml.device("default.qubit", wires=3)
+
+    def circuit(theta: torch.Tensor) -> Any:
+        qml.RX(theta, wires=0)
+        qml.CNOT(wires=[0, 1])
+        qml.Toffoli(wires=[0, 1, 2])
+        qml.CZ(wires=[1, 2])
+        qml.CCZ(wires=[0, 1, 2])
+        return [qml.expval(qml.PauliZ(w)) for w in range(3)]
+
+    return qml.QNode(circuit, device, diff_method="backprop", interface="torch")
+
+
+class TestErasureSiteCount:
+    """
+    ``_noise_site_count`` and ``_erasure_kept_fraction`` (#702): ``k`` against
+    gate widths counted by hand and against the number of uniforms the
+    trajectory sampler draws (one per site), and ``(1 − p)^k`` against values
+    computed by hand.
+    """
+
+    @pytest.mark.parametrize(("position", "k"), [("all", 11), ("end", 3), ("cz", 5)])
+    def test_hand_counted_gate_widths(
+        self, position: Position, k: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # "all": 1 + 2 + 3 + 2 + 3 = 11; "end": 3 wires; "cz": CZ 2 + CCZ 3 = 5.
+        theta = torch.tensor(0.4, dtype=torch.float64)
+        assert _noise_site_count(_three_qubit(), position, theta) == k
+        # The trajectory sampler draws one uniform per site, at the sites the
+        # same insertion places.
+        noisy = trajectory_noise_qnode(_three_qubit(), 0.2, position, channel="atom_loss")
+        real_rand = torch.rand
+        calls: list[torch.Tensor] = []
+
+        def recording(*shape: Any, **kwargs: Any) -> torch.Tensor:
+            r = real_rand(*shape, **kwargs)
+            calls.append(r)
+            return r
+
+        monkeypatch.setattr(torch, "rand", recording)
+        noisy(theta)
+        monkeypatch.undo()
+        assert len(calls) == k
+
+    @pytest.mark.parametrize(("position", "k"), [("all", 5), ("end", 2)])
+    def test_the_two_qubit_circuit(self, position: Position, k: int) -> None:
+        # 1 + 1 + 2 + 1 gate wires at "all", 2 wires at "end", as in
+        # TestErasureDerivation.
+        theta = torch.tensor(THETA, dtype=torch.float64)
+        assert _noise_site_count(_two_qubit(), position, theta) == k
+
+    def test_templates_are_expanded_and_a_barrier_is_a_site(self) -> None:
+        # BasicEntanglerLayers, one layer on 3 wires, expands to RX on each
+        # wire (3 sites) and the CNOT ring (0,1), (1,2), (2,0) (6 sites); the
+        # Barrier on 2 wires adds 2.  As one gate of width 3 it would be 3 + 2.
+        device = qml.device("default.qubit", wires=3)
+
+        def circuit(weights: torch.Tensor) -> Any:
+            qml.BasicEntanglerLayers(weights, wires=range(3))
+            qml.Barrier(wires=[0, 1])
+            return qml.expval(qml.PauliZ(0))
+
+        qnode = qml.QNode(circuit, device, interface="torch")
+        weights = torch.tensor([[0.1, 0.2, 0.3]])
+        assert _noise_site_count(qnode, "all", weights) == 11
+        assert _noise_site_count(qnode, "end", weights) == 3
+
+    def test_end_counts_the_wires_of_the_tape(self) -> None:
+        # A 4-wire device, a circuit on wire 0 only: one site, not four.
+        device = qml.device("default.qubit", wires=4)
+
+        def circuit(theta: torch.Tensor) -> Any:
+            qml.RX(theta, wires=0)
+            return qml.expval(qml.PauliZ(0))
+
+        qnode = qml.QNode(circuit, device, interface="torch")
+        assert _noise_site_count(qnode, "end", torch.tensor(0.1)) == 1
+
+    def test_refusals(self) -> None:
+        theta = torch.tensor(THETA, dtype=torch.float64)
+        with pytest.raises(ValueError, match="no CZ or CCZ"):
+            _noise_site_count(_two_qubit(), "cz", theta)
+        with pytest.raises(ValueError, match="position must be one of"):
+            _noise_site_count(_two_qubit(), "start", theta)  # type: ignore[arg-type]
+        layer = AnalogRydbergLayer(2, 2, gamma=0.1, n_steps=2)
+        with pytest.raises(ValueError, match="not on its tape"):
+            _noise_site_count(layer.qlayer.qnode, "all")
+
+    @pytest.mark.parametrize(
+        ("p", "k", "kept"),
+        [
+            # By hand: 0.9^11 = 0.31381059609, 0.7^5 = 0.16807, 0.75^2 = 0.5625.
+            (0.1, 11, 0.31381059609),
+            (0.3, 5, 0.16807),
+            (0.25, 2, 0.5625),
+            (0.0, 7, 1.0),
+            (1.0, 3, 0.0),
+            (1.0, 0, 1.0),
+        ],
+    )
+    def test_kept_fraction_by_hand(self, p: float, k: int, kept: float) -> None:
+        assert _erasure_kept_fraction(p, k) == pytest.approx(kept, abs=1e-12)
+
+    @pytest.mark.parametrize(
+        ("p", "k", "match"),
+        [
+            (-0.1, 3, r"p must lie in \[0, 1.0\]"),
+            (1.01, 3, r"p must lie in \[0, 1.0\]"),
+            (0.1, -1, "n_sites must be a non-negative int"),
+            (0.1, 2.0, "n_sites must be a non-negative int"),
+            (0.1, True, "n_sites must be a non-negative int"),
+        ],
+    )
+    def test_kept_fraction_refusals(self, p: float, k: Any, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            _erasure_kept_fraction(p, k)
 
 
 class TestValidation:

@@ -668,6 +668,97 @@ def _insert_noise(
     return [new_tape], null_postprocessing
 
 
+def _mark_site(wires: object) -> None:
+    """A noise "operation" that records one ``Identity`` per site (``_noise_site_count``)."""
+    qml.Identity(wires=wires)
+
+
+def _noise_site_count(
+    qnode: qml.QNode, position: Position, *args: object, **kwargs: object
+) -> int:
+    """
+    The number ``k`` of channel sites the density path places on ``qnode``'s
+    circuit at ``position``, for the inputs ``*args, **kwargs``.
+
+    A site is one wire of one channel insertion, so ``k`` is the exponent of
+    the erasure kept fraction ``(1 − p)^k`` (*Atom loss* in the module
+    docstring; :func:`_erasure_kept_fraction`).  It is counted by running the
+    same insertion as the density path, :func:`_insert_noise`, twice on the
+    circuit's tape: once with :func:`_mark_site`, which records one
+    ``Identity`` wherever a channel would go, and once with
+    :func:`_record_nothing`, which records none but decomposes the tape the
+    same way.  ``k`` is the difference in operation count.  What that
+    insertion does therefore defines ``k``:
+
+    * ``"all"``: the sum of the gate widths, after ``qml.noise.insert`` has
+      expanded templates and adjoints, so ``BasicEntanglerLayers`` on three
+      wires counts as three ``RX`` and three ``CNOT``, 9 sites.  An operation
+      that is not a gate but has wires, such as ``Barrier``, is a site as
+      well, because the channel is inserted after it.
+    * ``"end"``: one site per wire of the tape, ``n_qubits`` for a circuit
+      that acts on or measures every wire.
+    * ``"cz"``: ``2·#CZ + 3·#CCZ`` on the same expanded tape; a circuit
+      without either raises, as :func:`_insert_noise` does.
+
+    Raises
+    ------
+    ValueError
+        If ``position`` is unknown; at ``"cz"`` if the circuit has no CZ or
+        CCZ; and at ``"all"`` on a circuit that applies the channel after its
+        own segments (:class:`~hqnn_forge.encoding.AnalogRydbergLayer` with
+        ``gamma > 0``, *Circuits without gates between segments* in the module
+        docstring), whose sites are not on its tape.
+    """
+    positions = get_args(Position)
+    if position not in positions:
+        raise ValueError(
+            f"position must be one of {', '.join(map(repr, positions))}; got {position!r}."
+        )
+    if position == "all" and hasattr(qnode.func, _CHANNEL_AFTER_SEGMENTS):
+        raise ValueError(
+            "The sites at position 'all' of a circuit that applies the channel after its own "
+            "segments (AnalogRydbergLayer with gamma > 0) are not on its tape, so they cannot "
+            "be counted from it."
+        )
+    tape = qml.workflow.construct_tape(qnode)(*args, **kwargs)
+    [marked], _ = _insert_noise(tape, _mark_site, (), position=position)
+    [bare], _ = _insert_noise(tape, _record_nothing, (), position=position)
+    return len(marked.operations) - len(bare.operations)
+
+
+def _erasure_kept_fraction(p: float, n_sites: int) -> float:
+    """
+    The probability ``(1 − p)^k`` that no atom is lost at any of ``k = n_sites``
+    sites: the fraction of samples an erasure keeps (*Atom loss* in the module
+    docstring).
+
+    Derivation.  At one site, atom loss has the Kraus operators
+    ``K0 = sqrt(1 − p) I`` (no loss), ``K1 = sqrt(p) |1⟩⟨0|`` and
+    ``K2 = sqrt(p) |1⟩⟨1|``.  An erasure flags a sample in which any site
+    took ``K1`` or ``K2``, so a kept sample took ``K0`` at every site.  With
+    ``U_j`` the gates between sites, its unnormalised state is
+    ``K0 U_k ⋯ K0 U_1 ρ U_1† K0† ⋯ U_k† K0†``.  ``K0`` is a multiple of the
+    identity, so it commutes with every ``U_j`` and the ``k`` factors
+    ``sqrt(1 − p)`` on each side multiply to ``(1 − p)^k``: the state is
+    ``(1 − p)^k U ρ U†``, with ``U = U_k ⋯ U_1`` the noiseless circuit.  Its
+    trace, the probability of the sample being kept, is ``(1 − p)^k``
+    because ``Tr(U ρ U†) = 1``; it is dimensionless and does not depend on
+    the state or the weights.  ``k = 0`` keeps every sample (``(1 − p)^0 =
+    1``, also at ``p = 1``), ``p = 0`` keeps every sample and ``p = 1``
+    with ``k ≥ 1`` none.
+
+    Raises
+    ------
+    ValueError
+        If ``p`` is outside [0, 1] or ``n_sites`` is not a non-negative int.
+    """
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"p must lie in [0, 1.0] for 'atom_loss'; got {p}.")
+    if isinstance(n_sites, bool) or not isinstance(n_sites, int) or n_sites < 0:
+        raise ValueError(f"n_sites must be a non-negative int; got {n_sites!r}.")
+    return (1.0 - p) ** n_sites
+
+
 def _noisy_qnode(
     qnode: qml.QNode, n_qubits: int, p: float, position: Position, channel: Channel
 ) -> qml.QNode:
