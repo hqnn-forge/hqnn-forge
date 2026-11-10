@@ -652,7 +652,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain, ring and grid control files of #737, are summarised one label after the other, each
   as on its own under a heading that adds its `label_bonds`, where they used to be refused. A
   line without `label_bonds` (a UCI dataset, or a control written before #738) is keyed `None`;
-  a dataset of one group prints exactly what it printed before (#741)
+  a dataset of one group prints exactly what it printed before (#741, #750)
 
 ### Fixed
 - `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same
