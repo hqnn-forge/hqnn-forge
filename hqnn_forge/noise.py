@@ -14,7 +14,8 @@ block exits. Gradients still flow, so optimizer steps inside the block can updat
 model weights. :func:`apply_readout_error` applies readout error, and
 :func:`noise_sweep` repeats either over a range of strengths (``channel="readout"``
 for readout error). :func:`apply_shots` and :func:`shot_sweep` evaluate with
-finite shots (see *Shot noise*).
+finite shots (see *Shot noise*).  :func:`erasure_kept_fraction` gives the
+fraction of samples a detected atom loss keeps (see *Atom loss*).
 
 Channel
 -------
@@ -137,7 +138,11 @@ no-loss probability ``(1 − p)^k``, which does not depend on θ, gives the
 noiseless state exactly.  A kept sample's ⟨O⟩ and its gradient are the
 noiseless ones, and the kept fraction is ``(1 − p)^k``.  Without the
 renormalisation, the flag would scale outputs and gradients by the constant
-``(1 − p)^k``.
+``(1 − p)^k``.  An erasure is therefore measured post hoc (#702): the
+predictions on the kept samples are the clean model's own
+(``predict_proba`` with no noise block), and :func:`erasure_kept_fraction`
+reports the fraction ``(1 − p)^k`` that is kept, with ``k`` counted on the
+model's circuit.
 
 ``p = 0`` replaces nothing: the original QNode stays in place, so the output
 is bit-identical to the noiseless model rather than merely close to it.  It
@@ -355,6 +360,7 @@ __all__: list[str] = [
     "apply_readout_error",
     "apply_shots",
     "check_kraus_trajectories",
+    "erasure_kept_fraction",
     "noise_sweep",
     "qnode_shots",
     "readout_error_map",
@@ -720,7 +726,10 @@ def _noise_site_count(
             "segments (AnalogRydbergLayer with gamma > 0) are not on its tape, so they cannot "
             "be counted from it."
         )
-    tape = qml.workflow.construct_tape(qnode)(*args, **kwargs)
+    # level=0, the circuit as written: _noisy_qnode builds a new QNode from
+    # qnode.func, without the QNode's own transforms (a layer's batch
+    # expansion, or the noise a post-hoc block inserted), and inserts into that.
+    tape = qml.workflow.construct_tape(qnode, level=0)(*args, **kwargs)
     [marked], _ = _insert_noise(tape, _mark_site, (), position=position)
     [bare], _ = _insert_noise(tape, _record_nothing, (), position=position)
     return len(marked.operations) - len(bare.operations)
@@ -1763,6 +1772,119 @@ def noise_sweep(
         score = float(score_fn(y, probs)) if score_fn is not None and y is not None else None
         points.append(NoiseSweepPoint(level, probs, score))
     return points
+
+
+def erasure_kept_fraction(
+    model: nn.Module, X: torch.Tensor, p: float, *, position: Position = "all"
+) -> torch.Tensor:
+    """
+    The fraction ``(1 − p)^k`` of ``X``'s samples an erasure keeps: atom loss
+    at rate ``p`` per site that imaging detects, so that the lost samples are
+    discarded (#702).
+
+    The predictions on the kept samples are the clean ones,
+    ``model.predict_proba(X)`` outside any noise block, whatever ``p``; this
+    is the one number erasure adds to them.  ``k`` is the number of sites
+    ``qml.noise.insert`` places on the circuit ``X`` runs through, as for
+    ``channel="atom_loss"`` in :func:`apply_depolarizing_noise` at the same
+    ``position``: ``n_qubits`` at ``"end"`` (the wires of the tape), the sum
+    of the gate widths at ``"all"`` (templates expanded, as the insertion
+    expands them), ``2·#CZ + 3·#CCZ`` at ``"cz"``.
+
+    Derivation.  At one site atom loss has the Kraus operators
+    ``K0 = sqrt(1 − p) I`` (no loss), ``K1 = sqrt(p) |1⟩⟨0|`` and
+    ``K2 = sqrt(p) |1⟩⟨1|`` (*Atom loss* in the module docstring).  An
+    erasure flags a circuit execution in which any of the ``k`` sites took
+    ``K1`` or ``K2``, so an unflagged one took ``K0`` at every site.  With
+    ``U_1, …, U_k`` the gates between the sites, its unnormalised state is
+    ``K0 U_k ⋯ K0 U_1 ρ U_1† K0† ⋯ U_k† K0†``.  ``K0`` is a multiple of the
+    identity and commutes with every ``U_j``, so the ``k`` factors
+    ``sqrt(1 − p)`` on each side multiply to ``(1 − p)^k``, and the
+    post-selected state is ``(1 − p)^k U ρ U†``, with ``U = U_k ⋯ U_1`` the
+    noiseless circuit.  Its trace is the probability of no flag, the kept
+    fraction ``(1 − p)^k`` (``Tr U ρ U† = 1``), the same for every input and
+    every weight.  Renormalising by it gives ``U ρ U†``, the clean state, so
+    ``E[O | unflagged] = Tr(O U ρ U†) = ⟨O⟩_clean``, and, as ``(1 − p)^k``
+    does not depend on θ, its gradient is the clean gradient.
+
+    The flag belongs to one execution, i.e. to one shot, not to one data row.
+    With ``N`` shots per row the number of kept shots is
+    ``Binomial(N, (1 − p)^k)``, ``N (1 − p)^k`` effective shots on average,
+    each an unbiased shot of the clean circuit; with exact expectations no row
+    is lost.  This function does not sample that; the shot cost of an erasure
+    at the expected count is ``shot_sweep(model, X, [round(N * kept)])`` with
+    ``kept`` from here.
+
+    Parameters
+    ----------
+    model:
+        A classifier with ``predict_proba`` and a quantum layer (the hybrid
+        classifiers), as for :func:`noise_sweep`.
+    X:
+        Inputs.  ``predict_proba`` runs once on them to obtain the inputs of
+        the circuit, after the classical encoder and the layer's
+        ``prepare_inputs``, on which ``k`` is counted.
+    p:
+        The loss probability per site, in [0, 1].
+    position:
+        ``"all"``, ``"end"`` or ``"cz"``, as in :func:`apply_depolarizing_noise`.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(n_samples,)``, float64: ``(1 − p)^k`` for each row of ``X``,
+        in [0, 1], never NaN.  ``k`` is counted on each row's own circuit.
+        With an angle-type embedding the gates do not depend on the input, so
+        every entry is the same; the amplitude embedding's state preparation
+        can leave out zero-angle rotations for some inputs
+        (:func:`hqnn_forge.diagnostics.circuit.sample_input`), and then ``k``
+        differs between rows.  ``p = 0`` gives ones and ``p = 1`` zeros
+        (every layer has ``k ≥ 1``).
+
+    Raises
+    ------
+    ValueError
+        If ``p`` is outside [0, 1] or ``position`` is unknown; at ``"cz"`` if
+        the circuit has no CZ or CCZ; at ``"all"`` on
+        :class:`~hqnn_forge.encoding.AnalogRydbergLayer` with ``gamma > 0``,
+        whose sites at ``"all"`` are not on its tape (*Circuits without gates
+        between segments*).
+    TypeError
+        If ``model`` has no ``predict_proba`` or no quantum layer.
+    RuntimeError
+        If ``predict_proba`` does not run the quantum layer exactly once.
+    """
+    validate_noise(p, position, channel="atom_loss")
+    predict = getattr(model, "predict_proba", None)
+    if not callable(predict):
+        raise TypeError(
+            f"erasure_kept_fraction needs a model with predict_proba; got {type(model).__name__}."
+        )
+    _, qlayer, _ = resolve_encoding_layer(model, "erasure_kept_fraction")
+    # The inputs the QNode receives, after the classical encoder and the
+    # layer's prepare_inputs, recorded on their way into the TorchLayer.
+    inputs: list[torch.Tensor] = []
+    handle = qlayer.register_forward_pre_hook(lambda _module, args: inputs.append(args[0]))
+    try:
+        predict(X)
+    finally:
+        handle.remove()
+    if len(inputs) != 1:
+        raise RuntimeError(
+            f"erasure_kept_fraction expected predict_proba to run the quantum layer once; "
+            f"it ran {len(inputs)} times."
+        )
+    # Inside apply_depolarizing_noise or apply_shots, the layer's own QNode is
+    # the one they replaced.
+    qnode = (
+        getattr(qlayer, "_hqnn_noise_original", None)
+        or getattr(qlayer, "_hqnn_shots_original", None)
+        or qlayer.qnode
+    )
+    weights = dict(qlayer.qnode_weights.items())
+    with torch.no_grad():
+        counts = [_noise_site_count(qnode, position, row, **weights) for row in inputs[0]]
+    return torch.tensor([_erasure_kept_fraction(float(p), k) for k in counts], dtype=torch.float64)
 
 
 # ---------------------------------------------------------------------------

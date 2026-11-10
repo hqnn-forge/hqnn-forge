@@ -31,13 +31,15 @@ import pytest
 import torch
 
 from hqnn_forge.encoding import AnalogRydbergLayer, QuantumEncodingLayer
-from hqnn_forge.models import HybridBinaryClassifier
+from hqnn_forge.models import ClassicalBaseline, HybridBinaryClassifier
 from hqnn_forge.noise import (
     CHANNELS,
     Position,
     _erasure_kept_fraction,
     _noise_site_count,
     apply_depolarizing_noise,
+    apply_shots,
+    erasure_kept_fraction,
     noise_sweep,
     training_noise_qnode,
     trajectory_noise_qnode,
@@ -616,6 +618,150 @@ class TestErasureSiteCount:
     def test_kept_fraction_refusals(self, p: float, k: Any, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             _erasure_kept_fraction(p, k)
+
+
+def _classifier(**kwargs: Any) -> HybridBinaryClassifier:
+    torch.manual_seed(0)
+    return HybridBinaryClassifier(n_input_features=4, n_qubits=3, n_layers=2, **CPU, **kwargs)
+
+
+#: The site count of each classifier, counted by hand from the documented
+#: circuits (3 qubits, 2 layers; AngleEmbedding expands to one RX per wire):
+#:
+#: * default (CNOT ring + Rot): "all" 3 RX + 2 × (3 CNOT × 2 wires + 3 Rot)
+#:   = 3 + 2 × 9 = 21; "end" 3 wires.
+#: * ``entangler="rydberg"`` (chain: CZ(0, 1), CZ(1, 2) + Rot): "all"
+#:   3 + 2 × (2 CZ × 2 + 3) = 17; "cz" 2 × 2 CZ × 2 = 8.
+#: * ``encoding_type="iqp"``: H and RZ per wire (6), each of the 3 pairs as
+#:   CNOT, RZ, CNOT (2 + 1 + 2 = 5 each, 15), then the default ansatz (18):
+#:   "all" 6 + 15 + 18 = 39.
+HAND_COUNTED: list[tuple[dict[str, Any], Position, int]] = [
+    ({}, "all", 21),
+    ({}, "end", 3),
+    ({"entangler": "rydberg"}, "all", 17),
+    ({"entangler": "rydberg"}, "cz", 8),
+    ({"encoding_type": "iqp"}, "all", 39),
+]
+
+
+class TestErasureKeptFraction:
+    """
+    ``erasure_kept_fraction`` (#702, option A): ``(1 − p)^k`` per row of
+    ``X``, with ``k`` counted by hand from the circuit and, independently,
+    as the number of ``ResetError`` channels the density path's
+    ``qml.noise.insert`` puts on the tape.  That a kept sample's output and
+    gradient are the clean ones is :class:`TestErasureDerivation`.
+    """
+
+    X = torch.randn(4, 4, generator=torch.Generator().manual_seed(5))
+
+    @pytest.mark.parametrize(("kwargs", "position", "k"), HAND_COUNTED)
+    def test_hand_counted_kept_fraction(
+        self, kwargs: dict[str, Any], position: Position, k: int
+    ) -> None:
+        p = 0.1
+        kept = erasure_kept_fraction(_classifier(**kwargs), self.X, p, position=position)
+        assert kept.dtype == torch.float64
+        expected = torch.full((len(self.X),), (1 - p) ** k, dtype=torch.float64)
+        torch.testing.assert_close(kept, expected, atol=1e-15, rtol=0)
+
+    def test_hand_computed_decimals(self) -> None:
+        # 0.8^3 = 0.512 at "end"; 0.9^21 = 0.109418989131512359 at "all"
+        # (0.9^10 = 0.3486784401, squared 0.12157665459056928801, times 0.9).
+        model = _classifier()
+        end = erasure_kept_fraction(model, self.X, 0.2, position="end")
+        every = erasure_kept_fraction(model, self.X, 0.1, position="all")
+        torch.testing.assert_close(end, torch.full((4,), 0.512, dtype=torch.float64))
+        torch.testing.assert_close(
+            every, torch.full((4,), 0.109418989131512359, dtype=torch.float64)
+        )
+
+    @pytest.mark.parametrize(("kwargs", "position", "k"), HAND_COUNTED)
+    def test_k_is_the_number_of_channels_the_insertion_places(
+        self, kwargs: dict[str, Any], position: Position, k: int
+    ) -> None:
+        # The independent route: open the density path's atom-loss block, take
+        # the noisy QNode it put on the layer, and count the single-wire
+        # ResetError channels on its tape for each row of the circuit inputs.
+        # erasure_kept_fraction is called inside the same block, so it also
+        # has to find the layer's original QNode under the noisy one.
+        p = 0.3
+        model = _classifier(**kwargs)
+        qlayer = model.quantum_layer.qlayer
+        inputs: list[torch.Tensor] = []
+        handle = qlayer.register_forward_pre_hook(lambda _m, args: inputs.append(args[0]))
+        try:
+            model.predict_proba(self.X)
+        finally:
+            handle.remove()
+        weights = dict(qlayer.qnode_weights.items())
+        with apply_depolarizing_noise(model, p, position=position, channel="atom_loss"):
+            channels = [
+                [
+                    op
+                    for op in qml.workflow.construct_tape(qlayer.qnode)(row, **weights).operations
+                    if isinstance(op, qml.ResetError)
+                ]
+                for row in inputs[0]
+            ]
+            inside = erasure_kept_fraction(model, self.X, p, position=position)
+        assert all(len(op.wires) == 1 for row in channels for op in row)
+        assert [len(row) for row in channels] == [k] * len(self.X)
+        outside = erasure_kept_fraction(model, self.X, p, position=position)
+        expected = torch.tensor([(1 - p) ** len(row) for row in channels], dtype=torch.float64)
+        torch.testing.assert_close(outside, expected, atol=1e-15, rtol=0)
+        torch.testing.assert_close(inside, expected, atol=1e-15, rtol=0)
+
+    def test_inside_apply_shots(self) -> None:
+        model = _classifier()
+        with apply_shots(model, 50):
+            kept = erasure_kept_fraction(model, self.X, 0.1, position="all")
+        torch.testing.assert_close(kept, torch.full((4,), 0.9**21, dtype=torch.float64))
+
+    @pytest.mark.parametrize("position", ["all", "end"])
+    def test_limits(self, position: Position) -> None:
+        # p = 0 keeps everything, p = 1 nothing (k ≥ 1 on every layer, so
+        # k = 0, which keeps everything at any p, is not reachable here; the
+        # helper's k = 0 is TestErasureSiteCount.test_kept_fraction_by_hand).
+        model = _classifier()
+        none_lost = erasure_kept_fraction(model, self.X, 0.0, position=position)
+        all_lost = erasure_kept_fraction(model, self.X, 1.0, position=position)
+        assert torch.equal(none_lost, torch.ones(4, dtype=torch.float64))
+        assert torch.equal(all_lost, torch.zeros(4, dtype=torch.float64))
+
+    def test_dephased_analog_layer_at_the_end(self) -> None:
+        # Its circuit prepares ρ(T) on 2 wires, one sample at a time: k = 2.
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(
+            n_input_features=4, n_qubits=2, encoding_type="analog", gamma=0.1, n_steps=2
+        )
+        kept = erasure_kept_fraction(model, self.X[:2], 0.25, position="end")
+        torch.testing.assert_close(kept, torch.full((2,), 0.5625, dtype=torch.float64))
+        with pytest.raises(ValueError, match="not on its tape"):
+            erasure_kept_fraction(model, self.X[:2], 0.25, position="all")
+
+    @pytest.mark.parametrize(
+        ("p", "position", "match"),
+        [
+            (-0.1, "all", r"p must lie in \[0, 1.0\] for 'atom_loss'"),
+            (1.01, "end", r"p must lie in \[0, 1.0\] for 'atom_loss'"),
+            (0.1, "start", "position must be one of 'all', 'end', 'cz'"),
+        ],
+    )
+    def test_refusals(self, p: float, position: Any, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            erasure_kept_fraction(_classifier(), self.X, p, position=position)
+
+    def test_refuses_cz_on_a_circuit_without_cz(self) -> None:
+        with pytest.raises(ValueError, match="no CZ or CCZ"):
+            erasure_kept_fraction(_classifier(), self.X, 0.1, position="cz")
+
+    def test_refuses_a_model_without_predict_proba_or_quantum_layer(self) -> None:
+        layer = QuantumEncodingLayer(n_qubits=3, n_layers=1, **CPU)
+        with pytest.raises(TypeError, match="needs a model with predict_proba"):
+            erasure_kept_fraction(layer, self.X, 0.1)
+        with pytest.raises(TypeError, match="erasure_kept_fraction expects"):
+            erasure_kept_fraction(ClassicalBaseline(4, [3]), self.X, 0.1)
 
 
 class TestValidation:
