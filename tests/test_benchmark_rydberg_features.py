@@ -3729,14 +3729,25 @@ class TestRecordedConstantColumns:
         ``r`` record ``[]``, and the one tuning fold that holds ``r`` out
         records ``[0]``.  Which fold that is follows from the fitting rows
         :func:`make_split` was actually called with, not from a second
-        computation of the folds.
+        computation of the folds: :func:`inner_splits` is made to build its
+        folds from another seed than the run's ``tune_seed``, so a second
+        ``stratified_kfold`` call with that seed would name another fold.
         """
         settings = _replace(QUICK, arms=("C",), max_epochs=1, inner_folds=3)
         X, y, _ = bench.load_dataset("positive-control", settings)
-        train_part = _fold_by_hand(X, y, settings, 0).train_part
+        fold = _fold_by_hand(X, y, settings, 0)
+        train_part = fold.train_part
         r = int(train_part[0])
         X[:, 0] = 1e9 + np.where(np.arange(X.shape[0]) % 2 == 0, 0.0, np.spacing(1e9))
         X[r, 0] = 1e9 + 1e3
+        original_inner_splits = bench.inner_splits
+
+        def shifted_inner_splits(
+            X: Any, y: Any, train_part: Any, settings: Any, tune_seed: int
+        ) -> Any:
+            return original_inner_splits(X, y, train_part, settings, tune_seed + 1)
+
+        monkeypatch.setattr(bench, "inner_splits", shifted_inner_splits)
         made = _spy_on_make_split(monkeypatch)
         records = list(
             bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None))
@@ -3746,6 +3757,11 @@ class TestRecordedConstantColumns:
         assert len(tuning) == settings.inner_folds
         expected = [[] if r in fit else [0] for fit, _ in tuning]
         assert expected.count([0]) == 1  # the fold that holds r out
+        # The premise: folds rebuilt with the run's own tune_seed hold r out elsewhere.
+        rebuilt = stratified_kfold(
+            y[train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
+        )
+        assert [[] if r in train_part[fit] else [0] for fit, _ in rebuilt] != expected
         assert records
         for record in records:
             assert record["raw_constant_columns"] == []
@@ -3757,15 +3773,19 @@ class TestRecordedConstantColumns:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        A map whose feature 0 is ``½`` or ``½ + 2⁻⁵³`` on every real row and
-        ``¾`` on every synthetic SMOTE row; features 1 to N are ``tanh`` of
-        the inputs.  On the ``n`` real training rows, ``k`` of them at
-        ``½ + 2⁻⁵³``, its variance is ``k (n − k)/n² · 2⁻¹⁰⁶ ≤ 2⁻¹⁰⁸ ≈ 3.1e-33``,
-        nonzero and below the rounding bound ``(2 ceil(log2(n)) ε · ½)²``,
-        at least ``ε² ≈ 4.9e-32``: only centred, so every line records
-        ``[0]``, and every tuning fold too.  Fitted with the synthetic rows,
-        whose ``¾`` gives a variance of order ``1e-2``, it would be scaled
-        and nothing recorded.
+        A map whose feature ``m`` on the ``m``-th split prepared (0 the
+        outer fold, ``1 + i`` tuning fold ``i``) is ``½`` or ``½ + 2⁻⁵³`` on
+        every real row and ``¾`` on every synthetic SMOTE row; its other
+        first ``1 + inner_folds`` features vary as ``½ + ¼ tanh`` of an
+        input, and the rest are ``tanh`` of the inputs.  On the ``n`` real
+        training rows, ``k`` of them at ``½ + 2⁻⁵³``, feature ``m`` has
+        variance ``k (n − k)/n² · 2⁻¹⁰⁶ ≤ 2⁻¹⁰⁸ ≈ 3.1e-33``, nonzero and
+        below the rounding bound ``(2 ceil(log2(n)) ε · ½)²``, at least
+        ``ε² ≈ 4.9e-32``: only centred, so every line records ``[0]`` and
+        tuning fold ``i`` records ``[1 + i]``, which a list taken from
+        another fold would not.  Fitted with the synthetic rows, whose ``¾``
+        gives a variance of order ``1e-2``, it would be scaled and nothing
+        recorded.
 
         The data are the positive control with two thirds of its positive
         rows dropped, so SMOTE adds synthetic rows to every split.
@@ -3776,12 +3796,20 @@ class TestRecordedConstantColumns:
         X, y = X[keep], y[keep]
         made = _spy_on_make_split(monkeypatch)
 
+        n_marked = 1 + settings.inner_folds
+
         def compute(inputs: np.ndarray) -> np.ndarray:
-            split = next(s for _, s in made if s.inputs is inputs)
+            m, split = next((m, s) for m, (_, s) in enumerate(made) if s.inputs is inputs)
             synthetic = np.zeros(inputs.shape[0], dtype=bool)
             synthetic[split.n_train - split.n_synthetic : split.n_train] = True
             rounding = 0.5 + np.where(inputs[:, 0] > 0, 2.0**-53, 0.0)
-            return np.column_stack([np.where(synthetic, 0.75, rounding), np.tanh(inputs)])
+            marked = [
+                np.where(synthetic, 0.75, rounding)
+                if c == m
+                else 0.5 + 0.25 * np.tanh(inputs[:, c % inputs.shape[1]])
+                for c in range(n_marked)
+            ]
+            return np.column_stack([*marked, np.tanh(inputs)])
 
         rep = bench.Representation(
             arm="A",
@@ -3796,10 +3824,10 @@ class TestRecordedConstantColumns:
         )
 
         eps = np.finfo(np.float64).eps
-        assert len(made) == 1 + settings.inner_folds
-        for _, split in made:
+        assert len(made) == n_marked
+        for m, (_, split) in enumerate(made):
             assert split.n_synthetic > 0
-            column = compute(split.inputs)[:, 0]
+            column = compute(split.inputs)[:, m]
             real = column[split.real_train]
             n, k = real.size, int((real > 0.5).sum())
             assert 0 < k < n
@@ -3809,8 +3837,11 @@ class TestRecordedConstantColumns:
         assert records
         for record in records:
             assert record["feature_constant_columns"] == [0]
-            assert record["tuning"]["feature_constant_columns"] == [[0]] * settings.inner_folds
-            assert json.loads(bench.to_json_line(record))["feature_constant_columns"] == [0]
+            tuning = [[1 + i] for i in range(settings.inner_folds)]
+            assert record["tuning"]["feature_constant_columns"] == tuning
+            line = json.loads(bench.to_json_line(record))
+            assert line["feature_constant_columns"] == [0]
+            assert line["tuning"]["feature_constant_columns"] == tuning
 
 
 # ---------------------------------------------------------------------------
