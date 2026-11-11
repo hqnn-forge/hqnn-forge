@@ -700,7 +700,11 @@ def _noise_site_count(
       expanded templates and adjoints, so ``BasicEntanglerLayers`` on three
       wires counts as three ``RX`` and three ``CNOT``, 9 sites.  An operation
       that is not a gate but has wires, such as ``Barrier``, is a site as
-      well, because the channel is inserted after it.
+      well, because the channel is inserted after it.  A state preparation
+      at the start of the tape, such as ``AmplitudeEmbedding``, is not:
+      ``qml.noise.insert`` places no channel after the tape's leading
+      preparations, and the device decomposes them into gates only after
+      the insertion.
     * ``"end"``: one site per wire of the tape, ``n_qubits`` for a circuit
       that acts on or measures every wire.
     * ``"cz"``: ``2·#CZ + 3·#CCZ`` on the same expanded tape; a circuit
@@ -1834,11 +1838,12 @@ def erasure_kept_fraction(
     torch.Tensor
         Shape ``(n_samples,)``, float64: ``(1 − p)^k`` for each row of ``X``,
         in [0, 1], never NaN.  ``k`` is counted on each row's own circuit.
-        With an angle-type embedding the gates do not depend on the input, so
-        every entry is the same; the amplitude embedding's state preparation
-        can leave out zero-angle rotations for some inputs
-        (:func:`hqnn_forge.diagnostics.circuit.sample_input`), and then ``k``
-        differs between rows.  ``p = 0`` gives ones and ``p = 1`` zeros
+        For the layers in this library the tape the insertion sees does not
+        depend on the input, so every entry is the same: an angle-type
+        embedding's gates do not, and the amplitude embedding's state
+        preparation is no site (:func:`_noise_site_count`); the zero-angle
+        rotations its decomposition can leave out are dropped on the device,
+        after the insertion.  ``p = 0`` gives ones and ``p = 1`` zeros
         (every layer has ``k ≥ 1``).
 
     Raises

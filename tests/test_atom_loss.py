@@ -580,6 +580,25 @@ class TestErasureSiteCount:
         qnode = qml.QNode(circuit, device, interface="torch")
         assert _noise_site_count(qnode, "end", torch.tensor(0.1)) == 1
 
+    def test_counts_the_circuit_as_written_like_the_density_path(self) -> None:
+        # RX, X, X under the QNode's own cancel_inverses: 3 sites as written,
+        # 1 after the transform.  The density path rebuilds the QNode from its
+        # function without the transform and inserts 3 channels, so k is 3.
+        device = qml.device("default.qubit", wires=1)
+
+        def circuit(theta: torch.Tensor) -> Any:
+            qml.RX(theta, wires=0)
+            qml.PauliX(0)
+            qml.PauliX(0)
+            return qml.expval(qml.PauliZ(0))
+
+        qnode = qml.transforms.cancel_inverses(qml.QNode(circuit, device, interface="torch"))
+        theta = torch.tensor(0.3)
+        density = training_noise_qnode(qnode, 1, 0.1, "all", channel="atom_loss")
+        tape = qml.workflow.construct_tape(density)(theta)
+        assert sum(isinstance(op, qml.ResetError) for op in tape.operations) == 3
+        assert _noise_site_count(qnode, "all", theta) == 3
+
     def test_refusals(self) -> None:
         theta = torch.tensor(THETA, dtype=torch.float64)
         with pytest.raises(ValueError, match="no CZ or CCZ"):
@@ -635,12 +654,16 @@ def _classifier(**kwargs: Any) -> HybridBinaryClassifier:
 #: * ``encoding_type="iqp"``: H and RZ per wire (6), each of the 3 pairs as
 #:   CNOT, RZ, CNOT (2 + 1 + 2 = 5 each, 15), then the default ansatz (18):
 #:   "all" 6 + 15 + 18 = 39.
+#: * ``encoding_type="amplitude"``: the AmplitudeEmbedding on 3 wires is the
+#:   tape's state preparation, after which ``qml.noise.insert`` places
+#:   nothing, then the default ansatz: "all" 18, not 3 + 18 = 21.
 HAND_COUNTED: list[tuple[dict[str, Any], Position, int]] = [
     ({}, "all", 21),
     ({}, "end", 3),
     ({"entangler": "rydberg"}, "all", 17),
     ({"entangler": "rydberg"}, "cz", 8),
     ({"encoding_type": "iqp"}, "all", 39),
+    ({"encoding_type": "amplitude"}, "all", 18),
 ]
 
 
@@ -745,6 +768,7 @@ class TestErasureKeptFraction:
         [
             (-0.1, "all", r"p must lie in \[0, 1.0\] for 'atom_loss'"),
             (1.01, "end", r"p must lie in \[0, 1.0\] for 'atom_loss'"),
+            (float("nan"), "all", r"p must lie in \[0, 1.0\] for 'atom_loss'; got nan"),
             (0.1, "start", "position must be one of 'all', 'end', 'cz'"),
         ],
     )
