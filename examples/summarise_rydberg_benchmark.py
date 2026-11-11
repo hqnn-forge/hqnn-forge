@@ -5,8 +5,8 @@ The tables of ``docs/results/rydberg-features-benchmark.md``, computed from
 the JSON lines of ``examples/benchmark_rydberg_features.py``.
 
 Every number in that note is printed by this script from the committed
-results file; nothing is typed in by hand.  For each dataset it prints, as
-Markdown:
+results file; nothing is typed in by hand.  For each dataset, and within
+it each label (*Groups* below), it prints, as Markdown:
 
 * **Scores**: test MCC and PR-AUC per arm, head and grid point over the outer
   folds, as mean, sample standard deviation and a two-sided 95 % Student-t
@@ -21,9 +21,9 @@ Markdown:
   Wilcoxon signed-rank p-values of
   :func:`hqnn_forge.evaluation.wilcoxon_signed_rank`).  ``--long`` adds one
   row per comparison with the pairs left after ties, the exact p-value, its
-  floor and the rank-biserial effect.  **All comparisons of one dataset form
-  one Holm family**; an undefined test (every pair tied) counts as ``p = 1``
-  in it, as ``docs/methodology.md`` prescribes.
+  floor and the rank-biserial effect.  **All comparisons of one group (one
+  dataset, one label) form one Holm family**; an undefined test (every pair
+  tied) counts as ``p = 1`` in it, as ``docs/methodology.md`` prescribes.
 * **Mechanism**: the separation measures of arms A and B on the real rows
   of the training part (as the runner records them under ``"train"``),
   averaged over folds per grid point, and for each measure
@@ -35,22 +35,40 @@ Markdown:
 **Geometries** (``--geometry`` of the runner, #733).  Arm A is grouped by
 geometry as well (``chain``, ``ring``, ``grid-RxC``); a line written before
 the option existed is a chain line.  Arms B, C and D do not depend on the
-geometry and appear once: B's features do not depend on where its atoms sit,
-so every A line, whatever its geometry, is paired with the same B line.  A
-file of a single geometry prints exactly the tables it printed before the
-option existed.  With several, the scores table gains a ``geometry``
-column, every grid and mechanism table is printed once per geometry, and
-the comparisons of all geometries of one dataset still form **one** Holm
-family.
+geometry and appear once per group: B's features do not depend on where its
+atoms sit, so every A line of a group, whatever its geometry, is paired with
+the same B line.  A file of a single geometry prints exactly the tables it
+printed before the option existed.  With several in one group (a UCI
+dataset, whose label does not depend on the geometry), the scores table
+gains a ``geometry`` column, every grid and mechanism table is printed once
+per geometry, and the comparisons of all its geometries still form **one**
+Holm family.
 
-**One dataset, one data** (#742).  Lines are grouped by ``dataset`` alone,
-so every line of a dataset must carry the same ``data_sha256``: two
-positive-control runs of different geometries (another label, #738) or of
-different ``--seed`` or ``--samples``, read together, would otherwise be
-paired by fold index across data in one Holm family.  The script refuses
-such input with a ``ValueError`` naming the dataset and each fingerprint
-with its number of lines (a line without the field counts as one more,
-``not recorded``) before printing anything; summarise each run on its own.
+**Groups: one dataset, one label** (#741).  The positive control's label
+follows the geometry (#738), so one dataset can hold lines of several
+labels on the same inputs, each with its own folds (stratified on the
+label) and its own arms B, C and D.  Lines are therefore grouped by
+``(dataset, label_bonds)``, in the order first seen (:func:`groups`), and
+each group gets its own section and its own Holm family; the comparisons
+of two labels are never pooled.  A line without ``label_bonds`` (the field
+missing or ``null``) is keyed ``(dataset, None)``: a UCI dataset, whose
+lines record ``null``, or a positive control written before #738, whose
+label is the chain's.  Such a control is *not* keyed as the chain's bonds,
+so beside lines that record them (every control line since #738, the chain
+as ``[[0, 1], [1, 2], …]``) it is a group of its own, even on the same
+data.  A dataset with one group keeps the heading ``## <dataset>`` it had
+before; with several, each heading adds ``, label_bonds [[j, k], …]`` (or
+``, label_bonds not recorded``).
+
+**One group, one data** (#742).  Every line of a group must carry the same
+``data_sha256``: two positive-control runs of one geometry but different
+``--seed`` or ``--samples`` have the same ``label_bonds``, and read
+together they would otherwise be paired by fold index across data in one
+Holm family.  The script refuses such input with a ``ValueError`` naming
+the dataset, its label bonds and each fingerprint with its number of lines
+(a line without the field counts as one more, ``not recorded``) before
+printing anything; summarise each run on its own.  Lines of different
+labels carry different fingerprints too, but are in different groups.
 
 Usage::
 
@@ -79,7 +97,7 @@ from hqnn_forge.evaluation import holm_correction, rank_biserial_correlation, wi
 
 FloatArray = npt.NDArray[np.float64]
 
-#: Family-wise error rate of the Holm family of one dataset.
+#: Family-wise error rate of the Holm family of one group (dataset and label).
 ALPHA = 0.05
 #: Separation measures of the mechanism table, in the order printed.
 MEASURES: tuple[str, ...] = (
@@ -202,24 +220,67 @@ def data_fingerprints(records: Iterable[Mapping[str, Any]]) -> dict[str | None, 
     return counts
 
 
-def _check_one_fingerprint(dataset: str, records: Sequence[Mapping[str, Any]]) -> None:
+Bonds = tuple[tuple[int, int], ...]
+GroupKey = tuple[str, Bonds | None]  # dataset, label_bonds
+
+
+def label_bonds(record: Mapping[str, Any]) -> Bonds | None:
+    """
+    The ``label_bonds`` of a line as a tuple of pairs, in the order recorded.
+
+    ``None`` for a line without them, the field missing or ``null``: a UCI
+    dataset, or a positive control written before #738 (whose label is the
+    chain's, but which is not keyed as the chain's bonds; see the module
+    docstring).
+    """
+    bonds = record.get("label_bonds")
+    if bonds is None:
+        return None
+    return tuple((int(j), int(k)) for j, k in bonds)
+
+
+def _bonds_text(bonds: Bonds | None) -> str:
+    """``label_bonds`` as the runner writes them, ``[[0, 1], …]``, or ``not recorded``."""
+    if bonds is None:
+        return "not recorded"
+    return str([list(pair) for pair in bonds])
+
+
+def groups(records: Iterable[Mapping[str, Any]]) -> dict[GroupKey, list[Mapping[str, Any]]]:
+    """
+    ``{(dataset, label_bonds): lines}``, in the order first seen.
+
+    One group per dataset and label (:func:`label_bonds`): the unit of the
+    fingerprint check, of the tables and of the Holm family.
+    """
+    out: dict[GroupKey, list[Mapping[str, Any]]] = {}
+    for r in records:
+        out.setdefault((r["dataset"], label_bonds(r)), []).append(r)
+    return out
+
+
+def _check_one_fingerprint(
+    dataset: str, records: Sequence[Mapping[str, Any]], bonds: Bonds | None = None
+) -> None:
     """
     Refuse ``records`` of ``dataset`` unless they all carry the same ``data_sha256``.
 
-    The folds, arm B's row of each γ/Ω and the Holm family are keyed by the
-    dataset's name, so lines of other data under that name, e.g. two
-    positive-control runs of different geometries (another label) or seeds,
-    would be paired by fold index across data.  Every line without the field
-    counts as one more fingerprint, ``not recorded``, so it is not merged
-    with lines that have one.
+    ``records`` are one group of :func:`groups`, ``bonds`` its
+    ``label_bonds``.  The folds, arm B's row of each γ/Ω and the Holm family
+    are keyed by the group, so lines of other data in it, e.g. two
+    positive-control runs of one geometry with different seeds, would be
+    paired by fold index across data.  Every line without the field counts
+    as one more fingerprint, ``not recorded``, so it is not merged with
+    lines that have one.
     """
     counts = data_fingerprints(records)
     if len(counts) > 1:
         found = ", ".join(
             f"{'not recorded' if sha is None else sha} ({n} lines)" for sha, n in counts.items()
         )
+        label = "" if bonds is None else f" (label_bonds {_bonds_text(bonds)})"
         raise ValueError(
-            f"dataset {dataset!r} has lines of {len(counts)} data fingerprints "
+            f"dataset {dataset!r}{label} has lines of {len(counts)} data fingerprints "
             f"(data_sha256): {found}.  Its folds and Holm family would pair lines of "
             "different data; summarise each run's lines on their own."
         )
@@ -362,11 +423,12 @@ def comparisons(
     rows: Mapping[Key, Mapping[int, Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
     """
-    Every A − B and arm − baseline comparison of one dataset, Holm-adjusted as one family.
+    Every A − B and arm − baseline comparison of one group, Holm-adjusted as one family.
 
-    The family spans every geometry of the dataset.  Arm A of each geometry
-    is compared with the one B row of its γ/Ω, and B, C and D, which have no
-    geometry, are compared with the baselines once.
+    ``rows`` are the :func:`_rows` of one group of :func:`groups`, one
+    dataset and label.  The family spans every geometry of the group.  Arm A
+    of each geometry is compared with the one B row of its γ/Ω, and B, C and
+    D, which have no geometry, are compared with the baselines once.
     """
     out: list[dict[str, Any]] = []
     for key in sorted(rows, key=_sort):
@@ -547,24 +609,34 @@ def summarise(
     """
     The Markdown tables of every dataset in ``records``; ``long`` adds one row per test.
 
-    A dataset with arm A in several geometries gets a ``geometry`` column in
+    One section per group of :func:`groups`, ``(dataset, label_bonds)``, in
+    the order first seen, each its own Holm family.  Its heading is the
+    dataset's name, followed by ``, label_bonds [[j, k], …]`` (or
+    ``, label_bonds not recorded``) when the dataset has more than one group.
+    A group with arm A in several geometries gets a ``geometry`` column in
     its scores, and its grid and mechanism tables once per geometry; with one
     geometry the output is that of a file from before ``--geometry``.
 
     Raises
     ------
     ValueError
-        If the lines of one dataset carry more than one ``data_sha256``
-        (a line without it counting as one more), naming the dataset and
-        the fingerprints; nothing is printed then.
+        If the lines of one group carry more than one ``data_sha256``
+        (a line without it counting as one more), naming the dataset, its
+        label bonds and the fingerprints; nothing is printed then.
     """
-    by_dataset: dict[str, list[Mapping[str, Any]]] = {}
-    for r in records:
-        by_dataset.setdefault(r["dataset"], []).append(r)
-    for dataset, recs in by_dataset.items():
-        _check_one_fingerprint(dataset, recs)
+    by_group = groups(records)
+    for (dataset, bonds), recs in by_group.items():
+        _check_one_fingerprint(dataset, recs, bonds)
+    labels_per_dataset: dict[str, int] = {}
+    for dataset, _ in by_group:
+        labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1
     sections: list[str] = []
-    for dataset, recs in by_dataset.items():
+    for (dataset, bonds), recs in by_group.items():
+        heading = (
+            dataset
+            if labels_per_dataset[dataset] == 1
+            else f"{dataset}, label_bonds {_bonds_text(bonds)}"
+        )
         rows = _rows(recs)
         family = comparisons(rows)
         n_folds = {len(f) for f in rows.values()}
@@ -577,7 +649,7 @@ def summarise(
         )
         m = len(family)
         sections += [
-            f"## {dataset}",
+            f"## {heading}",
             "",
             (
                 f"Folds per row: {sorted(n_folds)}.  Holm family: {m} comparisons at "

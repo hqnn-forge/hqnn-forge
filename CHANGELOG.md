@@ -476,6 +476,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fingerprints are those from before. Every line records `label_bonds` (`null` for a UCI
   dataset). A run with `positive-control`, `--quick` included, takes one geometry and refuses
   several before any dataset is loaded (#738, #740)
+- A run of `examples/benchmark_rydberg_features.py` with `positive-control` and several
+  geometries runs the control once per geometry (`labels_of`, `geometry_settings`): the same
+  `data_seed` and inputs, each label over its geometry's bonds, with its own folds and its own
+  arms B, C and D, and the lines of a run of that geometry alone apart from `settings`, which
+  is the run's. The refusal of #738 is lifted, a single-geometry run writes the same lines as
+  before, a UCI dataset still computes arm B once, and the printed summary keeps one row per
+  label (#741, #750)
 - A results page, `docs/results/rydberg-geometries-benchmark.md`: the run of #502 repeated on
   the chain, the ring and the `2 × 2` grid, same folds and seeds, raw output xz-compressed as
   `docs/results/rydberg_features_geometries_*.jsonl.xz` (Iranian Churn in one run, the positive
@@ -646,6 +653,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint saved with such a value no longer loads as is; `load_checkpoint` names the fix,
   `load_checkpoint(path, dropout_p=0.0)`. `ClassicalBaseline` now words its `dropout_p` error
   the same way (#651)
+- `examples/summarise_rydberg_benchmark.py` groups lines by `(dataset, label_bonds)` (`groups`,
+  `label_bonds`), with one section and one Holm family per group, and checks the data
+  fingerprint per group. Positive-control lines of several labels read together, such as the
+  chain, ring and grid control files of #737, are summarised one label after the other, each
+  as on its own under a heading that adds its `label_bonds`, where they used to be refused. A
+  line without `label_bonds` (a UCI dataset, or a control written before #738) is keyed `None`;
+  a dataset of one group prints exactly what it printed before (#741, #750)
 
 ### Fixed
 - `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same
