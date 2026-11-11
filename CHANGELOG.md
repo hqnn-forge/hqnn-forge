@@ -482,6 +482,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control once per geometry). On Iranian Churn the ring and the grid gave no gain either and
   lost more than the chain, descriptively: in one Holm family of 526 per dataset, 13 folds
   cannot reach α (#746). The chain lines reproduce #502's (#737, #745)
+- `PCANormalizer.eigenvalue_gaps_`: the gaps `(λ_i − λ_{i+1}) / λ_0` among the retained
+  eigenvalues and at the cutoff that `fit` checks for degeneracy, exactly those below
+  `EIGENVALUE_GAP_WARN` raising its warning. Every line of `examples/benchmark_rydberg_features.py`
+  records them as `pca` (`relative_gaps`, `min_relative_gap`, `gap_threshold`, `degenerate`),
+  for the fold's fit and, under `tuning`, for each tuning fold's, and its summary counts per row
+  the folds with a degenerate fit (`deg`) and with a degenerate tuning fit (`t-deg`) (#525, #748)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor

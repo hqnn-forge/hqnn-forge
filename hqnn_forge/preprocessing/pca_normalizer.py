@@ -58,9 +58,9 @@ class PCANormalizer:
     """
     Fit/apply PCA + per-feature standardisation without scikit-learn.
 
-    The fitted arrays (``mean_``, ``components_``, ``explained_variance_`` and
-    ``std_``) are set by ``fit`` and absent until then, as in scikit-learn;
-    ``is_fitted_`` exists from construction.
+    The fitted arrays (``mean_``, ``components_``, ``explained_variance_``,
+    ``eigenvalue_gaps_`` and ``std_``) are set by ``fit`` and absent until
+    then, as in scikit-learn; ``is_fitted_`` exists from construction.
 
     Parameters
     ----------
@@ -96,6 +96,16 @@ class PCANormalizer:
         ``u_based_decision=False``, reimplemented here rather than depended on.
     explained_variance_ : np.ndarray, shape (n_components,)
         Eigenvalues corresponding to retained components.
+    eigenvalue_gaps_ : np.ndarray, shape (min(n_components, n_features - 1),)
+        The gaps ``fit`` checks for degeneracy, relative to the largest
+        eigenvalue: with ``λ_0 ≥ λ_1 ≥ …`` the eigenvalues of the covariance,
+        entry ``i`` is ``(λ_i − λ_{i+1}) / λ_0`` (dimensionless; ``≥ 0``, since
+        the eigenvalues are sorted).  Entries ``0 … n_components − 2`` are the gaps among the
+        retained components; when ``n_components < n_features`` the last entry,
+        ``i = n_components − 1``, is the gap at the cutoff to the first excluded
+        eigenvalue, and with every feature kept there is none.  ``fit`` warns
+        exactly when an entry is below ``EIGENVALUE_GAP_WARN``, so a caller can
+        record the degeneracy from this array instead of from the warning.
     std_ : np.ndarray, shape (n_components,)
         Per-component standard deviation (computed on training projections).
     is_fitted_ : bool
@@ -128,6 +138,7 @@ class PCANormalizer:
     mean_: npt.NDArray[np.float64]
     components_: npt.NDArray[np.float64]
     explained_variance_: npt.NDArray[np.float64]
+    eigenvalue_gaps_: npt.NDArray[np.float64]
     std_: npt.NDArray[np.float64]
 
     def __init__(
@@ -315,34 +326,37 @@ class PCANormalizer:
         # not an error: the fit is still a valid PCA, it just is not the same
         # one on every platform, which only matters to callers who rely on the
         # components_ contract.
+        # The gaps are kept as eigenvalue_gaps_, so a caller can record them
+        # without parsing the warning (#525).  kept_and_next has at least two
+        # entries: n_features >= 2 and n_components >= 1.
         kept_and_next = eigenvalues[: n_components + 1]
-        if kept_and_next.shape[0] > 1:
-            gaps = (kept_and_next[:-1] - kept_and_next[1:]) / eigenvalues[0]
-            degenerate = np.flatnonzero(gaps < EIGENVALUE_GAP_WARN)
-            if degenerate.size:
-                first = int(degenerate[0])
-                where = (
-                    "at the n_components cutoff, so which component is retained is arbitrary"
-                    if first == n_components - 1
-                    else "among the retained components"
-                )
-                remedy = (
-                    f"Reduce n_components to {first}, or accept"
-                    if first > 0
-                    else "No smaller n_components avoids this; accept"
-                )
-                warnings.warn(
-                    f"eigenvalues {first} and {first + 1} are degenerate "
-                    f"(gap {gaps[first]:.1e} of the largest eigenvalue < "
-                    f"{EIGENVALUE_GAP_WARN:.0e}) {where}: components_ and "
-                    f"transform are not reproducible across platforms for this "
-                    f"data.  {remedy} a basis that depends on the LAPACK build.",
-                    RuntimeWarning,
-                    stacklevel=stacklevel,
-                )
+        gaps = (kept_and_next[:-1] - kept_and_next[1:]) / eigenvalues[0]
+        degenerate = np.flatnonzero(gaps < EIGENVALUE_GAP_WARN)
+        if degenerate.size:
+            first = int(degenerate[0])
+            where = (
+                "at the n_components cutoff, so which component is retained is arbitrary"
+                if first == n_components - 1
+                else "among the retained components"
+            )
+            remedy = (
+                f"Reduce n_components to {first}, or accept"
+                if first > 0
+                else "No smaller n_components avoids this; accept"
+            )
+            warnings.warn(
+                f"eigenvalues {first} and {first + 1} are degenerate "
+                f"(gap {gaps[first]:.1e} of the largest eigenvalue < "
+                f"{EIGENVALUE_GAP_WARN:.0e}) {where}: components_ and "
+                f"transform are not reproducible across platforms for this "
+                f"data.  {remedy} a basis that depends on the LAPACK build.",
+                RuntimeWarning,
+                stacklevel=stacklevel,
+            )
 
         self.mean_ = mean
         self.explained_variance_ = kept
+        self.eigenvalue_gaps_ = gaps
         # rows = components (shape: n_components × n_features)
         components = eigenvectors[:, :n_components].T
 

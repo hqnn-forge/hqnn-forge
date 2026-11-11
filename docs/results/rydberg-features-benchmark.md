@@ -717,6 +717,11 @@ pipeline to detect anything.
   Iranian Churn) is one side winning all 13 folds, and the next possible p-value, `4.88e-4`
   (12 of 13 folds, the lost one smallest), was not significant after Holm anywhere (adjusted
   0.0542 at best).
+- **Which component is on which atom.** A PCA fit with two equal eigenvalues among its four
+  components, or at the cutoff, leaves the assignment of components to atoms, and with it
+  A − B, to the LAPACK build. The lines of this run predate the runner's record of that
+  (`pca`, #525). Refitted for #525 from the recorded settings and seeds, none of the
+  folds' fits and none of their tuning folds' fits is degenerate.
 - **Not tried:** pair correlations as features, a second geometry (since run on a ring and a
   `2 × 2` grid in [a companion note](rydberg-geometries-benchmark.md), #737),
   time-dependent pulses, differentiable pulse training (#420), device constraints, shots,
