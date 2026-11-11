@@ -3722,24 +3722,38 @@ class TestRecordedConstantColumns:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        Raw column 0 is ``1e9`` or its float64 neighbour on every row except
-        one row ``r`` of the training part, where it is ``1e9 + 1e3``.  A
-        set of fitting rows that holds ``r`` scales it, one without ``r``
-        only centres it: so the outer fold and every tuning fold fitted on
-        ``r`` record ``[]``, and the one tuning fold that holds ``r`` out
-        records ``[0]``.  Which fold that is follows from the fitting rows
-        :func:`make_split` was actually called with, not from a second
-        computation of the folds: :func:`inner_splits` is made to build its
-        folds from another seed than the run's ``tune_seed``, so a second
-        ``stratified_kfold`` call with that seed would name another fold.
+        Raw column ``j`` (``j = 0 … inner_folds − 1``) is ``1e9`` or its
+        float64 neighbour on every row except one row ``r_j`` of the
+        training part, held out by tuning fold ``j``, where it is
+        ``1e9 + 1e3``.  A set of fitting rows that holds ``r_j`` scales
+        column ``j``, one without ``r_j`` only centres it: so the outer fold,
+        fitted on every ``r_j``, records ``[]``, and tuning fold ``j``, fitted
+        on every ``r_c`` but its own, records ``[j]``, which a list taken
+        from another fold would not.  Which fold holds which row out follows
+        from the fitting rows :func:`make_split` was actually called with,
+        not from a second computation of the folds: :func:`inner_splits` is
+        made to build its folds from another seed than the run's
+        ``tune_seed``, so a second ``stratified_kfold`` call with that seed
+        would name other folds.
         """
         settings = _replace(QUICK, arms=("C",), max_epochs=1, inner_folds=3)
         X, y, _ = bench.load_dataset("positive-control", settings)
         fold = _fold_by_hand(X, y, settings, 0)
         train_part = fold.train_part
-        r = int(train_part[0])
-        X[:, 0] = 1e9 + np.where(np.arange(X.shape[0]) % 2 == 0, 0.0, np.spacing(1e9))
-        X[r, 0] = 1e9 + 1e3
+        shifted_seed = fold.seeds["tune_seed"] + 1
+        # One row held out by each fold of the shifted seed; checked below
+        # against the fitting rows the run used.
+        marks = [
+            int(train_part[held_out][0])
+            for _, held_out in stratified_kfold(
+                y[train_part], settings.inner_folds, random_state=shifted_seed
+            )
+        ]
+        assert X.shape[1] >= settings.inner_folds
+        noise = np.where(np.arange(X.shape[0]) % 2 == 0, 0.0, np.spacing(1e9))
+        for j, r in enumerate(marks):
+            X[:, j] = 1e9 + noise
+            X[r, j] = 1e9 + 1e3
         original_inner_splits = bench.inner_splits
 
         def shifted_inner_splits(
@@ -3755,13 +3769,17 @@ class TestRecordedConstantColumns:
         (outer_fit, _), *tuning = made
         np.testing.assert_array_equal(outer_fit, train_part)
         assert len(tuning) == settings.inner_folds
-        expected = [[] if r in fit else [0] for fit, _ in tuning]
-        assert expected.count([0]) == 1  # the fold that holds r out
-        # The premise: folds rebuilt with the run's own tune_seed hold r out elsewhere.
+
+        def only_centred(fit: np.ndarray) -> list[int]:
+            return [j for j, r in enumerate(marks) if r not in fit]
+
+        expected = [only_centred(fit) for fit, _ in tuning]
+        assert expected == [[j] for j in range(settings.inner_folds)]
+        # The premise: folds rebuilt with the run's own tune_seed give other lists.
         rebuilt = stratified_kfold(
             y[train_part], settings.inner_folds, random_state=fold.seeds["tune_seed"]
         )
-        assert [[] if r in train_part[fit] else [0] for fit, _ in rebuilt] != expected
+        assert [only_centred(train_part[fit]) for fit, _ in rebuilt] != expected
         assert records
         for record in records:
             assert record["raw_constant_columns"] == []
