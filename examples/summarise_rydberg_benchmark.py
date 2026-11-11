@@ -466,7 +466,7 @@ def degeneracy_line(records: Iterable[Mapping[str, Any]]) -> str:
     ``Degenerate PCA fits (#525): fold fit in d of r folds, a tuning fit in
     d of r folds.``, each part ``not recorded`` when no line records it, and
     with ``(m folds not recorded)`` after it when ``m`` of the group's folds
-    have no line that does.
+    have no line that does (``(1 fold not recorded)`` for one).
     """
     counts = degenerate_folds(records)
 
@@ -476,7 +476,9 @@ def degeneracy_line(records: Iterable[Mapping[str, Any]]) -> str:
         degenerate, recorded = found
         text = f"in {degenerate} of {recorded} folds"
         missing = counts["folds"] - recorded
-        return text + (f" ({missing} folds not recorded)" if missing else "")
+        if not missing:
+            return text
+        return text + f" ({missing} {'fold' if missing == 1 else 'folds'} not recorded)"
 
     return (
         f"Degenerate PCA fits (#525): fold fit {part(counts['fold'])}, "

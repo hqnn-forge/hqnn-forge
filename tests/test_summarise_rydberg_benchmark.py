@@ -691,14 +691,20 @@ def test_one_degenerate_fold_is_counted_once_not_once_per_line() -> None:
     )
 
 
-def test_a_fold_is_degenerate_if_any_of_its_lines_says_so() -> None:
-    """Fold 5's fit flagged on its arm C/mlp line alone still makes one degenerate fold."""
-    degenerate, _ = _pca_records()
+@pytest.mark.parametrize("position", range(6))
+def test_a_fold_is_degenerate_if_any_of_its_lines_says_so(position: int) -> None:
+    """
+    Fold 5's own fit, and its second tuning fit, flagged on one of its six lines alone, first,
+    last or in between, still make one degenerate fold each: neither the first nor the last
+    line of a fold decides for it.
+    """
+    degenerate, regular = _pca_records()
     lines = _with_pca(degenerate_fold=None, degenerate_tuning=None)
-    for r in lines:
-        if r["fold"] == 5 and (r["arm"], r["head"]) == ("C", "mlp"):
-            r["pca"] = degenerate
-    assert summary.degenerate_folds(lines)["fold"] == (1, 13)
+    fold_5 = [r for r in lines if r["fold"] == 5]
+    assert len(fold_5) == 6
+    fold_5[position]["pca"] = degenerate
+    fold_5[position]["tuning"] = {"pca": [regular, degenerate]}
+    assert summary.degenerate_folds(lines) == {"folds": 13, "fold": (1, 13), "tuning": (1, 13)}
 
 
 def test_no_degenerate_fold_counts_zero() -> None:
@@ -731,6 +737,15 @@ def test_lines_before_525_are_not_recorded_and_partial_records_say_so() -> None:
     assert (
         "Degenerate PCA fits (#525): fold fit in 1 of 10 folds (3 folds not recorded), "
         "a tuning fit not recorded." in summary.summarise(mixed, permutations=99)
+    )
+    # Only fold 12 predates the field: one fold, in the singular.
+    one_old = [
+        r if r["fold"] < 12 else {k: v for k, v in r.items() if k not in ("pca", "tuning")}
+        for r in _with_pca(degenerate_fold=None, degenerate_tuning=None)
+    ]
+    assert summary.degeneracy_line(one_old) == (
+        "Degenerate PCA fits (#525): fold fit in 0 of 12 folds (1 fold not recorded), "
+        "a tuning fit in 0 of 12 folds (1 fold not recorded)."
     )
 
 
