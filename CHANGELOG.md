@@ -495,6 +495,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records them as `pca` (`relative_gaps`, `min_relative_gap`, `gap_threshold`, `degenerate`),
   for the fold's fit and, under `tuning`, for each tuning fold's, and its summary counts per row
   the folds with a degenerate fit (`deg`) and with a degenerate tuning fit (`t-deg`) (#525, #748)
+- `hqnn_forge.noise.erasure_kept_fraction(model, X, p, *, position="all")`: atom loss that
+  imaging detects (an erasure), measured post hoc. Post-selecting on no loss leaves the clean
+  state, so the kept samples' predictions are the clean model's, and the function returns the
+  fraction kept, `(1 − p)^k` per row of `X`, with `k` the number of sites `qml.noise.insert`
+  places on the row's circuit (`n_qubits` at `"end"`, the sum of the gate widths at `"all"`,
+  `2·#CZ + 3·#CCZ` at `"cz"`). With `N` shots per row that is `N (1 − p)^k` effective shots on
+  average (#702, #751)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
