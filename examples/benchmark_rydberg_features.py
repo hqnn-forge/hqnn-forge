@@ -151,7 +151,9 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   A line has its B line.  Nor does it depend on the geometry: each feature
   is a function of its own atom's input only, wherever the atom sits, so B
   is computed at the first geometry and ``V/Ω`` of the run and reused for
-  every other (``reused_from_geometry``), never recomputed per geometry.
+  every other (``reused_from_geometry``), never recomputed per geometry, as
+  long as the label is the same: the positive control's follows the
+  geometry, so B is trained per label there (below).
 
 Geometry
 --------
@@ -196,13 +198,15 @@ run's geometry, :func:`control_bonds`, so it asks for exactly the products
 the interactions of that geometry form.  The chain's bonds are
 ``(i, i + 1)`` and its label is the one from before ``--geometry``,
 sample by sample, so chain results stay comparable with earlier ones; the
-inputs do not depend on the geometry, only the label does.  A run with
-``positive-control`` therefore takes **one geometry**: a ring and a chain
-would label the same inputs differently, and arms B, C and D, which are
-shared across the geometries of a run, would have to be trained once per
-label.  A run of several geometries with the control is refused; run the
-control once per geometry, and the UCI datasets, whose labels do not
-depend on it, with all of them.
+inputs do not depend on the geometry, only the label does.  **A run of
+several geometries runs the control once per geometry** (#741): a ring and
+a chain label the same inputs differently, and the outer folds are
+stratified on the label, so every arm, B, C and D included, is trained per
+label.  Each label is run as a run of that one geometry would run it (same
+``data_seed`` and inputs, same seeds, its own folds) and writes the same
+lines but for ``settings``, which is the run's; ``label_bonds`` tells the
+labels apart.  B is shared across the geometries of a UCI dataset only,
+whose label does not depend on the geometry.
 
 Units: ħ = 1, angular frequencies (Ω, γ, ``C6/r⁶``) in rad/µs, lengths in
 µm, times in µs; inputs and features are dimensionless.
@@ -445,8 +449,8 @@ one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
 ``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
-``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.  As it
-runs the positive control, ``--geometry`` takes one geometry there.
+``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.  With
+several geometries it runs the control once per geometry, as above.
 """
 
 from __future__ import annotations
@@ -1099,7 +1103,9 @@ def load_dataset(
     ``data_seed`` is the seed the positive control was drawn with, derived
     from ``settings.random_state``, and ``None`` for a UCI dataset, which is
     read from ``path`` as its loader documents.  The control's label is over
-    :func:`control_bonds` of ``settings``, which refuses several geometries.
+    :func:`control_bonds` of ``settings``, the bonds of its first geometry;
+    with several geometries, :func:`run` draws the other labels itself from
+    ``data_seed``.
     ``settings.drop_duplicates`` reaches the Iranian Churn loader only.
     """
     if name == "positive-control":
@@ -1506,24 +1512,24 @@ def control_bonds(settings: Settings) -> list[tuple[int, int]]:
     """
     The bonds of the positive control's label in a run of ``settings``.
 
-    :func:`nearest_neighbour_bonds` of the run's one geometry (with
+    :func:`nearest_neighbour_bonds` of the run's first geometry (with
     ``settings.grid_cols`` for a grid): ``(i, i + 1)`` on the chain, whose
-    label is therefore the one from before ``--geometry`` existed.
-
-    Raises
-    ------
-    ValueError
-        With more than one geometry in ``settings.geometries``.  Each would
-        give the same inputs another label, while arms B, C and D are
-        trained once per run and dataset, on one label (#738).
+    label is therefore the one from before ``--geometry`` existed.  A run of
+    several geometries labels the control once per geometry, each over the
+    bonds of :func:`geometry_settings` of that geometry (:func:`run`).
     """
-    if len(settings.geometries) != 1:
-        raise ValueError(
-            "the positive control's label follows the geometry, so a run with "
-            f"positive-control takes one geometry; got {list(settings.geometries)}. "
-            "Run the control once per geometry."
-        )
     return nearest_neighbour_bonds(settings.n_atoms, settings.geometries[0], settings.grid_cols)
+
+
+def geometry_settings(settings: Settings, geometry: str) -> Settings:
+    """
+    ``settings`` of a run of ``geometry`` alone: the run with that one geometry.
+
+    ``grid_cols`` is kept for the grid and ``None`` otherwise, since it is
+    refused without the grid; every other field is that of ``settings``.
+    """
+    grid_cols = settings.grid_cols if geometry == "grid" else None
+    return dataclasses.replace(settings, geometries=(geometry,), grid_cols=grid_cols)
 
 
 def feature_map(
@@ -2951,11 +2957,45 @@ def _degenerate_folds(rows: Sequence[Mapping[str, Any]], tuning: bool, width: in
     return format(str(count) if recorded else "-", f">{width}s")
 
 
+def _label_key(record: Mapping[str, Any]) -> tuple[tuple[int, int], ...] | None:
+    """``label_bonds`` of a line as a hashable key; ``None`` without them."""
+    bonds = record.get("label_bonds")
+    return None if bonds is None else tuple((int(j), int(k)) for j, k in bonds)
+
+
+def label_geometry(record: Mapping[str, Any]) -> str | None:
+    """
+    The geometry of the run's ``settings`` whose bonds are the line's ``label_bonds``.
+
+    As one word, as :func:`geometry_label` writes it: the
+    :func:`nearest_neighbour_bonds` (with ``grid_cols`` for a grid) of each geometry of
+    the line's ``settings``, compared with ``label_bonds``.  ``None`` for a
+    line without ``label_bonds`` or ``settings``, or with bonds of none.
+    """
+    bonds, settings = _label_key(record), record.get("settings")
+    if bonds is None or settings is None:
+        return None
+    n_atoms, grid_cols = settings["n_atoms"], settings.get("grid_cols")
+    for geometry in settings.get("geometries", ["chain"]):
+        cols = grid_cols if geometry == "grid" else None
+        if tuple(nearest_neighbour_bonds(n_atoms, geometry, cols)) == bonds:
+            if geometry == "grid":
+                rows, cols = grid_shape(n_atoms, cols)
+                return f"grid-{rows}x{cols}"
+            return str(geometry)
+    return None
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     """
-    Mean and fold spread of MCC and PR-AUC per dataset, geometry, arm, head and grid point.
+    Mean and fold spread of MCC and PR-AUC per dataset, label, geometry, arm, head and grid point.
 
     The geometry is :func:`geometry_label`, ``-`` for the arms without one.
+    The label is ``label_bonds``: the positive control of a run of several
+    geometries has one per geometry, each with its own rows, and there a
+    row of an arm without a geometry (C, D, ``D-hybrid``) shows its label's
+    geometry in parentheses, ``(ring)`` (:func:`label_geometry`).  A dataset
+    of one label prints as before #741.
     ``feat s`` and ``fit s`` are the mean ``feature_seconds`` and
     ``train_seconds`` of the lines that were computed: a reused arm B line
     (``reused_from_v_over_omega`` not ``null``) has both at 0 and is left
@@ -2972,11 +3012,19 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     the platform.  A line without the field is not counted, and ``-`` means
     no line of the row records it.
     """
+    labels: dict[str, set[Any]] = {}
+    for record in records:
+        labels.setdefault(record["dataset"], set()).add(_label_key(record))
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for record in records:
+        geometry = geometry_label(record)
+        if geometry is None and len(labels[record["dataset"]]) > 1:
+            of_label = label_geometry(record)
+            geometry = None if of_label is None else f"({of_label})"
         key = (
             record["dataset"],
-            geometry_label(record),
+            _label_key(record),
+            geometry,
             record["v_over_omega"],
             record["gamma_over_omega"],
             record["arm"],
@@ -2989,7 +3037,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
         f"{'feat s':>7s} {'fit s':>6s}  n"
     )
     lines = [header]
-    for (dataset, geometry, v, gamma, arm, head), rows in groups.items():
+    for (dataset, _, geometry, v, gamma, arm, head), rows in groups.items():
         computed = [r for r in rows if r.get("reused_from_v_over_omega") is None]
         mcc = np.array([r["mcc"] for r in rows], dtype=np.float64)
         spread = mcc.std(ddof=1) if len(rows) > 1 else 0.0
@@ -3090,6 +3138,54 @@ def check_writable(out: str | os.PathLike[str]) -> None:
         raise ValueError(f"out {str(path)!r} cannot be written: {reason}.") from error
 
 
+Label = tuple[IntArray, Settings, list[tuple[int, int]] | None]
+
+
+def labels_of(
+    name: str, X: FloatArray, y: IntArray, data_seed: int | None, settings: Settings
+) -> list[Label]:
+    """
+    The labels :func:`run` trains a dataset on: ``(y, settings, label_bonds)`` per label.
+
+    A UCI dataset, or any entry without a ``data_seed``, has one label, its
+    ``y``, run with ``settings`` and no bonds; its arm B is computed once
+    across the geometries (:func:`run_dataset`).  ``positive-control`` with
+    a ``data_seed`` is the control :func:`load_dataset` draws for
+    ``settings``.  With one geometry its label is ``y``, over
+    :func:`control_bonds`, as before #741.  With several it has one label
+    per geometry ``g``, in ``settings.geometries`` order: the label of
+    :func:`positive_control` at ``data_seed`` over :func:`control_bonds` of
+    ``geometry_settings(settings, g)``, run with those settings, so each
+    label is run as a run of ``g`` alone would run it.  The inputs of
+    :func:`positive_control` do not depend on the bonds, so all labels share
+    ``X``.
+
+    Raises
+    ------
+    ValueError
+        With several geometries, if ``X`` is not the control's inputs at
+        ``data_seed`` or ``y`` not its label over the first geometry: the
+        other labels are drawn from ``data_seed``, and would not belong to
+        this ``X``.
+    """
+    if name != "positive-control" or data_seed is None:
+        return [(y, settings, None)]
+    if len(settings.geometries) == 1:
+        return [(y, settings, control_bonds(settings))]
+    labels: list[Label] = []
+    for geometry in settings.geometries:
+        alone = geometry_settings(settings, geometry)
+        bonds = control_bonds(alone)
+        control = positive_control(settings.n_atoms, settings.n_samples, data_seed, bonds=bonds)
+        if not labels and not (np.array_equal(X, control.X) and np.array_equal(y, control.y)):
+            raise ValueError(
+                f"{name}: with several geometries the labels are drawn from data_seed="
+                f"{data_seed}, so (X, y) must be load_dataset's control for these settings."
+            )
+        labels.append((control.y, alone, bonds))
+    return labels
+
+
 def run(
     datasets: Mapping[str, tuple[FloatArray, IntArray, int | None]],
     settings: Settings,
@@ -3104,10 +3200,12 @@ def run(
     ----------
     datasets:
         Name → ``(X, y, data_seed)``, as :func:`load_dataset` returns them.
-        ``positive-control`` with a ``data_seed`` is the control
-        :func:`load_dataset` draws for ``settings``, and its lines record
-        :func:`control_bonds` of ``settings`` as ``label_bonds``, which
-        refuses a run of several geometries.
+        Each dataset is run once per label of :func:`labels_of`:
+        ``positive-control`` with a ``data_seed`` once per geometry, every
+        other dataset once.  A label's lines record its bonds as
+        ``label_bonds`` and the run's ``settings``, so a label of a run of
+        several geometries writes the lines of a run of its geometry alone
+        but for ``settings``.
     settings:
         The run's settings.
     out:
@@ -3125,24 +3223,34 @@ def run(
         The records as written, before the JSON mapping.
     """
     check_writable(out)
+    # Every label before the first record, so an entry labels_of refuses leaves `out` as it is.
+    plan = [
+        (name, X, data_seed, labels_of(name, X, y, data_seed, settings))
+        for name, (X, y, data_seed) in datasets.items()
+    ]
     cache = FeatureCache(cache_dir)
+    recorded = settings.as_dict()
     records: list[dict[str, Any]] = []
     with contextlib.ExitStack() as stack:
         fh: TextIO | None = None
-        for name, (X, y, data_seed) in datasets.items():
-            bonds = (
-                control_bonds(settings)
-                if name == "positive-control" and data_seed is not None
-                else None
-            )
-            for record in run_dataset(
-                name, X, y, settings, cache, data_seed=data_seed, label_bonds=bonds
-            ):
-                if fh is None:
-                    fh = stack.enter_context(open(out, "w", encoding="utf-8"))
-                records.append(record)
-                fh.write(to_json_line(record) + "\n")
-                fh.flush()
+        for name, X, data_seed, labels in plan:
+            for labels_y, label_settings, bonds in labels:
+                for record in run_dataset(
+                    name,
+                    X,
+                    labels_y,
+                    label_settings,
+                    cache,
+                    data_seed=data_seed,
+                    label_bonds=bonds,
+                ):
+                    if label_settings is not settings:
+                        record = {**record, "settings": recorded}
+                    if fh is None:
+                        fh = stack.enter_context(open(out, "w", encoding="utf-8"))
+                    records.append(record)
+                    fh.write(to_json_line(record) + "\n")
+                    fh.flush()
     return records
 
 
@@ -3236,8 +3344,9 @@ def _parser() -> argparse.ArgumentParser:
         default=list(default.geometries),
         help=(
             "atom arrays to run, each over the whole grid, with V/Omega the nearest-neighbour "
-            "interaction in each; arm B is computed once for all of them. The positive "
-            "control's label follows the geometry, so a run with it (and --quick) takes one"
+            "interaction in each; arm B is computed once for all of them on a UCI dataset. The "
+            "positive control's label follows the geometry, so it (and --quick) runs once per "
+            "geometry"
         ),
     )
     parser.add_argument(
@@ -3392,8 +3501,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
     ``--max-separation-rows``, ``--separation-seed``, ``--geometry`` and
     ``--grid-cols`` still apply.  With ``positive-control`` among the
-    datasets, several geometries are refused (:func:`control_bonds`) before
-    any dataset is loaded.
+    datasets and several geometries, the control is run once per geometry
+    (:func:`labels_of`).
 
     ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
     other option, ``--quick`` and ``--out`` included, is ignored.
@@ -3498,7 +3607,6 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         names = list(dict.fromkeys(args.dataset))
     if "positive-control" in names:
         check_positive_control_atoms(settings.n_atoms)
-        control_bonds(settings)
     check_writable(args.out)
     datasets = {
         name: load_dataset(name, settings, path=args.data_path, download=args.download)

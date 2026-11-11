@@ -22,8 +22,10 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
       `--geometry chain ring grid` in one run. Arm A runs per geometry. Arm B is computed once
       and recorded per geometry with `reused_from_geometry`. C and D have no geometry.
     - `rydberg_features_geometries_control_{chain,ring,grid}.jsonl.xz`: the positive control,
-      once per geometry. Since #738 a run with the control takes one geometry, because its label
-      follows the geometry's bonds.
+      once per geometry. When they were run (#738), a run with the control took one geometry,
+      because its label follows the geometry's bonds. Since #741 one run with
+      `--geometry chain ring grid` runs the control once per geometry and writes the lines of the
+      three runs, apart from `settings` and the timings.
 - **Reproduce:**
 
     ```bash
@@ -47,9 +49,11 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
     ```
 
     Summarise each file on its own. The three control files hold three different labels under
-    one dataset name, and the summariser refuses them read together (#742). Every table below
-    is that output, with its headings moved down a level and its separation measures moved to
-    *Mechanism*.
+    one dataset name. The summariser refused them read together when this note was written
+    (#742); since #741 it prints them as three sections, one per `label_bonds`, each its own
+    family of 190 and identical to that file's summary apart from its heading. Every table
+    below is that output, with its headings moved down a level and its separation measures
+    moved to *Mechanism*.
 - **The chain reproduces #502.** Every chain line of the two new runs equals the line of #502's
   file for the same arm, head, grid point and fold in `mcc`, `pr_auc` and `data_sha256`: 1,521
   of 1,521 on each dataset. The chain control, summarised alone, prints #502's positive-control
@@ -1223,7 +1227,8 @@ datasets, fold intervals). In addition:
 - **The controls are three tasks.** Each geometry's control has its own label, and so its own B,
   C and D rows and its own family of 190. The control's detection on the chain and its
   weaker results on the ring and the grid are about each geometry on its own task, not one task
-  across geometries. A multi-geometry control run is #741.
+  across geometries. Since #741 one run can hold all three, and each label still gets its
+  own B, C and D lines.
 - **One input order.** Input `i` is the `i`-th principal component. Which components become
   neighbours is fixed by that order, and other assignments, beyond the ring/grid exchange of
   inputs 2 and 3, were not tried.
