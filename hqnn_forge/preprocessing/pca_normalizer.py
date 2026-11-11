@@ -58,9 +58,9 @@ class PCANormalizer:
     """
     Fit/apply PCA + per-feature standardisation without scikit-learn.
 
-    The fitted arrays (``mean_``, ``components_``, ``explained_variance_`` and
-    ``std_``) are set by ``fit`` and absent until then, as in scikit-learn;
-    ``is_fitted_`` exists from construction.
+    The fitted arrays (``mean_``, ``components_``, ``explained_variance_``,
+    ``eigenvalue_gaps_`` and ``std_``) are set by ``fit`` and absent until
+    then, as in scikit-learn; ``is_fitted_`` exists from construction.
 
     Parameters
     ----------
