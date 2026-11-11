@@ -484,19 +484,36 @@ def test_each_dataset_may_have_its_own_fingerprint() -> None:
     assert text.endswith(summary.summarise(other, permutations=99))
 
 
+#: The line under the scores table of every committed results file (#747): their lines
+#: predate the runner's ``pca`` record (#525).
+NOT_RECORDED = "Degenerate PCA fits (#525): fold fit not recorded, a tuning fit not recorded."
+
+
+def _without_degeneracy(text: str, sections: int) -> str:
+    """
+    ``text`` with its ``sections`` :data:`NOT_RECORDED` lines removed, each with the blank line
+    after it: the output from before #747.  Each must sit right under a scores table.
+    """
+    block = f"|\n\n{NOT_RECORDED}\n\n### A against B"
+    assert text.count(NOT_RECORDED) == text.count(block) == sections
+    return text.replace(f"{NOT_RECORDED}\n\n", "")
+
+
 def test_the_committed_results_summarise_as_before() -> None:
     """
     The summary of the committed results, ``--long`` with 99 permutations, is byte for byte
-    that of ``main`` at 29c8931, before the fingerprint guard (#742): the SHA-256 below is that
-    of the script's output there.
+    that of ``main`` at 29c8931, before the fingerprint guard (#742), apart from the line of
+    #747 under each scores table, which says the PCA degeneracy is not recorded: the SHA-256
+    below is that of the script's output there.
     """
     records = summary.read_records(ROOT / "docs/results/rydberg_features_benchmark.jsonl.xz")
     assert {r["dataset"]: r["data_sha256"] for r in records}["positive-control"] == (
         CHAIN_CONTROL_SHA
     )
+    assert not any("pca" in r for r in records)
     text = summary.summarise(records, permutations=99, long=True)
     assert (
-        hashlib.sha256(text.encode()).hexdigest()
+        hashlib.sha256(_without_degeneracy(text, 2).encode()).hexdigest()
         == "171f37e71e738a6378621c86e241243d6d5f451610ba6cc83d5ebd19c818c315"
     )
 
@@ -556,15 +573,18 @@ def test_the_committed_geometry_results_summarise(
     """
     Each results file of the ring and grid run (#737) holds one data fingerprint per dataset
     (the guard of #742 refuses anything else), the label bonds of its geometry, A lines of
-    the stated geometries and 13 folds, and summarises without error to a fixed output.
+    the stated geometries and 13 folds, and summarises without error to a fixed output: the
+    output from before #747, with a line under the scores table that says the PCA degeneracy
+    is not recorded.
     """
     records = summary.read_records(ROOT / "docs/results" / name)
     found = {(r["dataset"], r["data_sha256"], repr(r.get("label_bonds"))) for r in records}
     assert found == {(d, sha, repr(bonds)) for d, (sha, bonds) in datasets.items()}
     assert {bench.geometry_label(r) for r in records if r["arm"] == "A"} == geometries
     assert {r["n_splits"] for r in records} == {13}
+    assert not any("pca" in r for r in records)
     text = summary.summarise(records, permutations=99, long=True)
-    assert hashlib.sha256(text.encode()).hexdigest() == digest
+    assert hashlib.sha256(_without_degeneracy(text, 1).encode()).hexdigest() == digest
 
 
 def test_the_three_committed_controls_read_together_are_three_families() -> None:
@@ -577,7 +597,7 @@ def test_the_three_committed_controls_read_together_are_three_families() -> None
     records = [
         r for name, *_ in controls for r in summary.read_records(ROOT / "docs/results" / name)
     ]
-    text = summary.summarise(records, permutations=99, long=True)
+    text = _without_degeneracy(summary.summarise(records, permutations=99, long=True), 3)
     sections = text.split("\n## positive-control, label_bonds ")
     assert sections[0].startswith("## positive-control, label_bonds ")
     sections[0] = sections[0].removeprefix("## positive-control, label_bonds ")
@@ -588,3 +608,151 @@ def test_the_three_committed_controls_read_together_are_three_families() -> None
         alone = "## positive-control" + section.removeprefix(str(bonds))
         assert hashlib.sha256(alone.encode()).hexdigest() == digest
     assert text.count("Holm family: 190 comparisons") == 3
+
+
+# ---------------------------------------------------------------------------
+# PCA degeneracy (#747)
+# ---------------------------------------------------------------------------
+
+
+def _pca_records() -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    ``(degenerate, regular)``: the runner's own ``pca`` record (``fit_inputs``) of two fits.
+
+    The degenerate fit is on columns 1 to 6 of the ``8 × 8`` Sylvester-Hadamard matrix: each
+    sums to 0 and has the same norm, and they are pairwise orthogonal, so after the runner's
+    standardisation the covariance is the identity, every eigenvalue is 1 and every relative
+    gap is 0.  The regular one is fold 0's training part of the default positive control,
+    which #748 found far from degenerate.
+    """
+    h = np.array([[1.0]])
+    for _ in range(3):
+        h = np.block([[h, h], [h, -h]])
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        _, degenerate = bench.fit_inputs(h[:, 1:7], np.arange(8), 4)
+    settings = bench.Settings()
+    X, y, _ = bench.load_dataset("positive-control", settings)
+    split_seed, _ = bench.fold_seeds(settings.random_state, "positive-control", 13)
+    train_part, _ = bench.stratified_kfold(y, 13, random_state=split_seed)[0]
+    _, regular = bench.fit_inputs(X, train_part, settings.n_atoms)
+    return degenerate, regular
+
+
+def test_the_pca_records_are_one_degenerate_and_one_regular_fit() -> None:
+    degenerate, regular = _pca_records()
+    assert degenerate["degenerate"] is True
+    assert degenerate["relative_gaps"] == pytest.approx([0.0] * 4, abs=1e-12)
+    assert regular["degenerate"] is False
+    assert regular["min_relative_gap"] > 1e-6
+
+
+def _with_pca(
+    degenerate_fold: int | None, degenerate_tuning: int | None, dataset: str = "toy"
+) -> list[dict[str, Any]]:
+    """
+    :func:`_records` (13 folds, 6 lines per fold) with ``pca`` and ``tuning["pca"]`` as the
+    runner writes them: every line of a fold carries the fold's fit and its two tuning folds'
+    fits.  Fold ``degenerate_fold`` has a degenerate fit of its own, fold
+    ``degenerate_tuning`` a degenerate second tuning fit; every other fit is regular.
+    """
+    degenerate, regular = _pca_records()
+    lines = []
+    for r in _records():
+        fold = r["fold"]
+        tuning = [regular, degenerate if fold == degenerate_tuning else regular]
+        lines.append(
+            {
+                **r,
+                "dataset": dataset,
+                "pca": degenerate if fold == degenerate_fold else regular,
+                "tuning": {"pca": tuning},
+            }
+        )
+    return lines
+
+
+def test_one_degenerate_fold_is_counted_once_not_once_per_line() -> None:
+    """
+    Fold 3's own fit and fold 7's second tuning fit are degenerate.  Each is on all six lines
+    of its fold, so a count of lines would give 6; of the 13 folds, one each is affected.
+    The line sits right under the scores table.
+    """
+    lines = _with_pca(degenerate_fold=3, degenerate_tuning=7)
+    assert summary.degenerate_folds(lines) == {"folds": 13, "fold": (1, 13), "tuning": (1, 13)}
+    text = summary.summarise(lines, permutations=99)
+    expected = (
+        "Degenerate PCA fits (#525): fold fit in 1 of 13 folds, a tuning fit in 1 of 13 folds."
+    )
+    assert text.count(expected) == 1
+    assert f"|\n\n{expected}\n\n### A against B" in text
+    # The tables are those of the same lines without the field.
+    assert text.replace(f"{expected}\n\n", "") == _without_degeneracy(
+        summary.summarise(_records(), permutations=99), 1
+    )
+
+
+@pytest.mark.parametrize("position", range(6))
+def test_a_fold_is_degenerate_if_any_of_its_lines_says_so(position: int) -> None:
+    """
+    Fold 5's own fit, and its second tuning fit, flagged on one of its six lines alone, first,
+    last or in between, still make one degenerate fold each: neither the first nor the last
+    line of a fold decides for it.
+    """
+    degenerate, regular = _pca_records()
+    lines = _with_pca(degenerate_fold=None, degenerate_tuning=None)
+    fold_5 = [r for r in lines if r["fold"] == 5]
+    assert len(fold_5) == 6
+    fold_5[position]["pca"] = degenerate
+    fold_5[position]["tuning"] = {"pca": [regular, degenerate]}
+    assert summary.degenerate_folds(lines) == {"folds": 13, "fold": (1, 13), "tuning": (1, 13)}
+
+
+def test_no_degenerate_fold_counts_zero() -> None:
+    lines = _with_pca(degenerate_fold=None, degenerate_tuning=None)
+    assert summary.degenerate_folds(lines) == {"folds": 13, "fold": (0, 13), "tuning": (0, 13)}
+    assert (
+        "Degenerate PCA fits (#525): fold fit in 0 of 13 folds, a tuning fit in 0 of 13 folds."
+        in summary.summarise(lines, permutations=99)
+    )
+
+
+def test_lines_before_525_are_not_recorded_and_partial_records_say_so() -> None:
+    """
+    Lines without ``pca`` (written before #525) are not counted, and a fold none of whose lines
+    records it is named as not recorded.  A run without tuning (``tuning`` null) records no
+    tuning fit.
+    """
+    old = _records()
+    assert summary.degenerate_folds(old) == {"folds": 13, "fold": None, "tuning": None}
+    assert NOT_RECORDED in summary.summarise(old, permutations=99)
+    # Folds 0 to 9 record their own fit (fold 3 degenerate) and ran no tuning; 10 to 12
+    # predate the field.
+    mixed: list[dict[str, Any]] = []
+    for r in _with_pca(degenerate_fold=3, degenerate_tuning=None):
+        if r["fold"] < 10:
+            mixed.append({**r, "tuning": None})
+        else:
+            mixed.append({k: v for k, v in r.items() if k not in ("pca", "tuning")})
+    assert summary.degenerate_folds(mixed) == {"folds": 13, "fold": (1, 10), "tuning": None}
+    assert (
+        "Degenerate PCA fits (#525): fold fit in 1 of 10 folds (3 folds not recorded), "
+        "a tuning fit not recorded." in summary.summarise(mixed, permutations=99)
+    )
+    # Only fold 12 predates the field: one fold, in the singular.
+    one_old = [
+        r if r["fold"] < 12 else {k: v for k, v in r.items() if k not in ("pca", "tuning")}
+        for r in _with_pca(degenerate_fold=None, degenerate_tuning=None)
+    ]
+    assert summary.degeneracy_line(one_old) == (
+        "Degenerate PCA fits (#525): fold fit in 0 of 12 folds (1 fold not recorded), "
+        "a tuning fit in 0 of 12 folds (1 fold not recorded)."
+    )
+
+
+def test_each_group_counts_its_own_folds() -> None:
+    """Two datasets, only the second with degenerate fits: each section has its own line."""
+    toy = _with_pca(degenerate_fold=None, degenerate_tuning=None)
+    other = _with_pca(degenerate_fold=0, degenerate_tuning=12, dataset="other")
+    first, second = summary.summarise(toy + other, permutations=99).split("## other")
+    assert "fold fit in 0 of 13 folds, a tuning fit in 0 of 13 folds." in first
+    assert "fold fit in 1 of 13 folds, a tuning fit in 1 of 13 folds." in second
