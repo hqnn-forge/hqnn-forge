@@ -703,8 +703,9 @@ def _noise_site_count(
       well, because the channel is inserted after it.  A state preparation
       at the start of the tape, such as ``AmplitudeEmbedding``, is not:
       ``qml.noise.insert`` places no channel after the tape's leading
-      preparations, and the device decomposes them into gates only after
-      the insertion.
+      preparations, and a device that decomposes them into gates does so
+      only after the insertion (``default.qubit`` and ``default.mixed``
+      apply them whole).
     * ``"end"``: one site per wire of the tape, ``n_qubits`` for a circuit
       that acts on or measures every wire.
     * ``"cz"``: ``2·#CZ + 3·#CCZ`` on the same expanded tape; a circuit
@@ -1841,9 +1842,9 @@ def erasure_kept_fraction(
         For the layers in this library the tape the insertion sees does not
         depend on the input, so every entry is the same: an angle-type
         embedding's gates do not, and the amplitude embedding's state
-        preparation is no site (:func:`_noise_site_count`); the zero-angle
-        rotations its decomposition can leave out are dropped on the device,
-        after the insertion.  ``p = 0`` gives ones and ``p = 1`` zeros
+        preparation is no site (:func:`_noise_site_count`): ``default.qubit``
+        and ``default.mixed`` apply it whole, and a device that decomposes it,
+        leaving out zero-angle rotations, does so after the insertion.  ``p = 0`` gives ones and ``p = 1`` zeros
         (every layer has ``k ≥ 1``).
 
     Raises
