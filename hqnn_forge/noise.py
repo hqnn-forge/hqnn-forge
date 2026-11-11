@@ -1818,7 +1818,8 @@ def erasure_kept_fraction(
     each an unbiased shot of the clean circuit; with exact expectations no row
     is lost.  This function does not sample that; the shot cost of an erasure
     at the expected count is ``shot_sweep(model, X, [round(N * kept)])`` with
-    ``kept`` from here.
+    ``kept = float(erasure_kept_fraction(model, X, p)[0])``, a plain float:
+    ``shot_sweep`` takes ``int`` shot counts, not tensors.
 
     Parameters
     ----------
