@@ -13,6 +13,12 @@ it each label (*Groups* below), it prints, as Markdown:
   interval over the folds, ``mean ± t(0.975, n − 1) · sd / √n``.  Beside them
   the feature dimension, the trainable parameters and the mean seconds of
   feature simulation and of the final fit over the lines that computed them.
+  Under the table, one line (:func:`degeneracy_line`, #747) says in how many
+  folds the PCA fit, and in how many a tuning fold's fit, was degenerate
+  (the runner's ``pca`` and ``tuning["pca"]``, #525): in such a fold the
+  assignment of components to atoms, and with it ``A − B``, is arbitrary.
+  Lines written before #525 do not record it, and the line says ``not
+  recorded``.
 * **A against B** paired by fold, per head and grid point, and **every arm
   against each classical baseline** (arm C with the linear and with the MLP
   head), paired by fold, as ``V/Ω`` × ``γ/Ω`` grids of the mean MCC
@@ -409,6 +415,77 @@ def scores_table(
     return "\n".join(lines)
 
 
+def degenerate_folds(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """
+    How many folds of one group had a degenerate PCA fit, as the runner records it (#525).
+
+    ``records`` are one group of :func:`groups`.  Every line of a fold, of
+    whatever arm, head or grid point, is trained and scored on the inputs of
+    the same PCA fit, on the fold's training part, and its tuning folds on
+    those of the same tuning fits, so the count is over folds (``fold``), not
+    lines.  Returns ``{"folds": n, "fold": f, "tuning": t}``:
+
+    * ``n``: the number of distinct folds in ``records``.
+    * ``f``: ``(degenerate, recorded)`` for the fold's own fit, ``pca`` on
+      the line: ``recorded`` is the number of folds with a line carrying it
+      (not ``null``), ``degenerate`` of those the folds with a line whose
+      ``pca["degenerate"]`` is true (there the assignment of components to
+      atoms, and with it ``A − B``, is arbitrary).  ``None`` if no line
+      records it: every line written before #525.
+    * ``t``: the same for the tuning fits, ``tuning["pca"]`` (one record per
+      tuning fold): a fold is degenerate if any of them is (its choice of
+      hyperparameters may then depend on the platform).  A line without
+      tuning (``tuning`` null), or written before #525, records none.
+
+    A fold counts as degenerate if any of its lines says so; the runner
+    writes the same record on all of them.
+    """
+    folds: set[int] = set()
+    fold_fit: dict[int, bool] = {}
+    tuning_fit: dict[int, bool] = {}
+    for r in records:
+        k = int(r["fold"])
+        folds.add(k)
+        if r.get("pca") is not None:
+            fold_fit[k] = fold_fit.get(k, False) or bool(r["pca"]["degenerate"])
+        tuning = r.get("tuning")
+        if tuning and tuning.get("pca"):
+            any_fit = any(bool(fit["degenerate"]) for fit in tuning["pca"])
+            tuning_fit[k] = tuning_fit.get(k, False) or any_fit
+    return {
+        "folds": len(folds),
+        "fold": (sum(fold_fit.values()), len(fold_fit)) if fold_fit else None,
+        "tuning": (sum(tuning_fit.values()), len(tuning_fit)) if tuning_fit else None,
+    }
+
+
+def degeneracy_line(records: Iterable[Mapping[str, Any]]) -> str:
+    """
+    :func:`degenerate_folds` of one group as the sentence under its scores table.
+
+    ``Degenerate PCA fits (#525): fold fit in d of r folds, a tuning fit in
+    d of r folds.``, each part ``not recorded`` when no line records it, and
+    with ``(m folds not recorded)`` after it when ``m`` of the group's folds
+    have no line that does (``(1 fold not recorded)`` for one).
+    """
+    counts = degenerate_folds(records)
+
+    def part(found: tuple[int, int] | None) -> str:
+        if found is None:
+            return "not recorded"
+        degenerate, recorded = found
+        text = f"in {degenerate} of {recorded} folds"
+        missing = counts["folds"] - recorded
+        if not missing:
+            return text
+        return text + f" ({missing} {'fold' if missing == 1 else 'folds'} not recorded)"
+
+    return (
+        f"Degenerate PCA fits (#525): fold fit {part(counts['fold'])}, "
+        f"a tuning fit {part(counts['tuning'])}."
+    )
+
+
 def _paired(
     a: Mapping[int, Mapping[str, Any]], b: Mapping[int, Mapping[str, Any]]
 ) -> tuple[FloatArray, FloatArray]:
@@ -615,7 +692,10 @@ def summarise(
     ``, label_bonds not recorded``) when the dataset has more than one group.
     A group with arm A in several geometries gets a ``geometry`` column in
     its scores, and its grid and mechanism tables once per geometry; with one
-    geometry the output is that of a file from before ``--geometry``.
+    geometry the output is that of a file from before ``--geometry``.  Under
+    each scores table, :func:`degeneracy_line` counts the group's folds with
+    a degenerate PCA fit; apart from that line the output is that of a file
+    from before #747.
 
     Raises
     ------
@@ -659,6 +739,8 @@ def summarise(
             "### Scores",
             "",
             scores_table(rows, geometry=several),
+            "",
+            degeneracy_line(recs),
             "",
             "### A against B (MCC, paired by fold)",
             "",

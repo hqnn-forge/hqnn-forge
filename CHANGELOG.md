@@ -502,6 +502,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   places on the row's circuit (`n_qubits` at `"end"`, the sum of the gate widths at `"all"`,
   `2·#CZ + 3·#CCZ` at `"cz"`). With `N` shots per row that is `N (1 − p)^k` effective shots on
   average (#702, #751)
+- `examples/summarise_rydberg_benchmark.py` prints, under each dataset's scores table, in how
+  many folds the PCA fit and in how many a tuning fold's fit was degenerate (the runner's `pca`
+  and `tuning["pca"]` of #525, counted per fold, not per line), and `not recorded` for lines
+  written before #525, as in every committed results file, whose tables are otherwise unchanged
+  (#747, #752)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
