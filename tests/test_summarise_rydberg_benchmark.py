@@ -611,6 +611,150 @@ def test_the_three_committed_controls_read_together_are_three_families() -> None
 
 
 # ---------------------------------------------------------------------------
+# Iranian Churn with 15 folds (#746)
+# ---------------------------------------------------------------------------
+
+#: The rerun of Iranian Churn on the chain, the ring and the ``2 × 2`` grid with 15 folds
+#: (#746), every other option as in the 13-fold file above.
+CHURN_15_FOLDS = "rydberg_features_geometries_iranian_churn_15_folds.jsonl.xz"
+CHURN_SHA = "1c24f5e361662ad22e66d998438378c873a403193804090212314ff0d7acae63"
+#: Per geometry, the A − B comparisons won or lost in all 15 folds and the significant ones
+#: (Holm, α = 0.05), as the note's *What the results show* states them: every one a loss.
+CHURN_15_A_MINUS_B = {"chain": (3, 3), "ring": (14, 14), "grid-2x2": (17, 17)}
+#: Significant comparisons of the whole family of 526, as the note's *Statistics* states.
+CHURN_15_SIGNIFICANT = 109
+#: SHA-256 of the file's ``--long`` summary with 99 permutations.
+CHURN_15_DIGEST = "8e08785df76289cdcc1f31e2f7ab5916984e87b84611491317b6ac2073866119"
+
+
+def _signed_rank_p(diffs: np.ndarray, tol: float = 1e-12) -> float:
+    """
+    Two-sided exact Wilcoxon signed-rank p-value of ``diffs``, by enumerating every sign.
+
+    Differences with ``|d| <= tol`` are dropped.  The ``n`` left get the rank of ``|d_i|``
+    among them, ties (within ``tol``) sharing their mean rank:
+    ``r_i = #{j : |d_j| < |d_i| − tol} + (#{j : ||d_j| − |d_i|| <= tol} + 1) / 2``.
+    Under H0 each sign is + or − with probability 1/2, independently, so each of the
+    ``2^n`` assignments ``s ∈ {0, 1}^n`` (bit ``i`` of the row index: pair ``i`` positive) is
+    equally likely and gives ``W+ = Σ_i s_i r_i``.  With ``w`` the observed ``W+``,
+    ``p = min(1, 2 · min(P(W+ >= w), P(W+ <= w)))``, the convention of
+    :func:`~hqnn_forge.evaluation.wilcoxon_signed_rank`; ranks are multiples of 1/2, so the
+    comparisons are exact in floating point.  An independent route to the value the
+    summariser gets from that function's counting recursion.
+    """
+    d = diffs[np.abs(diffs) > tol]
+    a = np.abs(d)
+    below = (a[None, :] < a[:, None] - tol).sum(axis=1)
+    tied = (np.abs(a[None, :] - a[:, None]) <= tol).sum(axis=1)
+    ranks = below + (tied + 1) / 2.0
+    n = d.size
+    signs = (np.arange(2**n)[:, None] >> np.arange(n)[None, :]) & 1
+    null = signs @ ranks
+    w = float(ranks[d > 0].sum())
+    return min(1.0, 2.0 * min(float(np.mean(null >= w)), float(np.mean(null <= w))))
+
+
+def _holm(p: np.ndarray) -> np.ndarray:
+    """
+    Holm's step-down adjusted p-values: sorted ascending, the ``k``-th (from 0) becomes
+    ``max_{j <= k} min(1, (m − j) · p_(j))``.
+    """
+    m = p.size
+    order = np.argsort(p, kind="stable")
+    steps = np.minimum(1.0, (m - np.arange(m)) * p[order])
+    out = np.empty(m)
+    out[order] = np.maximum.accumulate(steps)
+    return out
+
+
+@pytest.mark.slow
+def test_the_committed_15_fold_churn_results_reach_alpha() -> None:
+    """
+    #746: the 15-fold Iranian Churn file holds one data fingerprint (Iranian Churn's, as in
+    #502), A lines of the three geometries, 15 folds of every row and the PCA record of #525.
+    Its one Holm family has ``m = 3 · 56 + 2 · 179 = 526`` comparisons, for which
+    ``2/2^15 < α/m``, so a comparison won or lost in all 15 folds is significant.  Every
+    comparison's exact p-value and Holm p are recomputed from the raw MCCs, paired by fold
+    here, with :func:`_signed_rank_p` and :func:`_holm`, and the significant ones counted.
+    The ``--long`` summary with 99 permutations is pinned, as for the files above.
+    """
+    records = summary.read_records(ROOT / "docs/results" / CHURN_15_FOLDS)
+    assert {(r["dataset"], r["data_sha256"], r["label_bonds"]) for r in records} == {
+        ("iranian-churn", CHURN_SHA, None)
+    }
+    assert {bench.geometry_label(r) for r in records if r["arm"] == "A"} == {
+        "chain",
+        "ring",
+        "grid-2x2",
+    }
+    assert {r["n_splits"] for r in records} == {15}
+    assert all(r["pca"] is not None for r in records)
+
+    # MCC per row and fold from the raw lines, keyed as the summariser keys its rows:
+    # (arm, head, geometry, V/Ω, γ/Ω), with None where an arm has no such coordinate.  Arm B
+    # is written once per geometry and V/Ω with the same scores, so every copy must agree.
+    mcc: dict[tuple[Any, ...], dict[int, float]] = {}
+    for r in records:
+        arm, head = r["arm"], r["head"]
+        if arm == "A":
+            geometry = bench.geometry_label(r)
+            key = (arm, head, geometry, r["v_over_omega"], r["gamma_over_omega"])
+        elif arm == "B":
+            key = (arm, head, None, None, r["gamma_over_omega"])
+        else:
+            key = (arm, head, None, None, None)
+        folds = mcc.setdefault(key, {})
+        assert folds.setdefault(r["fold"], r["mcc"]) == r["mcc"]
+    assert {len(f) for f in mcc.values()} == {15}
+    a_rows = [k for k in mcc if k[0] == "A"]
+    others = [k for k in mcc if k[0] in ("B", "D", "D-hybrid")]
+    assert (len(a_rows), len(others)) == (3 * 2 * 7 * 4, 2 * 4 + 2 + 1)
+
+    bases = [("C", head, None, None, None) for head in ("linear", "mlp")]
+    pairs = [(k, ("B", k[1], None, None, k[4])) for k in a_rows]
+    pairs += [(k, base) for k in a_rows + others for base in bases]
+    m = len(pairs)
+    assert m == 526
+    assert 2 / 2**15 < summary.ALPHA / m < 2 / 2**14
+
+    diffs = [np.array([mcc[a][f] - mcc[b][f] for f in range(15)]) for a, b in pairs]
+    p = np.array([_signed_rank_p(d) for d in diffs])
+    holm = _holm(p)
+    ours = {pair: (pv, q) for pair, pv, q in zip(pairs, p, holm, strict=True)}
+
+    family = summary.comparisons(summary._rows(records))
+    assert {(c["a"], c["b"]) for c in family} == set(ours)
+    for c in family:
+        pv, q = ours[(c["a"], c["b"])]
+        assert c["p"] == pytest.approx(pv, rel=1e-12, abs=0)
+        assert c["p_holm"] == pytest.approx(q, rel=1e-12, abs=0)
+
+    # Won or lost in all 15 folds: exact p at the floor 2/2^15, Holm p m · 2/2^15 < α.
+    unanimous = np.array([bool(np.all(d > 0) or np.all(d < 0)) for d in diffs])
+    assert np.allclose(p[unanimous], 2 / 2**15, rtol=1e-12, atol=0)
+    assert np.allclose(holm[unanimous], m * 2 / 2**15, rtol=1e-12, atol=0)
+    significant = holm <= summary.ALPHA
+    # The note's *Statistics*: every significant comparison is won or lost in all 15 folds.
+    assert np.array_equal(significant, unanimous)
+    a_minus_b = np.arange(m) < len(a_rows)
+    counts = {
+        geometry: (
+            int((unanimous & a_minus_b & in_geometry).sum()),
+            int((significant & a_minus_b & in_geometry).sum()),
+        )
+        for geometry in ("chain", "ring", "grid-2x2")
+        for in_geometry in [np.array([a[2] == geometry for a, _ in pairs])]
+    }
+    assert counts == CHURN_15_A_MINUS_B
+    assert int(significant.sum()) == CHURN_15_SIGNIFICANT
+    # No arm is significantly better than B or than a baseline: every significant one is a loss.
+    assert all(float(d.mean()) < 0 for d, sig in zip(diffs, significant, strict=True) if sig)
+
+    text = summary.summarise(records, permutations=99, long=True)
+    assert hashlib.sha256(text.encode()).hexdigest() == CHURN_15_DIGEST
+
+
+# ---------------------------------------------------------------------------
 # PCA degeneracy (#747)
 # ---------------------------------------------------------------------------
 

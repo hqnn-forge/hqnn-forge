@@ -12,15 +12,27 @@ each geometry. It reads them as #502's note does, and the reader is assumed to k
 
 Everything not listed here is as in #502's *Setup*: model and units, encoding, readout, noise,
 arms, heads, tuning budget, data and splits. Every option of the runner is at its default except
-`--folds 13` and `--geometry`, and each line records them as `settings`.
+`--folds` and `--geometry`, and each line records them as `settings`. The positive controls
+have 13 folds, as in #502. Iranian Churn has 15, so that its Holm family can reach α
+(*Statistics*, #746).
 
-- **Script:** `examples/benchmark_rydberg_features.py` as of commit `29c8931`, i.e. with
-  `--geometry` (#733) and a positive control labelled over the bonds of its geometry (#738).
-- **Raw results:** four files in `docs/results/`, the runner's exact JSONL, xz-compressed. The
+- **Script:** `examples/benchmark_rydberg_features.py` as of commit `29c8931` for the controls,
+  i.e. with `--geometry` (#733) and a positive control labelled over the bonds of its geometry
+  (#738), and as of `efa6ef3` for Iranian Churn with 15 folds. The later script also records
+  each fold's PCA fit (`pca`, #525) and otherwise writes the same lines: run at `efa6ef3` with
+  `--folds 13 --max-folds 1 --geometry chain --arms A B C`, it reproduced all 114 lines of fold
+  0 of the 13-fold Iranian Churn file in `mcc`, `pr_auc`, `threshold`, `epochs`, `data_sha256`
+  and the train, validation and test rows.
+- **Raw results:** five files in `docs/results/`, the runner's exact JSONL, xz-compressed. The
   file of #502, `rydberg_features_benchmark.jsonl.xz`, is unchanged.
-    - `rydberg_features_geometries_iranian_churn.jsonl.xz`: Iranian Churn with
-      `--geometry chain ring grid` in one run. Arm A runs per geometry. Arm B is computed once
-      and recorded per geometry with `reused_from_geometry`. C and D have no geometry.
+    - `rydberg_features_geometries_iranian_churn_15_folds.jsonl.xz`: Iranian Churn with
+      `--geometry chain ring grid --folds 15` in one run (#746), the run whose tables this note
+      shows. Arm A runs per geometry. Arm B is computed once and recorded per geometry with
+      `reused_from_geometry`. C and D have no geometry.
+    - `rydberg_features_geometries_iranian_churn.jsonl.xz`: the same run with 13 folds (#737),
+      kept unchanged as the record of that run. Its Iranian Churn tables were in this note
+      until #746 and are printed by the same command; it is not read with the 15-fold file
+      (*Statistics*).
     - `rydberg_features_geometries_control_{chain,ring,grid}.jsonl.xz`: the positive control,
       once per geometry. When they were run (#738), a run with the control took one geometry,
       because its label follows the geometry's bonds. Since #741 one run with
@@ -30,6 +42,9 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
 
     ```bash
     uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
+        --dataset iranian-churn --data-path data/raw --download --folds 15 \
+        --geometry chain ring grid --out churn-15.jsonl
+    uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
         --dataset iranian-churn --data-path data/raw --download --folds 13 \
         --geometry chain ring grid --out churn.jsonl
     uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
@@ -38,11 +53,13 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
         --dataset positive-control --folds 13 --geometry ring --out pc-ring.jsonl
     uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
         --dataset positive-control --folds 13 --geometry grid --out pc-grid.jsonl
+    xz -9e -k -c churn-15.jsonl \
+        > docs/results/rydberg_features_geometries_iranian_churn_15_folds.jsonl.xz
     xz -9e -k -c churn.jsonl > docs/results/rydberg_features_geometries_iranian_churn.jsonl.xz
     xz -9e -k -c pc-chain.jsonl > docs/results/rydberg_features_geometries_control_chain.jsonl.xz
     xz -9e -k -c pc-ring.jsonl > docs/results/rydberg_features_geometries_control_ring.jsonl.xz
     xz -9e -k -c pc-grid.jsonl > docs/results/rydberg_features_geometries_control_grid.jsonl.xz
-    for f in iranian_churn control_chain control_ring control_grid; do
+    for f in iranian_churn_15_folds iranian_churn control_chain control_ring control_grid; do
         uv run --frozen --all-extras python examples/summarise_rydberg_benchmark.py \
             docs/results/rydberg_features_geometries_$f.jsonl.xz
     done
@@ -51,13 +68,19 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
     Summarise each file on its own. The three control files hold three different labels under
     one dataset name. The summariser refused them read together when this note was written
     (#742); since #741 it prints them as three sections, one per `label_bonds`, each its own
-    family of 190 and identical to that file's summary apart from its heading. Every table
-    below is that output, with its headings moved down a level and its separation measures
-    moved to *Mechanism*.
-- **The chain reproduces #502.** Every chain line of the two new runs equals the line of #502's
-  file for the same arm, head, grid point and fold in `mcc`, `pr_auc` and `data_sha256`: 1,521
-  of 1,521 on each dataset. The chain control, summarised alone, prints #502's positive-control
-  tables, apart from the measured seconds. They are not repeated here.
+    family of 190 and identical to that file's summary apart from its heading. Never join the two
+    Iranian Churn files into one input: they have the same data and no label bonds, so the
+    summariser would read their lines as one group and pair them by fold index, although the
+    13 and the 15 folds are different splits. Every table below is that output, with its
+    headings moved down a level and its separation measures moved to *Mechanism*.
+- **The chain reproduces #502 on the control, not on Iranian Churn with 15 folds.** Every chain
+  line of the control run and of the 13-fold Iranian Churn run equals the line of #502's file
+  for the same arm, head, grid point and fold in `mcc`, `pr_auc` and `data_sha256`: 1,521 of
+  1,521 on each. The chain control, summarised alone, prints #502's positive-control tables,
+  apart from the measured seconds. They are not repeated here. The 15-fold run has the same
+  data, the same split seed and the same seeds for each of its first 13 folds, but other folds:
+  15 stratified test parts of 210 rows instead of 13 of 242 to 244. Its chain lines therefore
+  do not reproduce #502's, and its chain cells below differ from those of #502's note.
 - **Geometries** (`docs/rydberg-model.md`, *Geometry*). Four atoms each. `V/Ω` is the
   nearest-neighbour interaction `C6/a⁶` in every geometry, set through the spacing as in #502
   (`a` = 12.76 µm at `V/Ω = 0.1` down to 4.03 µm at 100). Input `i` (the `i`-th principal
@@ -94,11 +117,14 @@ arms, heads, tuning budget, data and splits. Every option of the runner is at it
   differ, and a control score of one geometry is not comparable with another's.
 - **Environment:** as #502 (Python 3.13.15, the same laptop), except torch 2.15.0 for 2.14.1, as
   recorded in every line as `environment`. The chain lines are identical nonetheless (above).
+  The 15-fold Iranian Churn run has the same packages on a newer kernel and glibc
+  (`Linux-7.3.3-300.fc45`, glibc 2.44), on which the one-fold check above was run too.
 
 ### Statistics
 
-As in #502 (exact two-sided Wilcoxon signed-rank test on test MCC over the 13 outer folds,
-Holm's correction at α = 0.05, 95 % t-intervals over the folds), with these families:
+As in #502 (exact two-sided Wilcoxon signed-rank test on test MCC over the outer folds, 13 on
+the controls and 15 on Iranian Churn, Holm's correction at α = 0.05, 95 % t-intervals over the
+folds), with these families:
 
 - **One Holm family per dataset**, as #502 and #737 have it. On **Iranian Churn**, which holds
   all three geometries in one file, that family has
@@ -106,33 +132,42 @@ Holm's correction at α = 0.05, 95 % t-intervals over the folds), with these fam
     - every arm row against each of the two classical baselines: A 168, B 8, D 2, D-hybrid 1,
       i.e. 179 × 2 = 358;
     - m = 526.
+
+  The family is the 15-fold file's alone. The 13-fold file is a different split of the same
+  rows and is not tested beside it.
 - **Each positive control is its own dataset**, with its own label and data fingerprint, so
   each is its own family of m = 190, as in #502.
-- **Iranian Churn cannot reach α at 13 folds.** Holm's first threshold for m = 526 is
-  `0.05/526 = 9.51e-5`. The smallest exact p-value over 13 untied folds is `2/2^13 = 2.44e-4`,
-  above it, so the smallest possible Holm-adjusted p is `526 · 2.44e-4 = 0.1284`. This is a
-  property of the design, fixed before any score: **no Iranian Churn comparison in this note
-  is significant, and none could have been.** #502's 13 folds were chosen for a family of 190
-  (`0.05/190 = 2.63e-4`). A family that holds three geometries needs 15 folds
-  (`2/2^15 = 6.10e-5`), which #746 asks for. The Iranian Churn tables are therefore
-  **descriptive**. A Holm p of 0.1284 there marks a comparison won or lost in all 13 folds,
-  the most extreme result 13 folds can give. Read such a cell by its sign, its size and that
-  agreement, not as a test.
-- **The same chain cells in two families.** #502's chain comparisons on Iranian Churn were
-  significant or not in #502's family of 190 over the chain alone, and they still are there.
-  In this note's family of 526 the same lines give larger adjusted p-values. For example
-  A − B, linear, `V/Ω = 1`, `γ/Ω = 0`: −0.181, Holm p 0.0464 in #502, 0.1284 here. Nothing in
-  #502's note is contradicted by this.
+- **Why 15 folds on Iranian Churn.** Holm's first threshold for m = 526 is
+  `0.05/526 = 9.51e-5`. The smallest exact p-value over `n` untied folds is `2/2^n`: `2.44e-4`
+  at 13 folds and `1.22e-4` at 14, both above it, and `6.10e-5` at 15, below it. With 13 folds
+  (#737's run, `rydberg_features_geometries_iranian_churn.jsonl.xz`) the smallest possible
+  Holm-adjusted p was `526 · 2/2^13 = 0.1284`, so no comparison could be significant, and this
+  note read that run as descriptive. With 15 folds it is `526 · 2/2^15 = 0.0321`.
+- **What 15 folds can and cannot detect here.** In this run 109 of the 526 comparisons are
+  significant, every one of them won or lost in all 15 folds (Holm p 0.0321). The next
+  possible p-value, `4/2^15 = 1.22e-4` (14 of 15 folds, the other fold the smallest
+  difference), adjusts to `(526 − 109) · 1.22e-4 = 0.0509` and is not significant. So a cell
+  lost in 14 of 15 folds is not called a loss, however large: e.g. the chain's linear A − B at
+  `V/Ω = 1`, `γ/Ω = 0`, −0.183, Holm p 0.0509.
+- **The chain cells of #502 are not re-tested.** #502's chain comparisons on Iranian Churn
+  were made on its 13 folds in its family of 190, and its statements hold there. The 15-fold
+  run has other folds (*Setup*), so its chain cells are a new sample, not a reproduction. Of
+  #502's two significant Iranian Churn cells, the linear loss at `V/Ω = 1`, `γ/Ω = 0` (−0.181,
+  Holm p 0.0464 in #502) is −0.183 here, lost in 14 of 15 folds (Holm p 0.0509). The MLP gain
+  at `V/Ω = 10`, `γ/Ω = 1` (+0.053, Holm p 0.0464 in #502) is +0.013 here, won in 10 of 15
+  folds (Holm p 1.0000).
 
 ## Results
 
 As in #502, `n` is the number of folds, the interval the 95 % t-interval of the fold mean,
 `dim` the feature dimension, `params` the trainable parameters, and `feature s` and `fit s` the
 mean seconds of feature simulation and of the final fit per fold. A grid cell of a comparison is
-the mean MCC difference over the 13 folds with its Holm-adjusted p-value, and ✓ marks the ones at
+the mean MCC difference over the folds with its Holm-adjusted p-value, and ✓ marks the ones at
 most α = 0.05. Arm B rows do not depend on `V/Ω`. On Iranian Churn they do not depend on the
 geometry either, and are shown once. `--long` prints every comparison with its pairs, exact
-p-value, floor and rank-biserial effect.
+p-value, floor and rank-biserial effect. Under the Iranian Churn scores table, the summariser's
+line of #747 counts the folds whose PCA fit, or one of whose tuning fits, was degenerate (#525):
+none. The control files predate that record, and their tables were printed before #747.
 
 ### Positive control, ring
 
@@ -482,195 +517,197 @@ The other arms:
 | D/mlp | -0.139 (0.0898) | -0.761 (0.0464 ✓) |
 | D-hybrid/hybrid | -0.030 (1.0000) | -0.652 (0.0464 ✓) |
 
-### Iranian Churn, three geometries
+### Iranian Churn, three geometries, 15 folds
 
-Folds per row: [13].  Holm family: 526 comparisons at α = 0.05, first threshold α/m = 9.51e-05.
+Folds per row: [15].  Holm family: 526 comparisons at α = 0.05, first threshold α/m = 9.51e-05.
 
 #### Scores
 
 | arm | head | geometry | V/Ω | γ/Ω | n | MCC mean ± sd | MCC 95 % CI | PR-AUC mean ± sd | PR-AUC 95 % CI | dim | params | feature s | fit s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| A | linear | chain | 0.1 | 0 | 13 | 0.563 ± 0.064 | [0.525, 0.602] | 0.561 ± 0.065 | [0.521, 0.600] | 4 | 5 | 0.19 | 0.38 |
-| A | linear | chain | 0.3 | 0 | 13 | 0.552 ± 0.070 | [0.509, 0.594] | 0.554 ± 0.061 | [0.518, 0.591] | 4 | 5 | 0.14 | 0.31 |
-| A | linear | chain | 1 | 0 | 13 | 0.377 ± 0.056 | [0.344, 0.411] | 0.472 ± 0.090 | [0.418, 0.526] | 4 | 5 | 0.16 | 0.27 |
-| A | linear | chain | 3 | 0 | 13 | 0.495 ± 0.039 | [0.471, 0.518] | 0.554 ± 0.075 | [0.509, 0.599] | 4 | 5 | 0.15 | 0.32 |
-| A | linear | chain | 10 | 0 | 13 | 0.508 ± 0.058 | [0.473, 0.542] | 0.581 ± 0.061 | [0.544, 0.618] | 4 | 5 | 0.14 | 0.34 |
-| A | linear | chain | 30 | 0 | 13 | 0.535 ± 0.066 | [0.495, 0.575] | 0.580 ± 0.059 | [0.544, 0.616] | 4 | 5 | 0.14 | 0.37 |
-| A | linear | chain | 100 | 0 | 13 | 0.473 ± 0.071 | [0.430, 0.515] | 0.452 ± 0.060 | [0.415, 0.488] | 4 | 5 | 0.13 | 0.47 |
-| A | linear | chain | 0.1 | 0.1 | 13 | 0.561 ± 0.061 | [0.524, 0.598] | 0.563 ± 0.063 | [0.525, 0.602] | 4 | 5 | 2.06 | 0.33 |
-| A | linear | chain | 0.3 | 0.1 | 13 | 0.546 ± 0.070 | [0.504, 0.589] | 0.557 ± 0.060 | [0.521, 0.593] | 4 | 5 | 2.10 | 0.47 |
-| A | linear | chain | 1 | 0.1 | 13 | 0.380 ± 0.062 | [0.343, 0.418] | 0.509 ± 0.043 | [0.483, 0.535] | 4 | 5 | 2.10 | 0.37 |
-| A | linear | chain | 3 | 0.1 | 13 | 0.502 ± 0.041 | [0.477, 0.527] | 0.555 ± 0.071 | [0.512, 0.597] | 4 | 5 | 2.15 | 0.31 |
-| A | linear | chain | 10 | 0.1 | 13 | 0.516 ± 0.060 | [0.480, 0.552] | 0.582 ± 0.063 | [0.544, 0.620] | 4 | 5 | 2.13 | 0.31 |
-| A | linear | chain | 30 | 0.1 | 13 | 0.544 ± 0.065 | [0.505, 0.583] | 0.581 ± 0.060 | [0.544, 0.617] | 4 | 5 | 2.10 | 0.31 |
-| A | linear | chain | 100 | 0.1 | 13 | 0.469 ± 0.061 | [0.433, 0.506] | 0.461 ± 0.062 | [0.423, 0.498] | 4 | 5 | 2.02 | 0.52 |
-| A | linear | chain | 0.1 | 1 | 13 | 0.553 ± 0.060 | [0.517, 0.589] | 0.567 ± 0.061 | [0.530, 0.604] | 4 | 5 | 2.11 | 0.40 |
-| A | linear | chain | 0.3 | 1 | 13 | 0.556 ± 0.063 | [0.518, 0.594] | 0.564 ± 0.060 | [0.528, 0.600] | 4 | 5 | 2.06 | 0.46 |
-| A | linear | chain | 1 | 1 | 13 | 0.486 ± 0.065 | [0.447, 0.525] | 0.542 ± 0.046 | [0.514, 0.570] | 4 | 5 | 2.08 | 0.42 |
-| A | linear | chain | 3 | 1 | 13 | 0.555 ± 0.057 | [0.521, 0.590] | 0.551 ± 0.063 | [0.513, 0.589] | 4 | 5 | 2.22 | 0.39 |
-| A | linear | chain | 10 | 1 | 13 | 0.561 ± 0.062 | [0.524, 0.599] | 0.584 ± 0.064 | [0.545, 0.622] | 4 | 5 | 2.04 | 0.36 |
-| A | linear | chain | 30 | 1 | 13 | 0.555 ± 0.062 | [0.518, 0.592] | 0.582 ± 0.060 | [0.546, 0.618] | 4 | 5 | 2.04 | 0.25 |
-| A | linear | chain | 100 | 1 | 13 | 0.423 ± 0.092 | [0.367, 0.478] | 0.536 ± 0.054 | [0.504, 0.568] | 4 | 5 | 2.05 | 0.46 |
-| A | linear | chain | 0.1 | 10 | 13 | 0.557 ± 0.063 | [0.519, 0.595] | 0.590 ± 0.059 | [0.554, 0.625] | 4 | 5 | 2.09 | 0.53 |
-| A | linear | chain | 0.3 | 10 | 13 | 0.556 ± 0.059 | [0.521, 0.591] | 0.590 ± 0.056 | [0.557, 0.624] | 4 | 5 | 2.04 | 0.48 |
-| A | linear | chain | 1 | 10 | 13 | 0.553 ± 0.067 | [0.513, 0.594] | 0.587 ± 0.052 | [0.556, 0.618] | 4 | 5 | 2.12 | 0.59 |
-| A | linear | chain | 3 | 10 | 13 | 0.521 ± 0.064 | [0.482, 0.560] | 0.561 ± 0.049 | [0.531, 0.590] | 4 | 5 | 2.16 | 0.47 |
-| A | linear | chain | 10 | 10 | 13 | 0.547 ± 0.070 | [0.504, 0.589] | 0.585 ± 0.052 | [0.554, 0.617] | 4 | 5 | 2.06 | 0.48 |
-| A | linear | chain | 30 | 10 | 13 | 0.558 ± 0.062 | [0.520, 0.595] | 0.592 ± 0.054 | [0.559, 0.624] | 4 | 5 | 2.06 | 0.43 |
-| A | linear | chain | 100 | 10 | 13 | 0.548 ± 0.065 | [0.509, 0.588] | 0.586 ± 0.052 | [0.555, 0.618] | 4 | 5 | 2.07 | 0.47 |
-| A | linear | ring | 0.1 | 0 | 13 | 0.554 ± 0.066 | [0.514, 0.594] | 0.562 ± 0.063 | [0.524, 0.600] | 4 | 5 | 0.14 | 0.45 |
-| A | linear | ring | 0.3 | 0 | 13 | 0.527 ± 0.078 | [0.480, 0.574] | 0.559 ± 0.058 | [0.524, 0.594] | 4 | 5 | 0.14 | 0.44 |
-| A | linear | ring | 1 | 0 | 13 | 0.116 ± 0.079 | [0.068, 0.163] | 0.191 ± 0.025 | [0.176, 0.206] | 4 | 5 | 0.14 | 0.39 |
-| A | linear | ring | 3 | 0 | 13 | 0.532 ± 0.058 | [0.496, 0.567] | 0.565 ± 0.065 | [0.526, 0.604] | 4 | 5 | 0.15 | 0.42 |
-| A | linear | ring | 10 | 0 | 13 | 0.322 ± 0.074 | [0.277, 0.367] | 0.455 ± 0.071 | [0.411, 0.498] | 4 | 5 | 0.14 | 0.29 |
-| A | linear | ring | 30 | 0 | 13 | 0.232 ± 0.066 | [0.193, 0.272] | 0.259 ± 0.036 | [0.238, 0.281] | 4 | 5 | 0.18 | 0.32 |
-| A | linear | ring | 100 | 0 | 13 | 0.262 ± 0.065 | [0.222, 0.301] | 0.342 ± 0.050 | [0.312, 0.372] | 4 | 5 | 0.13 | 0.37 |
-| A | linear | ring | 0.1 | 0.1 | 13 | 0.551 ± 0.066 | [0.511, 0.591] | 0.563 ± 0.061 | [0.526, 0.600] | 4 | 5 | 2.06 | 0.40 |
-| A | linear | ring | 0.3 | 0.1 | 13 | 0.538 ± 0.072 | [0.495, 0.582] | 0.562 ± 0.060 | [0.526, 0.598] | 4 | 5 | 2.05 | 0.46 |
-| A | linear | ring | 1 | 0.1 | 13 | 0.122 ± 0.089 | [0.069, 0.176] | 0.215 ± 0.029 | [0.198, 0.233] | 4 | 5 | 2.02 | 0.31 |
-| A | linear | ring | 3 | 0.1 | 13 | 0.534 ± 0.046 | [0.506, 0.562] | 0.559 ± 0.065 | [0.520, 0.599] | 4 | 5 | 2.03 | 0.54 |
-| A | linear | ring | 10 | 0.1 | 13 | 0.335 ± 0.079 | [0.288, 0.383] | 0.471 ± 0.075 | [0.426, 0.517] | 4 | 5 | 2.05 | 0.34 |
-| A | linear | ring | 30 | 0.1 | 13 | 0.213 ± 0.046 | [0.185, 0.240] | 0.269 ± 0.034 | [0.249, 0.290] | 4 | 5 | 2.08 | 0.37 |
-| A | linear | ring | 100 | 0.1 | 13 | 0.260 ± 0.051 | [0.230, 0.291] | 0.353 ± 0.047 | [0.325, 0.382] | 4 | 5 | 2.02 | 0.31 |
-| A | linear | ring | 0.1 | 1 | 13 | 0.554 ± 0.069 | [0.513, 0.596] | 0.566 ± 0.062 | [0.528, 0.603] | 4 | 5 | 2.05 | 0.37 |
-| A | linear | ring | 0.3 | 1 | 13 | 0.539 ± 0.080 | [0.490, 0.587] | 0.571 ± 0.062 | [0.533, 0.608] | 4 | 5 | 2.11 | 0.45 |
-| A | linear | ring | 1 | 1 | 13 | 0.307 ± 0.073 | [0.263, 0.351] | 0.446 ± 0.047 | [0.418, 0.474] | 4 | 5 | 2.04 | 0.28 |
-| A | linear | ring | 3 | 1 | 13 | 0.510 ± 0.049 | [0.480, 0.539] | 0.570 ± 0.057 | [0.536, 0.605] | 4 | 5 | 2.06 | 0.29 |
-| A | linear | ring | 10 | 1 | 13 | 0.457 ± 0.057 | [0.423, 0.492] | 0.571 ± 0.034 | [0.550, 0.591] | 4 | 5 | 2.03 | 0.40 |
-| A | linear | ring | 30 | 1 | 13 | 0.378 ± 0.047 | [0.350, 0.407] | 0.483 ± 0.055 | [0.450, 0.516] | 4 | 5 | 2.00 | 0.32 |
-| A | linear | ring | 100 | 1 | 13 | 0.409 ± 0.067 | [0.369, 0.450] | 0.539 ± 0.067 | [0.498, 0.580] | 4 | 5 | 1.96 | 0.50 |
-| A | linear | ring | 0.1 | 10 | 13 | 0.561 ± 0.058 | [0.526, 0.596] | 0.590 ± 0.057 | [0.556, 0.624] | 4 | 5 | 2.05 | 0.46 |
-| A | linear | ring | 0.3 | 10 | 13 | 0.551 ± 0.065 | [0.512, 0.590] | 0.591 ± 0.053 | [0.559, 0.623] | 4 | 5 | 2.00 | 0.47 |
-| A | linear | ring | 1 | 10 | 13 | 0.540 ± 0.074 | [0.495, 0.585] | 0.581 ± 0.049 | [0.552, 0.611] | 4 | 5 | 2.08 | 0.49 |
-| A | linear | ring | 3 | 10 | 13 | 0.361 ± 0.071 | [0.318, 0.404] | 0.498 ± 0.068 | [0.457, 0.539] | 4 | 5 | 2.07 | 0.41 |
-| A | linear | ring | 10 | 10 | 13 | 0.515 ± 0.078 | [0.468, 0.562] | 0.570 ± 0.052 | [0.539, 0.601] | 4 | 5 | 1.97 | 0.51 |
-| A | linear | ring | 30 | 10 | 13 | 0.530 ± 0.071 | [0.486, 0.573] | 0.575 ± 0.050 | [0.545, 0.606] | 4 | 5 | 1.99 | 0.55 |
-| A | linear | ring | 100 | 10 | 13 | 0.548 ± 0.072 | [0.504, 0.592] | 0.589 ± 0.055 | [0.555, 0.622] | 4 | 5 | 1.96 | 0.47 |
-| A | linear | grid-2x2 | 0.1 | 0 | 13 | 0.551 ± 0.068 | [0.510, 0.593] | 0.561 ± 0.064 | [0.522, 0.599] | 4 | 5 | 0.15 | 0.33 |
-| A | linear | grid-2x2 | 0.3 | 0 | 13 | 0.529 ± 0.072 | [0.485, 0.572] | 0.563 ± 0.056 | [0.530, 0.597] | 4 | 5 | 0.14 | 0.52 |
-| A | linear | grid-2x2 | 1 | 0 | 13 | 0.173 ± 0.066 | [0.134, 0.213] | 0.212 ± 0.035 | [0.191, 0.234] | 4 | 5 | 0.15 | 0.52 |
-| A | linear | grid-2x2 | 3 | 0 | 13 | 0.184 ± 0.049 | [0.154, 0.213] | 0.231 ± 0.039 | [0.207, 0.255] | 4 | 5 | 0.15 | 0.38 |
-| A | linear | grid-2x2 | 10 | 0 | 13 | 0.269 ± 0.040 | [0.245, 0.293] | 0.261 ± 0.039 | [0.238, 0.285] | 4 | 5 | 0.14 | 0.32 |
-| A | linear | grid-2x2 | 30 | 0 | 13 | 0.286 ± 0.065 | [0.247, 0.326] | 0.276 ± 0.042 | [0.250, 0.302] | 4 | 5 | 0.13 | 0.38 |
-| A | linear | grid-2x2 | 100 | 0 | 13 | 0.276 ± 0.067 | [0.235, 0.316] | 0.358 ± 0.056 | [0.324, 0.393] | 4 | 5 | 0.13 | 0.31 |
-| A | linear | grid-2x2 | 0.1 | 0.1 | 13 | 0.552 ± 0.068 | [0.511, 0.593] | 0.562 ± 0.064 | [0.523, 0.600] | 4 | 5 | 2.02 | 0.43 |
-| A | linear | grid-2x2 | 0.3 | 0.1 | 13 | 0.525 ± 0.071 | [0.482, 0.568] | 0.563 ± 0.056 | [0.529, 0.597] | 4 | 5 | 2.05 | 0.43 |
-| A | linear | grid-2x2 | 1 | 0.1 | 13 | 0.183 ± 0.058 | [0.148, 0.218] | 0.196 ± 0.022 | [0.182, 0.209] | 4 | 5 | 2.02 | 0.47 |
-| A | linear | grid-2x2 | 3 | 0.1 | 13 | 0.217 ± 0.083 | [0.167, 0.268] | 0.331 ± 0.074 | [0.287, 0.376] | 4 | 5 | 2.02 | 0.47 |
-| A | linear | grid-2x2 | 10 | 0.1 | 13 | 0.279 ± 0.042 | [0.254, 0.305] | 0.276 ± 0.038 | [0.253, 0.298] | 4 | 5 | 1.96 | 0.39 |
-| A | linear | grid-2x2 | 30 | 0.1 | 13 | 0.278 ± 0.073 | [0.234, 0.322] | 0.335 ± 0.047 | [0.307, 0.364] | 4 | 5 | 1.95 | 0.40 |
-| A | linear | grid-2x2 | 100 | 0.1 | 13 | 0.267 ± 0.080 | [0.219, 0.315] | 0.364 ± 0.052 | [0.332, 0.395] | 4 | 5 | 1.92 | 0.34 |
-| A | linear | grid-2x2 | 0.1 | 1 | 13 | 0.554 ± 0.067 | [0.514, 0.595] | 0.565 ± 0.062 | [0.528, 0.603] | 4 | 5 | 2.01 | 0.35 |
-| A | linear | grid-2x2 | 0.3 | 1 | 13 | 0.533 ± 0.079 | [0.485, 0.580] | 0.572 ± 0.057 | [0.537, 0.606] | 4 | 5 | 2.05 | 0.40 |
-| A | linear | grid-2x2 | 1 | 1 | 13 | 0.289 ± 0.047 | [0.260, 0.317] | 0.396 ± 0.042 | [0.370, 0.421] | 4 | 5 | 2.01 | 0.41 |
-| A | linear | grid-2x2 | 3 | 1 | 13 | 0.531 ± 0.069 | [0.490, 0.573] | 0.598 ± 0.064 | [0.560, 0.637] | 4 | 5 | 1.98 | 0.37 |
-| A | linear | grid-2x2 | 10 | 1 | 13 | 0.459 ± 0.054 | [0.426, 0.492] | 0.532 ± 0.059 | [0.496, 0.567] | 4 | 5 | 1.97 | 0.41 |
-| A | linear | grid-2x2 | 30 | 1 | 13 | 0.397 ± 0.075 | [0.352, 0.443] | 0.510 ± 0.066 | [0.470, 0.550] | 4 | 5 | 1.92 | 0.27 |
-| A | linear | grid-2x2 | 100 | 1 | 13 | 0.402 ± 0.055 | [0.369, 0.435] | 0.540 ± 0.065 | [0.501, 0.580] | 4 | 5 | 1.96 | 0.43 |
-| A | linear | grid-2x2 | 0.1 | 10 | 13 | 0.561 ± 0.058 | [0.526, 0.596] | 0.590 ± 0.057 | [0.556, 0.624] | 4 | 5 | 1.96 | 0.53 |
-| A | linear | grid-2x2 | 0.3 | 10 | 13 | 0.551 ± 0.065 | [0.512, 0.591] | 0.590 ± 0.053 | [0.558, 0.622] | 4 | 5 | 1.98 | 0.45 |
-| A | linear | grid-2x2 | 1 | 10 | 13 | 0.536 ± 0.070 | [0.493, 0.578] | 0.581 ± 0.049 | [0.551, 0.610] | 4 | 5 | 2.03 | 0.50 |
-| A | linear | grid-2x2 | 3 | 10 | 13 | 0.354 ± 0.047 | [0.326, 0.383] | 0.490 ± 0.062 | [0.452, 0.527] | 4 | 5 | 2.01 | 0.34 |
-| A | linear | grid-2x2 | 10 | 10 | 13 | 0.512 ± 0.075 | [0.467, 0.557] | 0.569 ± 0.050 | [0.539, 0.599] | 4 | 5 | 1.96 | 0.49 |
-| A | linear | grid-2x2 | 30 | 10 | 13 | 0.519 ± 0.067 | [0.478, 0.559] | 0.572 ± 0.049 | [0.543, 0.602] | 4 | 5 | 1.92 | 0.51 |
-| A | linear | grid-2x2 | 100 | 10 | 13 | 0.554 ± 0.066 | [0.514, 0.593] | 0.591 ± 0.054 | [0.558, 0.623] | 4 | 5 | 1.97 | 0.48 |
-| A | mlp | chain | 0.1 | 0 | 13 | 0.543 ± 0.058 | [0.508, 0.578] | 0.637 ± 0.060 | [0.601, 0.673] | 4 | 49 | 0.19 | 0.80 |
-| A | mlp | chain | 0.3 | 0 | 13 | 0.532 ± 0.056 | [0.498, 0.566] | 0.618 ± 0.071 | [0.575, 0.660] | 4 | 49 | 0.14 | 0.66 |
-| A | mlp | chain | 1 | 0 | 13 | 0.515 ± 0.035 | [0.494, 0.537] | 0.619 ± 0.061 | [0.582, 0.656] | 4 | 49 | 0.16 | 1.09 |
-| A | mlp | chain | 3 | 0 | 13 | 0.574 ± 0.049 | [0.544, 0.603] | 0.654 ± 0.066 | [0.614, 0.694] | 4 | 49 | 0.15 | 0.90 |
-| A | mlp | chain | 10 | 0 | 13 | 0.566 ± 0.045 | [0.539, 0.593] | 0.665 ± 0.063 | [0.627, 0.704] | 4 | 49 | 0.14 | 0.76 |
-| A | mlp | chain | 30 | 0 | 13 | 0.598 ± 0.080 | [0.549, 0.646] | 0.684 ± 0.083 | [0.634, 0.734] | 4 | 49 | 0.14 | 0.99 |
-| A | mlp | chain | 100 | 0 | 13 | 0.536 ± 0.060 | [0.500, 0.573] | 0.608 ± 0.059 | [0.572, 0.644] | 4 | 49 | 0.13 | 0.63 |
-| A | mlp | chain | 0.1 | 0.1 | 13 | 0.543 ± 0.053 | [0.511, 0.574] | 0.613 ± 0.068 | [0.572, 0.654] | 4 | 49 | 2.06 | 0.61 |
-| A | mlp | chain | 0.3 | 0.1 | 13 | 0.536 ± 0.055 | [0.502, 0.569] | 0.620 ± 0.074 | [0.575, 0.665] | 4 | 49 | 2.10 | 0.81 |
-| A | mlp | chain | 1 | 0.1 | 13 | 0.502 ± 0.053 | [0.470, 0.534] | 0.616 ± 0.063 | [0.577, 0.654] | 4 | 49 | 2.10 | 1.07 |
-| A | mlp | chain | 3 | 0.1 | 13 | 0.579 ± 0.058 | [0.544, 0.613] | 0.671 ± 0.065 | [0.631, 0.710] | 4 | 49 | 2.15 | 0.66 |
-| A | mlp | chain | 10 | 0.1 | 13 | 0.550 ± 0.051 | [0.519, 0.581] | 0.647 ± 0.057 | [0.613, 0.682] | 4 | 49 | 2.13 | 0.50 |
-| A | mlp | chain | 30 | 0.1 | 13 | 0.577 ± 0.064 | [0.539, 0.616] | 0.690 ± 0.066 | [0.650, 0.730] | 4 | 49 | 2.10 | 0.78 |
-| A | mlp | chain | 100 | 0.1 | 13 | 0.527 ± 0.065 | [0.487, 0.566] | 0.597 ± 0.076 | [0.551, 0.643] | 4 | 49 | 2.02 | 0.67 |
-| A | mlp | chain | 0.1 | 1 | 13 | 0.553 ± 0.053 | [0.522, 0.585] | 0.630 ± 0.056 | [0.596, 0.664] | 4 | 49 | 2.11 | 0.86 |
-| A | mlp | chain | 0.3 | 1 | 13 | 0.548 ± 0.069 | [0.506, 0.590] | 0.622 ± 0.063 | [0.584, 0.660] | 4 | 49 | 2.06 | 0.73 |
-| A | mlp | chain | 1 | 1 | 13 | 0.512 ± 0.066 | [0.472, 0.552] | 0.646 ± 0.042 | [0.621, 0.672] | 4 | 49 | 2.08 | 1.14 |
-| A | mlp | chain | 3 | 1 | 13 | 0.575 ± 0.039 | [0.551, 0.598] | 0.641 ± 0.029 | [0.623, 0.658] | 4 | 49 | 2.22 | 0.66 |
-| A | mlp | chain | 10 | 1 | 13 | 0.586 ± 0.053 | [0.554, 0.618] | 0.665 ± 0.069 | [0.623, 0.707] | 4 | 49 | 2.04 | 0.57 |
-| A | mlp | chain | 30 | 1 | 13 | 0.575 ± 0.051 | [0.544, 0.605] | 0.659 ± 0.072 | [0.616, 0.703] | 4 | 49 | 2.04 | 0.55 |
-| A | mlp | chain | 100 | 1 | 13 | 0.505 ± 0.054 | [0.472, 0.538] | 0.602 ± 0.062 | [0.564, 0.640] | 4 | 49 | 2.05 | 0.91 |
-| A | mlp | chain | 0.1 | 10 | 13 | 0.538 ± 0.058 | [0.503, 0.573] | 0.640 ± 0.072 | [0.596, 0.683] | 4 | 49 | 2.09 | 0.91 |
-| A | mlp | chain | 0.3 | 10 | 13 | 0.524 ± 0.066 | [0.484, 0.564] | 0.626 ± 0.066 | [0.586, 0.666] | 4 | 49 | 2.04 | 0.91 |
-| A | mlp | chain | 1 | 10 | 13 | 0.545 ± 0.063 | [0.507, 0.583] | 0.629 ± 0.056 | [0.595, 0.663] | 4 | 49 | 2.12 | 0.82 |
-| A | mlp | chain | 3 | 10 | 13 | 0.509 ± 0.065 | [0.470, 0.548] | 0.651 ± 0.059 | [0.615, 0.687] | 4 | 49 | 2.16 | 0.82 |
-| A | mlp | chain | 10 | 10 | 13 | 0.544 ± 0.064 | [0.505, 0.582] | 0.627 ± 0.054 | [0.594, 0.659] | 4 | 49 | 2.06 | 0.54 |
-| A | mlp | chain | 30 | 10 | 13 | 0.543 ± 0.046 | [0.515, 0.570] | 0.650 ± 0.065 | [0.610, 0.689] | 4 | 49 | 2.06 | 0.88 |
-| A | mlp | chain | 100 | 10 | 13 | 0.531 ± 0.043 | [0.505, 0.557] | 0.615 ± 0.055 | [0.581, 0.648] | 4 | 49 | 2.07 | 0.84 |
-| A | mlp | ring | 0.1 | 0 | 13 | 0.535 ± 0.052 | [0.503, 0.566] | 0.621 ± 0.075 | [0.576, 0.666] | 4 | 49 | 0.14 | 0.51 |
-| A | mlp | ring | 0.3 | 0 | 13 | 0.502 ± 0.062 | [0.464, 0.539] | 0.620 ± 0.065 | [0.581, 0.659] | 4 | 49 | 0.14 | 0.88 |
-| A | mlp | ring | 1 | 0 | 13 | 0.356 ± 0.082 | [0.306, 0.405] | 0.468 ± 0.078 | [0.421, 0.515] | 4 | 49 | 0.14 | 1.10 |
-| A | mlp | ring | 3 | 0 | 13 | 0.539 ± 0.070 | [0.497, 0.581] | 0.693 ± 0.051 | [0.663, 0.724] | 4 | 49 | 0.15 | 0.64 |
-| A | mlp | ring | 10 | 0 | 13 | 0.462 ± 0.041 | [0.437, 0.486] | 0.589 ± 0.065 | [0.550, 0.628] | 4 | 49 | 0.14 | 0.66 |
-| A | mlp | ring | 30 | 0 | 13 | 0.455 ± 0.113 | [0.387, 0.524] | 0.559 ± 0.084 | [0.507, 0.610] | 4 | 49 | 0.18 | 1.11 |
-| A | mlp | ring | 100 | 0 | 13 | 0.469 ± 0.066 | [0.429, 0.509] | 0.591 ± 0.082 | [0.542, 0.640] | 4 | 49 | 0.13 | 0.83 |
-| A | mlp | ring | 0.1 | 0.1 | 13 | 0.541 ± 0.061 | [0.504, 0.577] | 0.613 ± 0.081 | [0.565, 0.662] | 4 | 49 | 2.06 | 0.59 |
-| A | mlp | ring | 0.3 | 0.1 | 13 | 0.502 ± 0.060 | [0.466, 0.539] | 0.620 ± 0.063 | [0.582, 0.658] | 4 | 49 | 2.05 | 0.77 |
-| A | mlp | ring | 1 | 0.1 | 13 | 0.390 ± 0.078 | [0.342, 0.437] | 0.493 ± 0.087 | [0.440, 0.546] | 4 | 49 | 2.02 | 0.73 |
-| A | mlp | ring | 3 | 0.1 | 13 | 0.571 ± 0.060 | [0.535, 0.607] | 0.698 ± 0.051 | [0.667, 0.729] | 4 | 49 | 2.03 | 0.69 |
-| A | mlp | ring | 10 | 0.1 | 13 | 0.478 ± 0.042 | [0.452, 0.504] | 0.579 ± 0.061 | [0.542, 0.615] | 4 | 49 | 2.05 | 0.94 |
-| A | mlp | ring | 30 | 0.1 | 13 | 0.474 ± 0.095 | [0.416, 0.531] | 0.595 ± 0.101 | [0.534, 0.657] | 4 | 49 | 2.08 | 0.90 |
-| A | mlp | ring | 100 | 0.1 | 13 | 0.503 ± 0.084 | [0.452, 0.554] | 0.589 ± 0.080 | [0.541, 0.637] | 4 | 49 | 2.02 | 0.76 |
-| A | mlp | ring | 0.1 | 1 | 13 | 0.538 ± 0.056 | [0.504, 0.572] | 0.631 ± 0.066 | [0.591, 0.671] | 4 | 49 | 2.05 | 0.69 |
-| A | mlp | ring | 0.3 | 1 | 13 | 0.510 ± 0.053 | [0.478, 0.542] | 0.615 ± 0.073 | [0.571, 0.660] | 4 | 49 | 2.11 | 0.49 |
-| A | mlp | ring | 1 | 1 | 13 | 0.479 ± 0.054 | [0.446, 0.511] | 0.598 ± 0.047 | [0.569, 0.627] | 4 | 49 | 2.04 | 0.54 |
-| A | mlp | ring | 3 | 1 | 13 | 0.542 ± 0.046 | [0.514, 0.570] | 0.672 ± 0.076 | [0.626, 0.718] | 4 | 49 | 2.06 | 0.70 |
-| A | mlp | ring | 10 | 1 | 13 | 0.517 ± 0.061 | [0.480, 0.553] | 0.599 ± 0.082 | [0.550, 0.649] | 4 | 49 | 2.03 | 0.49 |
-| A | mlp | ring | 30 | 1 | 13 | 0.559 ± 0.065 | [0.519, 0.598] | 0.638 ± 0.076 | [0.592, 0.684] | 4 | 49 | 2.00 | 0.82 |
-| A | mlp | ring | 100 | 1 | 13 | 0.569 ± 0.055 | [0.535, 0.602] | 0.675 ± 0.078 | [0.628, 0.722] | 4 | 49 | 1.96 | 0.74 |
-| A | mlp | ring | 0.1 | 10 | 13 | 0.532 ± 0.058 | [0.497, 0.566] | 0.643 ± 0.077 | [0.596, 0.689] | 4 | 49 | 2.05 | 0.85 |
-| A | mlp | ring | 0.3 | 10 | 13 | 0.513 ± 0.076 | [0.467, 0.559] | 0.619 ± 0.070 | [0.577, 0.661] | 4 | 49 | 2.00 | 0.75 |
-| A | mlp | ring | 1 | 10 | 13 | 0.528 ± 0.055 | [0.494, 0.561] | 0.620 ± 0.045 | [0.593, 0.648] | 4 | 49 | 2.08 | 0.62 |
-| A | mlp | ring | 3 | 10 | 13 | 0.532 ± 0.063 | [0.494, 0.570] | 0.637 ± 0.061 | [0.601, 0.674] | 4 | 49 | 2.07 | 0.78 |
-| A | mlp | ring | 10 | 10 | 13 | 0.482 ± 0.064 | [0.443, 0.521] | 0.602 ± 0.057 | [0.568, 0.636] | 4 | 49 | 1.97 | 0.99 |
-| A | mlp | ring | 30 | 10 | 13 | 0.505 ± 0.056 | [0.471, 0.539] | 0.602 ± 0.061 | [0.566, 0.639] | 4 | 49 | 1.99 | 0.70 |
-| A | mlp | ring | 100 | 10 | 13 | 0.547 ± 0.044 | [0.520, 0.574] | 0.635 ± 0.060 | [0.599, 0.671] | 4 | 49 | 1.96 | 0.71 |
-| A | mlp | grid-2x2 | 0.1 | 0 | 13 | 0.537 ± 0.053 | [0.505, 0.569] | 0.617 ± 0.081 | [0.567, 0.666] | 4 | 49 | 0.15 | 0.61 |
-| A | mlp | grid-2x2 | 0.3 | 0 | 13 | 0.516 ± 0.052 | [0.484, 0.547] | 0.600 ± 0.054 | [0.567, 0.633] | 4 | 49 | 0.14 | 0.50 |
-| A | mlp | grid-2x2 | 1 | 0 | 13 | 0.451 ± 0.059 | [0.415, 0.487] | 0.510 ± 0.083 | [0.460, 0.560] | 4 | 49 | 0.15 | 0.83 |
-| A | mlp | grid-2x2 | 3 | 0 | 13 | 0.533 ± 0.076 | [0.488, 0.579] | 0.686 ± 0.086 | [0.634, 0.738] | 4 | 49 | 0.15 | 0.63 |
-| A | mlp | grid-2x2 | 10 | 0 | 13 | 0.413 ± 0.089 | [0.359, 0.467] | 0.537 ± 0.087 | [0.485, 0.590] | 4 | 49 | 0.14 | 0.60 |
-| A | mlp | grid-2x2 | 30 | 0 | 13 | 0.462 ± 0.095 | [0.404, 0.519] | 0.593 ± 0.073 | [0.549, 0.638] | 4 | 49 | 0.13 | 0.95 |
-| A | mlp | grid-2x2 | 100 | 0 | 13 | 0.509 ± 0.074 | [0.465, 0.554] | 0.623 ± 0.064 | [0.585, 0.662] | 4 | 49 | 0.13 | 0.77 |
-| A | mlp | grid-2x2 | 0.1 | 0.1 | 13 | 0.535 ± 0.065 | [0.496, 0.575] | 0.613 ± 0.074 | [0.569, 0.658] | 4 | 49 | 2.02 | 0.72 |
-| A | mlp | grid-2x2 | 0.3 | 0.1 | 13 | 0.504 ± 0.066 | [0.464, 0.544] | 0.618 ± 0.059 | [0.582, 0.653] | 4 | 49 | 2.05 | 0.61 |
-| A | mlp | grid-2x2 | 1 | 0.1 | 13 | 0.416 ± 0.084 | [0.366, 0.467] | 0.483 ± 0.079 | [0.435, 0.531] | 4 | 49 | 2.02 | 0.72 |
-| A | mlp | grid-2x2 | 3 | 0.1 | 13 | 0.552 ± 0.080 | [0.503, 0.600] | 0.675 ± 0.077 | [0.629, 0.722] | 4 | 49 | 2.02 | 0.69 |
-| A | mlp | grid-2x2 | 10 | 0.1 | 13 | 0.432 ± 0.068 | [0.390, 0.473] | 0.544 ± 0.071 | [0.501, 0.586] | 4 | 49 | 1.96 | 0.70 |
-| A | mlp | grid-2x2 | 30 | 0.1 | 13 | 0.501 ± 0.067 | [0.460, 0.541] | 0.599 ± 0.073 | [0.555, 0.643] | 4 | 49 | 1.95 | 0.89 |
-| A | mlp | grid-2x2 | 100 | 0.1 | 13 | 0.503 ± 0.084 | [0.452, 0.554] | 0.615 ± 0.061 | [0.578, 0.652] | 4 | 49 | 1.92 | 1.02 |
-| A | mlp | grid-2x2 | 0.1 | 1 | 13 | 0.549 ± 0.054 | [0.516, 0.581] | 0.616 ± 0.068 | [0.575, 0.657] | 4 | 49 | 2.01 | 0.64 |
-| A | mlp | grid-2x2 | 0.3 | 1 | 13 | 0.536 ± 0.056 | [0.502, 0.570] | 0.640 ± 0.061 | [0.603, 0.676] | 4 | 49 | 2.05 | 0.95 |
-| A | mlp | grid-2x2 | 1 | 1 | 13 | 0.507 ± 0.059 | [0.471, 0.542] | 0.622 ± 0.057 | [0.588, 0.657] | 4 | 49 | 2.01 | 0.87 |
-| A | mlp | grid-2x2 | 3 | 1 | 13 | 0.540 ± 0.049 | [0.511, 0.570] | 0.643 ± 0.063 | [0.605, 0.681] | 4 | 49 | 1.98 | 0.60 |
-| A | mlp | grid-2x2 | 10 | 1 | 13 | 0.482 ± 0.061 | [0.446, 0.519] | 0.606 ± 0.068 | [0.565, 0.646] | 4 | 49 | 1.97 | 0.81 |
-| A | mlp | grid-2x2 | 30 | 1 | 13 | 0.537 ± 0.060 | [0.500, 0.573] | 0.629 ± 0.081 | [0.581, 0.678] | 4 | 49 | 1.92 | 0.85 |
-| A | mlp | grid-2x2 | 100 | 1 | 13 | 0.583 ± 0.054 | [0.551, 0.615] | 0.695 ± 0.093 | [0.638, 0.751] | 4 | 49 | 1.96 | 0.76 |
-| A | mlp | grid-2x2 | 0.1 | 10 | 13 | 0.531 ± 0.054 | [0.498, 0.563] | 0.627 ± 0.079 | [0.579, 0.675] | 4 | 49 | 1.96 | 0.66 |
-| A | mlp | grid-2x2 | 0.3 | 10 | 13 | 0.532 ± 0.063 | [0.494, 0.570] | 0.617 ± 0.076 | [0.572, 0.663] | 4 | 49 | 1.98 | 0.98 |
-| A | mlp | grid-2x2 | 1 | 10 | 13 | 0.509 ± 0.066 | [0.469, 0.549] | 0.604 ± 0.063 | [0.566, 0.642] | 4 | 49 | 2.03 | 0.74 |
-| A | mlp | grid-2x2 | 3 | 10 | 13 | 0.535 ± 0.052 | [0.503, 0.566] | 0.650 ± 0.051 | [0.619, 0.681] | 4 | 49 | 2.01 | 0.55 |
-| A | mlp | grid-2x2 | 10 | 10 | 13 | 0.502 ± 0.056 | [0.468, 0.536] | 0.624 ± 0.064 | [0.586, 0.663] | 4 | 49 | 1.96 | 0.73 |
-| A | mlp | grid-2x2 | 30 | 10 | 13 | 0.501 ± 0.070 | [0.458, 0.543] | 0.605 ± 0.060 | [0.569, 0.641] | 4 | 49 | 1.92 | 0.60 |
-| A | mlp | grid-2x2 | 100 | 10 | 13 | 0.549 ± 0.039 | [0.525, 0.573] | 0.613 ± 0.051 | [0.582, 0.644] | 4 | 49 | 1.97 | 0.64 |
-| B | linear | – | – | 0 | 13 | 0.558 ± 0.061 | [0.521, 0.595] | 0.566 ± 0.067 | [0.526, 0.606] | 4 | 5 | 0.15 | 0.40 |
-| B | linear | – | – | 0.1 | 13 | 0.559 ± 0.064 | [0.520, 0.597] | 0.565 ± 0.062 | [0.528, 0.603] | 4 | 5 | 2.12 | 0.44 |
-| B | linear | – | – | 1 | 13 | 0.561 ± 0.057 | [0.526, 0.595] | 0.572 ± 0.061 | [0.534, 0.609] | 4 | 5 | 2.14 | 0.41 |
-| B | linear | – | – | 10 | 13 | 0.554 ± 0.064 | [0.516, 0.593] | 0.590 ± 0.059 | [0.555, 0.626] | 4 | 5 | 2.10 | 0.49 |
-| B | mlp | – | – | 0 | 13 | 0.568 ± 0.051 | [0.538, 0.599] | 0.657 ± 0.092 | [0.601, 0.713] | 4 | 49 | 0.15 | 0.85 |
-| B | mlp | – | – | 0.1 | 13 | 0.530 ± 0.036 | [0.508, 0.551] | 0.638 ± 0.074 | [0.594, 0.683] | 4 | 49 | 2.12 | 0.77 |
-| B | mlp | – | – | 1 | 13 | 0.533 ± 0.056 | [0.499, 0.567] | 0.634 ± 0.074 | [0.590, 0.679] | 4 | 49 | 2.14 | 0.60 |
-| B | mlp | – | – | 10 | 13 | 0.547 ± 0.063 | [0.509, 0.585] | 0.628 ± 0.073 | [0.583, 0.672] | 4 | 49 | 2.10 | 0.79 |
-| C | linear | – | – | – | 13 | 0.574 ± 0.058 | [0.538, 0.609] | 0.631 ± 0.060 | [0.595, 0.667] | 4 | 5 | 0.00 | 0.35 |
-| C | mlp | – | – | – | 13 | 0.632 ± 0.049 | [0.602, 0.661] | 0.762 ± 0.069 | [0.720, 0.803] | 4 | 49 | 0.00 | 0.96 |
-| D | linear | – | – | – | 13 | 0.250 ± 0.105 | [0.186, 0.313] | 0.361 ± 0.057 | [0.326, 0.395] | 4 | 5 | 0.03 | 0.37 |
-| D | mlp | – | – | – | 13 | 0.339 ± 0.079 | [0.291, 0.386] | 0.442 ± 0.073 | [0.397, 0.486] | 4 | 49 | 0.03 | 1.01 |
-| D-hybrid | hybrid | – | – | – | 13 | 0.493 ± 0.065 | [0.454, 0.532] | 0.571 ± 0.052 | [0.540, 0.603] | 4 | 29 | 0.00 | 18.51 |
+| A | linear | chain | 0.1 | 0 | 15 | 0.559 ± 0.061 | [0.525, 0.592] | 0.562 ± 0.072 | [0.522, 0.602] | 4 | 5 | 0.15 | 0.46 |
+| A | linear | chain | 0.3 | 0 | 15 | 0.553 ± 0.057 | [0.522, 0.585] | 0.557 ± 0.071 | [0.518, 0.596] | 4 | 5 | 0.14 | 0.39 |
+| A | linear | chain | 1 | 0 | 15 | 0.382 ± 0.081 | [0.337, 0.426] | 0.483 ± 0.064 | [0.448, 0.519] | 4 | 5 | 0.14 | 0.24 |
+| A | linear | chain | 3 | 0 | 15 | 0.487 ± 0.060 | [0.454, 0.520] | 0.562 ± 0.085 | [0.515, 0.609] | 4 | 5 | 0.14 | 0.36 |
+| A | linear | chain | 10 | 0 | 15 | 0.514 ± 0.064 | [0.478, 0.549] | 0.584 ± 0.074 | [0.542, 0.625] | 4 | 5 | 0.14 | 0.27 |
+| A | linear | chain | 30 | 0 | 15 | 0.532 ± 0.062 | [0.497, 0.567] | 0.582 ± 0.069 | [0.543, 0.620] | 4 | 5 | 0.14 | 0.30 |
+| A | linear | chain | 100 | 0 | 15 | 0.456 ± 0.079 | [0.412, 0.499] | 0.448 ± 0.064 | [0.412, 0.483] | 4 | 5 | 0.13 | 0.50 |
+| A | linear | chain | 0.1 | 0.1 | 15 | 0.560 ± 0.059 | [0.528, 0.593] | 0.564 ± 0.073 | [0.523, 0.604] | 4 | 5 | 1.94 | 0.39 |
+| A | linear | chain | 0.3 | 0.1 | 15 | 0.557 ± 0.063 | [0.522, 0.591] | 0.559 ± 0.071 | [0.519, 0.598] | 4 | 5 | 1.94 | 0.38 |
+| A | linear | chain | 1 | 0.1 | 15 | 0.412 ± 0.058 | [0.380, 0.444] | 0.490 ± 0.067 | [0.453, 0.527] | 4 | 5 | 1.95 | 0.25 |
+| A | linear | chain | 3 | 0.1 | 15 | 0.503 ± 0.061 | [0.469, 0.537] | 0.556 ± 0.074 | [0.515, 0.597] | 4 | 5 | 1.92 | 0.32 |
+| A | linear | chain | 10 | 0.1 | 15 | 0.523 ± 0.056 | [0.492, 0.554] | 0.586 ± 0.073 | [0.545, 0.626] | 4 | 5 | 1.95 | 0.27 |
+| A | linear | chain | 30 | 0.1 | 15 | 0.527 ± 0.052 | [0.499, 0.556] | 0.581 ± 0.069 | [0.542, 0.619] | 4 | 5 | 1.94 | 0.26 |
+| A | linear | chain | 100 | 0.1 | 15 | 0.444 ± 0.060 | [0.411, 0.478] | 0.462 ± 0.077 | [0.419, 0.504] | 4 | 5 | 1.90 | 0.52 |
+| A | linear | chain | 0.1 | 1 | 15 | 0.556 ± 0.061 | [0.522, 0.589] | 0.566 ± 0.073 | [0.526, 0.607] | 4 | 5 | 1.91 | 0.46 |
+| A | linear | chain | 0.3 | 1 | 15 | 0.556 ± 0.059 | [0.523, 0.588] | 0.568 ± 0.067 | [0.531, 0.605] | 4 | 5 | 1.94 | 0.45 |
+| A | linear | chain | 1 | 1 | 15 | 0.481 ± 0.061 | [0.447, 0.514] | 0.537 ± 0.061 | [0.503, 0.571] | 4 | 5 | 1.95 | 0.41 |
+| A | linear | chain | 3 | 1 | 15 | 0.548 ± 0.061 | [0.514, 0.582] | 0.551 ± 0.064 | [0.516, 0.586] | 4 | 5 | 1.94 | 0.45 |
+| A | linear | chain | 10 | 1 | 15 | 0.554 ± 0.057 | [0.522, 0.585] | 0.583 ± 0.072 | [0.543, 0.623] | 4 | 5 | 1.94 | 0.34 |
+| A | linear | chain | 30 | 1 | 15 | 0.542 ± 0.057 | [0.510, 0.574] | 0.583 ± 0.070 | [0.544, 0.621] | 4 | 5 | 1.94 | 0.37 |
+| A | linear | chain | 100 | 1 | 15 | 0.431 ± 0.097 | [0.378, 0.485] | 0.538 ± 0.068 | [0.500, 0.575] | 4 | 5 | 1.90 | 0.53 |
+| A | linear | chain | 0.1 | 10 | 15 | 0.552 ± 0.062 | [0.517, 0.586] | 0.588 ± 0.066 | [0.552, 0.625] | 4 | 5 | 1.92 | 0.46 |
+| A | linear | chain | 0.3 | 10 | 15 | 0.549 ± 0.068 | [0.512, 0.587] | 0.587 ± 0.066 | [0.550, 0.623] | 4 | 5 | 1.93 | 0.42 |
+| A | linear | chain | 1 | 10 | 15 | 0.544 ± 0.066 | [0.507, 0.581] | 0.584 ± 0.070 | [0.546, 0.623] | 4 | 5 | 1.94 | 0.46 |
+| A | linear | chain | 3 | 10 | 15 | 0.516 ± 0.061 | [0.482, 0.550] | 0.564 ± 0.068 | [0.526, 0.601] | 4 | 5 | 1.97 | 0.41 |
+| A | linear | chain | 10 | 10 | 15 | 0.543 ± 0.076 | [0.501, 0.585] | 0.583 ± 0.068 | [0.546, 0.621] | 4 | 5 | 1.96 | 0.54 |
+| A | linear | chain | 30 | 10 | 15 | 0.548 ± 0.062 | [0.513, 0.582] | 0.587 ± 0.067 | [0.550, 0.624] | 4 | 5 | 1.93 | 0.46 |
+| A | linear | chain | 100 | 10 | 15 | 0.548 ± 0.073 | [0.508, 0.588] | 0.585 ± 0.069 | [0.547, 0.623] | 4 | 5 | 1.94 | 0.55 |
+| A | linear | ring | 0.1 | 0 | 15 | 0.556 ± 0.060 | [0.522, 0.589] | 0.564 ± 0.074 | [0.523, 0.605] | 4 | 5 | 0.14 | 0.40 |
+| A | linear | ring | 0.3 | 0 | 15 | 0.531 ± 0.072 | [0.491, 0.571] | 0.557 ± 0.072 | [0.518, 0.597] | 4 | 5 | 0.14 | 0.39 |
+| A | linear | ring | 1 | 0 | 15 | 0.128 ± 0.076 | [0.086, 0.171] | 0.197 ± 0.036 | [0.177, 0.217] | 4 | 5 | 0.15 | 0.45 |
+| A | linear | ring | 3 | 0 | 15 | 0.549 ± 0.061 | [0.515, 0.583] | 0.569 ± 0.070 | [0.530, 0.608] | 4 | 5 | 0.16 | 0.42 |
+| A | linear | ring | 10 | 0 | 15 | 0.295 ± 0.052 | [0.267, 0.324] | 0.445 ± 0.070 | [0.406, 0.483] | 4 | 5 | 0.14 | 0.44 |
+| A | linear | ring | 30 | 0 | 15 | 0.223 ± 0.079 | [0.179, 0.266] | 0.282 ± 0.064 | [0.247, 0.318] | 4 | 5 | 0.14 | 0.41 |
+| A | linear | ring | 100 | 0 | 15 | 0.264 ± 0.077 | [0.222, 0.307] | 0.344 ± 0.061 | [0.310, 0.378] | 4 | 5 | 0.15 | 0.39 |
+| A | linear | ring | 0.1 | 0.1 | 15 | 0.552 ± 0.054 | [0.522, 0.582] | 0.565 ± 0.073 | [0.525, 0.606] | 4 | 5 | 1.94 | 0.43 |
+| A | linear | ring | 0.3 | 0.1 | 15 | 0.532 ± 0.070 | [0.493, 0.570] | 0.560 ± 0.070 | [0.522, 0.599] | 4 | 5 | 1.95 | 0.34 |
+| A | linear | ring | 1 | 0.1 | 15 | 0.133 ± 0.067 | [0.096, 0.171] | 0.218 ± 0.024 | [0.205, 0.231] | 4 | 5 | 1.99 | 0.56 |
+| A | linear | ring | 3 | 0.1 | 15 | 0.534 ± 0.080 | [0.490, 0.579] | 0.563 ± 0.074 | [0.522, 0.604] | 4 | 5 | 2.05 | 0.33 |
+| A | linear | ring | 10 | 0.1 | 15 | 0.332 ± 0.074 | [0.292, 0.373] | 0.473 ± 0.074 | [0.432, 0.514] | 4 | 5 | 2.07 | 0.37 |
+| A | linear | ring | 30 | 0.1 | 15 | 0.235 ± 0.086 | [0.188, 0.283] | 0.296 ± 0.075 | [0.255, 0.338] | 4 | 5 | 2.05 | 0.39 |
+| A | linear | ring | 100 | 0.1 | 15 | 0.268 ± 0.093 | [0.217, 0.320] | 0.359 ± 0.070 | [0.321, 0.398] | 4 | 5 | 2.04 | 0.44 |
+| A | linear | ring | 0.1 | 1 | 15 | 0.553 ± 0.058 | [0.521, 0.585] | 0.567 ± 0.072 | [0.527, 0.607] | 4 | 5 | 1.95 | 0.39 |
+| A | linear | ring | 0.3 | 1 | 15 | 0.541 ± 0.068 | [0.503, 0.579] | 0.569 ± 0.069 | [0.531, 0.608] | 4 | 5 | 2.00 | 0.40 |
+| A | linear | ring | 1 | 1 | 15 | 0.284 ± 0.066 | [0.248, 0.321] | 0.437 ± 0.056 | [0.406, 0.468] | 4 | 5 | 2.05 | 0.38 |
+| A | linear | ring | 3 | 1 | 15 | 0.499 ± 0.067 | [0.462, 0.536] | 0.569 ± 0.074 | [0.528, 0.609] | 4 | 5 | 2.06 | 0.36 |
+| A | linear | ring | 10 | 1 | 15 | 0.433 ± 0.059 | [0.400, 0.466] | 0.571 ± 0.057 | [0.539, 0.602] | 4 | 5 | 2.05 | 0.36 |
+| A | linear | ring | 30 | 1 | 15 | 0.415 ± 0.077 | [0.372, 0.457] | 0.523 ± 0.080 | [0.478, 0.567] | 4 | 5 | 2.05 | 0.38 |
+| A | linear | ring | 100 | 1 | 15 | 0.389 ± 0.090 | [0.339, 0.439] | 0.544 ± 0.075 | [0.502, 0.585] | 4 | 5 | 2.04 | 0.42 |
+| A | linear | ring | 0.1 | 10 | 15 | 0.551 ± 0.063 | [0.516, 0.586] | 0.586 ± 0.065 | [0.550, 0.622] | 4 | 5 | 1.93 | 0.45 |
+| A | linear | ring | 0.3 | 10 | 15 | 0.549 ± 0.061 | [0.515, 0.583] | 0.586 ± 0.069 | [0.548, 0.624] | 4 | 5 | 1.97 | 0.53 |
+| A | linear | ring | 1 | 10 | 15 | 0.523 ± 0.061 | [0.490, 0.557] | 0.581 ± 0.067 | [0.544, 0.618] | 4 | 5 | 2.03 | 0.49 |
+| A | linear | ring | 3 | 10 | 15 | 0.373 ± 0.075 | [0.332, 0.414] | 0.507 ± 0.052 | [0.478, 0.535] | 4 | 5 | 2.06 | 0.30 |
+| A | linear | ring | 10 | 10 | 15 | 0.506 ± 0.066 | [0.470, 0.543] | 0.571 ± 0.067 | [0.534, 0.609] | 4 | 5 | 2.05 | 0.69 |
+| A | linear | ring | 30 | 10 | 15 | 0.512 ± 0.061 | [0.478, 0.545] | 0.574 ± 0.068 | [0.536, 0.611] | 4 | 5 | 2.07 | 0.53 |
+| A | linear | ring | 100 | 10 | 15 | 0.556 ± 0.069 | [0.518, 0.594] | 0.589 ± 0.069 | [0.551, 0.627] | 4 | 5 | 2.00 | 0.52 |
+| A | linear | grid-2x2 | 0.1 | 0 | 15 | 0.548 ± 0.054 | [0.518, 0.578] | 0.562 ± 0.074 | [0.520, 0.603] | 4 | 5 | 0.14 | 0.43 |
+| A | linear | grid-2x2 | 0.3 | 0 | 15 | 0.523 ± 0.068 | [0.486, 0.561] | 0.568 ± 0.075 | [0.527, 0.609] | 4 | 5 | 0.14 | 0.43 |
+| A | linear | grid-2x2 | 1 | 0 | 15 | 0.188 ± 0.089 | [0.139, 0.237] | 0.225 ± 0.060 | [0.192, 0.258] | 4 | 5 | 0.15 | 0.37 |
+| A | linear | grid-2x2 | 3 | 0 | 15 | 0.168 ± 0.062 | [0.133, 0.202] | 0.249 ± 0.060 | [0.216, 0.282] | 4 | 5 | 0.15 | 0.22 |
+| A | linear | grid-2x2 | 10 | 0 | 15 | 0.261 ± 0.054 | [0.231, 0.290] | 0.271 ± 0.050 | [0.243, 0.299] | 4 | 5 | 0.14 | 0.40 |
+| A | linear | grid-2x2 | 30 | 0 | 15 | 0.291 ± 0.080 | [0.246, 0.335] | 0.299 ± 0.068 | [0.261, 0.336] | 4 | 5 | 0.13 | 0.33 |
+| A | linear | grid-2x2 | 100 | 0 | 15 | 0.266 ± 0.076 | [0.224, 0.309] | 0.351 ± 0.063 | [0.316, 0.386] | 4 | 5 | 0.13 | 0.28 |
+| A | linear | grid-2x2 | 0.1 | 0.1 | 15 | 0.551 ± 0.054 | [0.521, 0.581] | 0.563 ± 0.074 | [0.521, 0.604] | 4 | 5 | 1.98 | 0.43 |
+| A | linear | grid-2x2 | 0.3 | 0.1 | 15 | 0.524 ± 0.062 | [0.489, 0.558] | 0.568 ± 0.074 | [0.527, 0.610] | 4 | 5 | 2.02 | 0.45 |
+| A | linear | grid-2x2 | 1 | 0.1 | 15 | 0.176 ± 0.052 | [0.147, 0.205] | 0.210 ± 0.056 | [0.179, 0.241] | 4 | 5 | 1.98 | 0.48 |
+| A | linear | grid-2x2 | 3 | 0.1 | 15 | 0.223 ± 0.065 | [0.187, 0.259] | 0.326 ± 0.069 | [0.288, 0.364] | 4 | 5 | 2.02 | 0.30 |
+| A | linear | grid-2x2 | 10 | 0.1 | 15 | 0.272 ± 0.053 | [0.242, 0.301] | 0.285 ± 0.055 | [0.254, 0.315] | 4 | 5 | 1.94 | 0.47 |
+| A | linear | grid-2x2 | 30 | 0.1 | 15 | 0.278 ± 0.093 | [0.227, 0.329] | 0.340 ± 0.071 | [0.301, 0.380] | 4 | 5 | 1.90 | 0.36 |
+| A | linear | grid-2x2 | 100 | 0.1 | 15 | 0.281 ± 0.100 | [0.225, 0.336] | 0.361 ± 0.075 | [0.319, 0.402] | 4 | 5 | 1.90 | 0.36 |
+| A | linear | grid-2x2 | 0.1 | 1 | 15 | 0.556 ± 0.065 | [0.520, 0.592] | 0.567 ± 0.071 | [0.527, 0.606] | 4 | 5 | 2.05 | 0.39 |
+| A | linear | grid-2x2 | 0.3 | 1 | 15 | 0.544 ± 0.068 | [0.506, 0.581] | 0.572 ± 0.072 | [0.532, 0.612] | 4 | 5 | 1.97 | 0.63 |
+| A | linear | grid-2x2 | 1 | 1 | 15 | 0.245 ± 0.065 | [0.209, 0.281] | 0.371 ± 0.073 | [0.330, 0.412] | 4 | 5 | 1.96 | 0.46 |
+| A | linear | grid-2x2 | 3 | 1 | 15 | 0.513 ± 0.055 | [0.483, 0.544] | 0.599 ± 0.075 | [0.557, 0.641] | 4 | 5 | 1.92 | 0.34 |
+| A | linear | grid-2x2 | 10 | 1 | 15 | 0.462 ± 0.063 | [0.427, 0.496] | 0.520 ± 0.063 | [0.485, 0.555] | 4 | 5 | 1.94 | 0.50 |
+| A | linear | grid-2x2 | 30 | 1 | 15 | 0.384 ± 0.122 | [0.317, 0.452] | 0.526 ± 0.077 | [0.483, 0.569] | 4 | 5 | 1.90 | 0.28 |
+| A | linear | grid-2x2 | 100 | 1 | 15 | 0.393 ± 0.094 | [0.342, 0.445] | 0.540 ± 0.070 | [0.501, 0.579] | 4 | 5 | 1.90 | 0.43 |
+| A | linear | grid-2x2 | 0.1 | 10 | 15 | 0.549 ± 0.065 | [0.513, 0.585] | 0.587 ± 0.065 | [0.551, 0.623] | 4 | 5 | 1.97 | 0.45 |
+| A | linear | grid-2x2 | 0.3 | 10 | 15 | 0.546 ± 0.065 | [0.510, 0.582] | 0.586 ± 0.069 | [0.547, 0.624] | 4 | 5 | 1.96 | 0.49 |
+| A | linear | grid-2x2 | 1 | 10 | 15 | 0.523 ± 0.061 | [0.489, 0.557] | 0.579 ± 0.065 | [0.543, 0.615] | 4 | 5 | 1.98 | 0.51 |
+| A | linear | grid-2x2 | 3 | 10 | 15 | 0.374 ± 0.062 | [0.339, 0.408] | 0.491 ± 0.045 | [0.466, 0.515] | 4 | 5 | 1.92 | 0.37 |
+| A | linear | grid-2x2 | 10 | 10 | 15 | 0.507 ± 0.063 | [0.472, 0.542] | 0.570 ± 0.067 | [0.533, 0.608] | 4 | 5 | 1.91 | 0.57 |
+| A | linear | grid-2x2 | 30 | 10 | 15 | 0.511 ± 0.060 | [0.477, 0.544] | 0.571 ± 0.070 | [0.532, 0.609] | 4 | 5 | 1.90 | 0.43 |
+| A | linear | grid-2x2 | 100 | 10 | 15 | 0.558 ± 0.065 | [0.522, 0.594] | 0.590 ± 0.069 | [0.551, 0.628] | 4 | 5 | 1.89 | 0.47 |
+| A | mlp | chain | 0.1 | 0 | 15 | 0.564 ± 0.057 | [0.532, 0.596] | 0.648 ± 0.085 | [0.601, 0.695] | 4 | 49 | 0.15 | 0.71 |
+| A | mlp | chain | 0.3 | 0 | 15 | 0.532 ± 0.094 | [0.480, 0.584] | 0.623 ± 0.095 | [0.570, 0.675] | 4 | 49 | 0.14 | 0.62 |
+| A | mlp | chain | 1 | 0 | 15 | 0.493 ± 0.085 | [0.447, 0.540] | 0.617 ± 0.069 | [0.579, 0.656] | 4 | 49 | 0.14 | 0.75 |
+| A | mlp | chain | 3 | 0 | 15 | 0.564 ± 0.072 | [0.525, 0.604] | 0.686 ± 0.071 | [0.647, 0.726] | 4 | 49 | 0.14 | 0.81 |
+| A | mlp | chain | 10 | 0 | 15 | 0.576 ± 0.064 | [0.540, 0.612] | 0.683 ± 0.070 | [0.645, 0.722] | 4 | 49 | 0.14 | 0.75 |
+| A | mlp | chain | 30 | 0 | 15 | 0.561 ± 0.082 | [0.516, 0.607] | 0.676 ± 0.095 | [0.623, 0.729] | 4 | 49 | 0.14 | 1.17 |
+| A | mlp | chain | 100 | 0 | 15 | 0.540 ± 0.060 | [0.506, 0.573] | 0.627 ± 0.085 | [0.581, 0.674] | 4 | 49 | 0.13 | 0.70 |
+| A | mlp | chain | 0.1 | 0.1 | 15 | 0.552 ± 0.072 | [0.512, 0.592] | 0.646 ± 0.092 | [0.595, 0.698] | 4 | 49 | 1.94 | 0.72 |
+| A | mlp | chain | 0.3 | 0.1 | 15 | 0.552 ± 0.060 | [0.519, 0.585] | 0.623 ± 0.084 | [0.577, 0.669] | 4 | 49 | 1.94 | 0.68 |
+| A | mlp | chain | 1 | 0.1 | 15 | 0.491 ± 0.053 | [0.462, 0.521] | 0.613 ± 0.086 | [0.566, 0.661] | 4 | 49 | 1.95 | 0.94 |
+| A | mlp | chain | 3 | 0.1 | 15 | 0.562 ± 0.054 | [0.532, 0.592] | 0.688 ± 0.084 | [0.641, 0.734] | 4 | 49 | 1.92 | 0.78 |
+| A | mlp | chain | 10 | 0.1 | 15 | 0.559 ± 0.063 | [0.524, 0.594] | 0.700 ± 0.085 | [0.653, 0.747] | 4 | 49 | 1.95 | 0.89 |
+| A | mlp | chain | 30 | 0.1 | 15 | 0.577 ± 0.066 | [0.541, 0.614] | 0.665 ± 0.114 | [0.602, 0.728] | 4 | 49 | 1.94 | 0.98 |
+| A | mlp | chain | 100 | 0.1 | 15 | 0.543 ± 0.092 | [0.492, 0.594] | 0.634 ± 0.091 | [0.584, 0.684] | 4 | 49 | 1.90 | 0.97 |
+| A | mlp | chain | 0.1 | 1 | 15 | 0.540 ± 0.060 | [0.507, 0.573] | 0.642 ± 0.078 | [0.599, 0.685] | 4 | 49 | 1.91 | 0.77 |
+| A | mlp | chain | 0.3 | 1 | 15 | 0.546 ± 0.072 | [0.507, 0.586] | 0.641 ± 0.069 | [0.603, 0.680] | 4 | 49 | 1.94 | 0.71 |
+| A | mlp | chain | 1 | 1 | 15 | 0.496 ± 0.087 | [0.448, 0.544] | 0.633 ± 0.050 | [0.605, 0.661] | 4 | 49 | 1.95 | 0.87 |
+| A | mlp | chain | 3 | 1 | 15 | 0.561 ± 0.062 | [0.526, 0.595] | 0.624 ± 0.064 | [0.588, 0.660] | 4 | 49 | 1.94 | 0.61 |
+| A | mlp | chain | 10 | 1 | 15 | 0.565 ± 0.069 | [0.527, 0.604] | 0.668 ± 0.105 | [0.609, 0.726] | 4 | 49 | 1.94 | 0.73 |
+| A | mlp | chain | 30 | 1 | 15 | 0.557 ± 0.069 | [0.519, 0.595] | 0.669 ± 0.092 | [0.618, 0.720] | 4 | 49 | 1.94 | 0.77 |
+| A | mlp | chain | 100 | 1 | 15 | 0.476 ± 0.078 | [0.433, 0.519] | 0.599 ± 0.083 | [0.553, 0.645] | 4 | 49 | 1.90 | 0.77 |
+| A | mlp | chain | 0.1 | 10 | 15 | 0.542 ± 0.079 | [0.499, 0.586] | 0.644 ± 0.087 | [0.595, 0.692] | 4 | 49 | 1.92 | 0.71 |
+| A | mlp | chain | 0.3 | 10 | 15 | 0.547 ± 0.090 | [0.497, 0.597] | 0.643 ± 0.091 | [0.592, 0.693] | 4 | 49 | 1.93 | 0.85 |
+| A | mlp | chain | 1 | 10 | 15 | 0.527 ± 0.061 | [0.493, 0.560] | 0.632 ± 0.086 | [0.584, 0.679] | 4 | 49 | 1.94 | 0.70 |
+| A | mlp | chain | 3 | 10 | 15 | 0.513 ± 0.068 | [0.475, 0.550] | 0.634 ± 0.057 | [0.603, 0.666] | 4 | 49 | 1.97 | 0.69 |
+| A | mlp | chain | 10 | 10 | 15 | 0.548 ± 0.064 | [0.513, 0.583] | 0.650 ± 0.060 | [0.617, 0.683] | 4 | 49 | 1.96 | 0.85 |
+| A | mlp | chain | 30 | 10 | 15 | 0.559 ± 0.052 | [0.530, 0.588] | 0.643 ± 0.076 | [0.601, 0.685] | 4 | 49 | 1.93 | 0.65 |
+| A | mlp | chain | 100 | 10 | 15 | 0.532 ± 0.064 | [0.496, 0.567] | 0.649 ± 0.066 | [0.613, 0.686] | 4 | 49 | 1.94 | 0.92 |
+| A | mlp | ring | 0.1 | 0 | 15 | 0.559 ± 0.061 | [0.524, 0.593] | 0.653 ± 0.094 | [0.601, 0.705] | 4 | 49 | 0.14 | 0.93 |
+| A | mlp | ring | 0.3 | 0 | 15 | 0.523 ± 0.055 | [0.493, 0.553] | 0.616 ± 0.073 | [0.576, 0.656] | 4 | 49 | 0.14 | 0.52 |
+| A | mlp | ring | 1 | 0 | 15 | 0.351 ± 0.102 | [0.295, 0.408] | 0.466 ± 0.096 | [0.413, 0.519] | 4 | 49 | 0.15 | 0.91 |
+| A | mlp | ring | 3 | 0 | 15 | 0.548 ± 0.056 | [0.517, 0.579] | 0.696 ± 0.070 | [0.657, 0.735] | 4 | 49 | 0.16 | 0.73 |
+| A | mlp | ring | 10 | 0 | 15 | 0.441 ± 0.080 | [0.397, 0.486] | 0.571 ± 0.060 | [0.538, 0.604] | 4 | 49 | 0.14 | 0.96 |
+| A | mlp | ring | 30 | 0 | 15 | 0.463 ± 0.084 | [0.417, 0.510] | 0.565 ± 0.096 | [0.512, 0.619] | 4 | 49 | 0.14 | 1.04 |
+| A | mlp | ring | 100 | 0 | 15 | 0.510 ± 0.102 | [0.453, 0.567] | 0.634 ± 0.090 | [0.584, 0.684] | 4 | 49 | 0.15 | 0.97 |
+| A | mlp | ring | 0.1 | 0.1 | 15 | 0.549 ± 0.066 | [0.513, 0.586] | 0.646 ± 0.092 | [0.595, 0.697] | 4 | 49 | 1.94 | 0.72 |
+| A | mlp | ring | 0.3 | 0.1 | 15 | 0.515 ± 0.073 | [0.475, 0.556] | 0.599 ± 0.066 | [0.563, 0.636] | 4 | 49 | 1.95 | 0.50 |
+| A | mlp | ring | 1 | 0.1 | 15 | 0.377 ± 0.092 | [0.326, 0.428] | 0.477 ± 0.067 | [0.440, 0.514] | 4 | 49 | 1.99 | 1.52 |
+| A | mlp | ring | 3 | 0.1 | 15 | 0.553 ± 0.083 | [0.507, 0.600] | 0.701 ± 0.084 | [0.654, 0.748] | 4 | 49 | 2.05 | 0.72 |
+| A | mlp | ring | 10 | 0.1 | 15 | 0.470 ± 0.055 | [0.440, 0.501] | 0.572 ± 0.054 | [0.542, 0.601] | 4 | 49 | 2.07 | 0.70 |
+| A | mlp | ring | 30 | 0.1 | 15 | 0.476 ± 0.075 | [0.435, 0.518] | 0.578 ± 0.093 | [0.526, 0.629] | 4 | 49 | 2.05 | 0.91 |
+| A | mlp | ring | 100 | 0.1 | 15 | 0.498 ± 0.056 | [0.468, 0.529] | 0.618 ± 0.067 | [0.581, 0.655] | 4 | 49 | 2.04 | 0.75 |
+| A | mlp | ring | 0.1 | 1 | 15 | 0.551 ± 0.069 | [0.512, 0.589] | 0.633 ± 0.086 | [0.585, 0.680] | 4 | 49 | 1.95 | 0.82 |
+| A | mlp | ring | 0.3 | 1 | 15 | 0.542 ± 0.068 | [0.505, 0.580] | 0.615 ± 0.091 | [0.564, 0.665] | 4 | 49 | 2.00 | 0.66 |
+| A | mlp | ring | 1 | 1 | 15 | 0.479 ± 0.079 | [0.435, 0.522] | 0.600 ± 0.063 | [0.565, 0.635] | 4 | 49 | 2.05 | 1.11 |
+| A | mlp | ring | 3 | 1 | 15 | 0.568 ± 0.055 | [0.538, 0.598] | 0.677 ± 0.059 | [0.644, 0.710] | 4 | 49 | 2.06 | 0.79 |
+| A | mlp | ring | 10 | 1 | 15 | 0.505 ± 0.091 | [0.455, 0.555] | 0.628 ± 0.082 | [0.583, 0.674] | 4 | 49 | 2.05 | 0.84 |
+| A | mlp | ring | 30 | 1 | 15 | 0.536 ± 0.071 | [0.496, 0.575] | 0.625 ± 0.089 | [0.576, 0.674] | 4 | 49 | 2.05 | 0.85 |
+| A | mlp | ring | 100 | 1 | 15 | 0.585 ± 0.076 | [0.543, 0.627] | 0.702 ± 0.087 | [0.654, 0.750] | 4 | 49 | 2.04 | 0.94 |
+| A | mlp | ring | 0.1 | 10 | 15 | 0.552 ± 0.087 | [0.503, 0.600] | 0.640 ± 0.093 | [0.588, 0.692] | 4 | 49 | 1.93 | 0.71 |
+| A | mlp | ring | 0.3 | 10 | 15 | 0.537 ± 0.083 | [0.491, 0.583] | 0.629 ± 0.089 | [0.580, 0.678] | 4 | 49 | 1.97 | 0.89 |
+| A | mlp | ring | 1 | 10 | 15 | 0.521 ± 0.071 | [0.482, 0.561] | 0.639 ± 0.070 | [0.600, 0.678] | 4 | 49 | 2.03 | 0.74 |
+| A | mlp | ring | 3 | 10 | 15 | 0.536 ± 0.049 | [0.509, 0.563] | 0.647 ± 0.052 | [0.619, 0.676] | 4 | 49 | 2.06 | 1.02 |
+| A | mlp | ring | 10 | 10 | 15 | 0.523 ± 0.061 | [0.489, 0.557] | 0.629 ± 0.069 | [0.591, 0.667] | 4 | 49 | 2.05 | 0.71 |
+| A | mlp | ring | 30 | 10 | 15 | 0.513 ± 0.055 | [0.482, 0.543] | 0.629 ± 0.063 | [0.594, 0.664] | 4 | 49 | 2.07 | 0.71 |
+| A | mlp | ring | 100 | 10 | 15 | 0.552 ± 0.056 | [0.521, 0.583] | 0.652 ± 0.067 | [0.615, 0.689] | 4 | 49 | 2.00 | 0.64 |
+| A | mlp | grid-2x2 | 0.1 | 0 | 15 | 0.554 ± 0.060 | [0.521, 0.588] | 0.634 ± 0.091 | [0.584, 0.685] | 4 | 49 | 0.14 | 0.78 |
+| A | mlp | grid-2x2 | 0.3 | 0 | 15 | 0.517 ± 0.076 | [0.475, 0.559] | 0.614 ± 0.085 | [0.567, 0.661] | 4 | 49 | 0.14 | 0.58 |
+| A | mlp | grid-2x2 | 1 | 0 | 15 | 0.417 ± 0.062 | [0.382, 0.451] | 0.505 ± 0.084 | [0.459, 0.552] | 4 | 49 | 0.15 | 0.64 |
+| A | mlp | grid-2x2 | 3 | 0 | 15 | 0.557 ± 0.102 | [0.500, 0.614] | 0.686 ± 0.076 | [0.644, 0.728] | 4 | 49 | 0.15 | 0.72 |
+| A | mlp | grid-2x2 | 10 | 0 | 15 | 0.421 ± 0.088 | [0.373, 0.470] | 0.559 ± 0.086 | [0.511, 0.606] | 4 | 49 | 0.14 | 0.79 |
+| A | mlp | grid-2x2 | 30 | 0 | 15 | 0.484 ± 0.063 | [0.449, 0.519] | 0.611 ± 0.060 | [0.577, 0.644] | 4 | 49 | 0.13 | 1.06 |
+| A | mlp | grid-2x2 | 100 | 0 | 15 | 0.529 ± 0.101 | [0.473, 0.585] | 0.646 ± 0.094 | [0.595, 0.698] | 4 | 49 | 0.13 | 0.92 |
+| A | mlp | grid-2x2 | 0.1 | 0.1 | 15 | 0.549 ± 0.058 | [0.517, 0.581] | 0.650 ± 0.098 | [0.596, 0.705] | 4 | 49 | 1.98 | 0.90 |
+| A | mlp | grid-2x2 | 0.3 | 0.1 | 15 | 0.506 ± 0.068 | [0.468, 0.543] | 0.603 ± 0.089 | [0.554, 0.652] | 4 | 49 | 2.02 | 0.42 |
+| A | mlp | grid-2x2 | 1 | 0.1 | 15 | 0.412 ± 0.074 | [0.371, 0.453] | 0.525 ± 0.077 | [0.482, 0.567] | 4 | 49 | 1.98 | 0.76 |
+| A | mlp | grid-2x2 | 3 | 0.1 | 15 | 0.552 ± 0.078 | [0.509, 0.596] | 0.690 ± 0.086 | [0.642, 0.737] | 4 | 49 | 2.02 | 0.57 |
+| A | mlp | grid-2x2 | 10 | 0.1 | 15 | 0.409 ± 0.074 | [0.368, 0.449] | 0.544 ± 0.090 | [0.494, 0.593] | 4 | 49 | 1.94 | 0.85 |
+| A | mlp | grid-2x2 | 30 | 0.1 | 15 | 0.488 ± 0.065 | [0.452, 0.524] | 0.618 ± 0.052 | [0.590, 0.647] | 4 | 49 | 1.90 | 0.71 |
+| A | mlp | grid-2x2 | 100 | 0.1 | 15 | 0.503 ± 0.074 | [0.462, 0.544] | 0.613 ± 0.079 | [0.569, 0.657] | 4 | 49 | 1.90 | 0.71 |
+| A | mlp | grid-2x2 | 0.1 | 1 | 15 | 0.545 ± 0.074 | [0.504, 0.587] | 0.641 ± 0.096 | [0.588, 0.695] | 4 | 49 | 2.05 | 0.78 |
+| A | mlp | grid-2x2 | 0.3 | 1 | 15 | 0.550 ± 0.070 | [0.511, 0.588] | 0.612 ± 0.076 | [0.570, 0.654] | 4 | 49 | 1.97 | 0.71 |
+| A | mlp | grid-2x2 | 1 | 1 | 15 | 0.468 ± 0.060 | [0.434, 0.501] | 0.611 ± 0.069 | [0.573, 0.649] | 4 | 49 | 1.96 | 0.83 |
+| A | mlp | grid-2x2 | 3 | 1 | 15 | 0.515 ± 0.083 | [0.469, 0.561] | 0.636 ± 0.082 | [0.591, 0.682] | 4 | 49 | 1.92 | 0.66 |
+| A | mlp | grid-2x2 | 10 | 1 | 15 | 0.480 ± 0.062 | [0.446, 0.514] | 0.616 ± 0.095 | [0.563, 0.668] | 4 | 49 | 1.94 | 0.76 |
+| A | mlp | grid-2x2 | 30 | 1 | 15 | 0.527 ± 0.058 | [0.495, 0.559] | 0.655 ± 0.064 | [0.619, 0.690] | 4 | 49 | 1.90 | 1.10 |
+| A | mlp | grid-2x2 | 100 | 1 | 15 | 0.589 ± 0.076 | [0.547, 0.631] | 0.696 ± 0.091 | [0.646, 0.747] | 4 | 49 | 1.90 | 0.82 |
+| A | mlp | grid-2x2 | 0.1 | 10 | 15 | 0.532 ± 0.080 | [0.488, 0.576] | 0.636 ± 0.069 | [0.598, 0.675] | 4 | 49 | 1.97 | 0.83 |
+| A | mlp | grid-2x2 | 0.3 | 10 | 15 | 0.538 ± 0.085 | [0.491, 0.585] | 0.635 ± 0.082 | [0.589, 0.680] | 4 | 49 | 1.96 | 0.90 |
+| A | mlp | grid-2x2 | 1 | 10 | 15 | 0.535 ± 0.046 | [0.509, 0.560] | 0.635 ± 0.070 | [0.596, 0.674] | 4 | 49 | 1.98 | 0.78 |
+| A | mlp | grid-2x2 | 3 | 10 | 15 | 0.504 ± 0.071 | [0.465, 0.544] | 0.658 ± 0.060 | [0.625, 0.691] | 4 | 49 | 1.92 | 0.93 |
+| A | mlp | grid-2x2 | 10 | 10 | 15 | 0.508 ± 0.068 | [0.470, 0.545] | 0.623 ± 0.072 | [0.584, 0.663] | 4 | 49 | 1.91 | 0.60 |
+| A | mlp | grid-2x2 | 30 | 10 | 15 | 0.499 ± 0.054 | [0.469, 0.529] | 0.616 ± 0.083 | [0.570, 0.662] | 4 | 49 | 1.90 | 0.71 |
+| A | mlp | grid-2x2 | 100 | 10 | 15 | 0.550 ± 0.078 | [0.506, 0.593] | 0.646 ± 0.069 | [0.607, 0.684] | 4 | 49 | 1.89 | 0.60 |
+| B | linear | – | – | 0 | 15 | 0.565 ± 0.063 | [0.529, 0.600] | 0.566 ± 0.071 | [0.527, 0.605] | 4 | 5 | 0.14 | 0.46 |
+| B | linear | – | – | 0.1 | 15 | 0.563 ± 0.063 | [0.528, 0.597] | 0.566 ± 0.072 | [0.526, 0.606] | 4 | 5 | 1.91 | 0.45 |
+| B | linear | – | – | 1 | 15 | 0.562 ± 0.059 | [0.529, 0.594] | 0.572 ± 0.073 | [0.531, 0.612] | 4 | 5 | 1.95 | 0.43 |
+| B | linear | – | – | 10 | 15 | 0.551 ± 0.064 | [0.515, 0.587] | 0.586 ± 0.066 | [0.550, 0.623] | 4 | 5 | 1.95 | 0.49 |
+| B | mlp | – | – | 0 | 15 | 0.568 ± 0.063 | [0.533, 0.602] | 0.669 ± 0.078 | [0.626, 0.712] | 4 | 49 | 0.14 | 0.64 |
+| B | mlp | – | – | 0.1 | 15 | 0.574 ± 0.051 | [0.545, 0.602] | 0.653 ± 0.087 | [0.605, 0.701] | 4 | 49 | 1.91 | 0.73 |
+| B | mlp | – | – | 1 | 15 | 0.552 ± 0.057 | [0.521, 0.584] | 0.638 ± 0.111 | [0.577, 0.700] | 4 | 49 | 1.95 | 0.89 |
+| B | mlp | – | – | 10 | 15 | 0.545 ± 0.065 | [0.509, 0.581] | 0.645 ± 0.104 | [0.587, 0.702] | 4 | 49 | 1.95 | 0.75 |
+| C | linear | – | – | – | 15 | 0.558 ± 0.054 | [0.528, 0.588] | 0.640 ± 0.072 | [0.600, 0.680] | 4 | 5 | 0.00 | 0.36 |
+| C | mlp | – | – | – | 15 | 0.611 ± 0.077 | [0.568, 0.653] | 0.756 ± 0.058 | [0.724, 0.788] | 4 | 49 | 0.00 | 0.70 |
+| D | linear | – | – | – | 15 | 0.222 ± 0.109 | [0.161, 0.282] | 0.359 ± 0.067 | [0.322, 0.397] | 4 | 5 | 0.03 | 0.36 |
+| D | mlp | – | – | – | 15 | 0.352 ± 0.064 | [0.317, 0.388] | 0.440 ± 0.089 | [0.390, 0.489] | 4 | 49 | 0.03 | 0.65 |
+| D-hybrid | hybrid | – | – | – | 15 | 0.469 ± 0.078 | [0.426, 0.512] | 0.578 ± 0.072 | [0.538, 0.618] | 4 | 29 | 0.00 | 15.07 |
+
+Degenerate PCA fits (#525): fold fit in 0 of 15 folds, a tuning fit in 0 of 15 folds.
 
 #### A against B (MCC, paired by fold)
 
@@ -680,73 +717,73 @@ Head `linear`, geometry `chain`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | +0.006 (1.0000) | +0.002 (1.0000) | -0.008 (1.0000) | +0.002 (1.0000) |
-| 0.3 | -0.006 (1.0000) | -0.012 (1.0000) | -0.005 (1.0000) | +0.001 (1.0000) |
-| 1 | -0.181 (0.1284) | -0.178 (0.1777) | -0.074 (0.3198) | -0.001 (1.0000) |
-| 3 | -0.063 (1.0000) | -0.057 (1.0000) | -0.005 (1.0000) | -0.034 (0.4204) |
-| 10 | -0.050 (1.0000) | -0.042 (1.0000) | +0.001 (1.0000) | -0.008 (1.0000) |
-| 30 | -0.023 (1.0000) | -0.015 (1.0000) | -0.006 (1.0000) | +0.003 (1.0000) |
-| 100 | -0.085 (0.2183) | -0.089 (0.1777) | -0.138 (0.1777) | -0.006 (1.0000) |
+| 0.1 | -0.006 (1.0000) | -0.002 (1.0000) | -0.006 (1.0000) | +0.000 (1.0000) |
+| 0.3 | -0.011 (1.0000) | -0.006 (1.0000) | -0.006 (1.0000) | -0.002 (1.0000) |
+| 1 | -0.183 (0.0509) | -0.150 (0.0509) | -0.081 (0.0321 ✓) | -0.007 (1.0000) |
+| 3 | -0.077 (0.3127) | -0.060 (0.7863) | -0.014 (1.0000) | -0.035 (1.0000) |
+| 10 | -0.051 (0.1425) | -0.039 (0.3127) | -0.008 (1.0000) | -0.008 (1.0000) |
+| 30 | -0.033 (1.0000) | -0.035 (1.0000) | -0.019 (1.0000) | -0.003 (1.0000) |
+| 100 | -0.109 (0.0321 ✓) | -0.118 (0.0321 ✓) | -0.130 (0.4163) | -0.003 (1.0000) |
 
 Head `linear`, geometry `ring`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.004 (1.0000) | -0.007 (1.0000) | -0.006 (1.0000) | +0.006 (1.0000) |
-| 0.3 | -0.031 (1.0000) | -0.020 (1.0000) | -0.022 (1.0000) | -0.004 (1.0000) |
-| 1 | -0.442 (0.1284) | -0.436 (0.1284) | -0.254 (0.1284) | -0.015 (1.0000) |
-| 3 | -0.026 (1.0000) | -0.024 (1.0000) | -0.051 (1.0000) | -0.193 (0.1284) |
-| 10 | -0.236 (0.1284) | -0.223 (0.1777) | -0.103 (0.1777) | -0.040 (0.1777) |
-| 30 | -0.325 (0.1284) | -0.346 (0.1284) | -0.182 (0.1284) | -0.025 (1.0000) |
-| 100 | -0.296 (0.1284) | -0.298 (0.1284) | -0.151 (0.1284) | -0.007 (1.0000) |
+| 0.1 | -0.009 (1.0000) | -0.011 (1.0000) | -0.008 (1.0000) | -0.001 (1.0000) |
+| 0.3 | -0.034 (1.0000) | -0.031 (1.0000) | -0.021 (1.0000) | -0.002 (1.0000) |
+| 1 | -0.436 (0.0321 ✓) | -0.429 (0.0321 ✓) | -0.277 (0.0321 ✓) | -0.028 (1.0000) |
+| 3 | -0.016 (1.0000) | -0.028 (1.0000) | -0.062 (1.0000) | -0.178 (0.0321 ✓) |
+| 10 | -0.269 (0.0321 ✓) | -0.230 (0.0321 ✓) | -0.128 (0.0321 ✓) | -0.045 (0.5310) |
+| 30 | -0.342 (0.0321 ✓) | -0.327 (0.0321 ✓) | -0.147 (0.0321 ✓) | -0.039 (0.3127) |
+| 100 | -0.300 (0.0321 ✓) | -0.294 (0.0321 ✓) | -0.173 (0.0321 ✓) | +0.005 (1.0000) |
 
 Head `linear`, geometry `grid-2x2`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.007 (1.0000) | -0.007 (1.0000) | -0.006 (1.0000) | +0.006 (1.0000) |
-| 0.3 | -0.029 (1.0000) | -0.033 (0.5884) | -0.028 (1.0000) | -0.003 (1.0000) |
-| 1 | -0.384 (0.1284) | -0.376 (0.1284) | -0.272 (0.1284) | -0.019 (1.0000) |
-| 3 | -0.374 (0.1284) | -0.341 (0.1284) | -0.029 (1.0000) | -0.200 (0.1284) |
-| 10 | -0.289 (0.1284) | -0.279 (0.1284) | -0.102 (0.1284) | -0.043 (0.4204) |
-| 30 | -0.271 (0.1284) | -0.280 (0.1284) | -0.163 (0.1284) | -0.036 (0.5884) |
-| 100 | -0.282 (0.1284) | -0.291 (0.1284) | -0.158 (0.1284) | -0.001 (1.0000) |
+| 0.1 | -0.017 (1.0000) | -0.012 (1.0000) | -0.005 (1.0000) | -0.002 (1.0000) |
+| 0.3 | -0.041 (1.0000) | -0.039 (1.0000) | -0.018 (1.0000) | -0.005 (1.0000) |
+| 1 | -0.376 (0.0321 ✓) | -0.387 (0.0321 ✓) | -0.317 (0.0321 ✓) | -0.028 (1.0000) |
+| 3 | -0.397 (0.0321 ✓) | -0.340 (0.0321 ✓) | -0.049 (0.2338) | -0.177 (0.0321 ✓) |
+| 10 | -0.304 (0.0321 ✓) | -0.291 (0.0321 ✓) | -0.100 (0.0734) | -0.045 (0.2338) |
+| 30 | -0.274 (0.0321 ✓) | -0.285 (0.0321 ✓) | -0.177 (0.0509) | -0.040 (0.6888) |
+| 100 | -0.298 (0.0321 ✓) | -0.282 (0.0321 ✓) | -0.168 (0.0321 ✓) | +0.007 (1.0000) |
 
 Head `mlp`, geometry `chain`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.025 (1.0000) | +0.013 (1.0000) | +0.020 (1.0000) | -0.009 (1.0000) |
-| 0.3 | -0.037 (1.0000) | +0.006 (1.0000) | +0.015 (1.0000) | -0.023 (1.0000) |
-| 1 | -0.053 (0.5884) | -0.028 (1.0000) | -0.021 (1.0000) | -0.002 (1.0000) |
-| 3 | +0.006 (1.0000) | +0.049 (1.0000) | +0.042 (1.0000) | -0.037 (1.0000) |
-| 10 | -0.002 (1.0000) | +0.020 (1.0000) | +0.053 (0.1284) | -0.003 (1.0000) |
-| 30 | +0.029 (1.0000) | +0.048 (1.0000) | +0.042 (1.0000) | -0.004 (1.0000) |
-| 100 | -0.032 (1.0000) | -0.003 (1.0000) | -0.028 (1.0000) | -0.016 (1.0000) |
+| 0.1 | -0.004 (1.0000) | -0.022 (1.0000) | -0.013 (1.0000) | -0.003 (1.0000) |
+| 0.3 | -0.036 (1.0000) | -0.022 (1.0000) | -0.006 (1.0000) | +0.002 (1.0000) |
+| 1 | -0.074 (1.0000) | -0.082 (0.2338) | -0.056 (0.8871) | -0.018 (1.0000) |
+| 3 | -0.003 (1.0000) | -0.011 (1.0000) | +0.008 (1.0000) | -0.032 (1.0000) |
+| 10 | +0.008 (1.0000) | -0.014 (1.0000) | +0.013 (1.0000) | +0.003 (1.0000) |
+| 30 | -0.006 (1.0000) | +0.004 (1.0000) | +0.005 (1.0000) | +0.014 (1.0000) |
+| 100 | -0.028 (1.0000) | -0.031 (1.0000) | -0.076 (1.0000) | -0.013 (1.0000) |
 
 Head `mlp`, geometry `ring`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.034 (1.0000) | +0.011 (1.0000) | +0.005 (1.0000) | -0.015 (1.0000) |
-| 0.3 | -0.067 (1.0000) | -0.027 (1.0000) | -0.023 (1.0000) | -0.034 (1.0000) |
-| 1 | -0.213 (0.1284) | -0.140 (0.1284) | -0.054 (1.0000) | -0.019 (1.0000) |
-| 3 | -0.029 (1.0000) | +0.041 (1.0000) | +0.009 (1.0000) | -0.015 (1.0000) |
-| 10 | -0.107 (0.1284) | -0.052 (0.2183) | -0.016 (1.0000) | -0.065 (1.0000) |
-| 30 | -0.113 (0.3198) | -0.056 (1.0000) | +0.026 (1.0000) | -0.042 (1.0000) |
-| 100 | -0.099 (0.1777) | -0.027 (1.0000) | +0.036 (1.0000) | -0.000 (1.0000) |
+| 0.1 | -0.009 (1.0000) | -0.024 (1.0000) | -0.002 (1.0000) | +0.007 (1.0000) |
+| 0.3 | -0.045 (0.5862) | -0.058 (0.8871) | -0.010 (1.0000) | -0.008 (1.0000) |
+| 1 | -0.216 (0.0321 ✓) | -0.196 (0.0509) | -0.073 (0.8871) | -0.024 (1.0000) |
+| 3 | -0.020 (1.0000) | -0.020 (1.0000) | +0.016 (1.0000) | -0.009 (1.0000) |
+| 10 | -0.126 (0.1658) | -0.103 (0.1212) | -0.047 (1.0000) | -0.022 (1.0000) |
+| 30 | -0.104 (0.4163) | -0.097 (0.0509) | -0.017 (1.0000) | -0.032 (1.0000) |
+| 100 | -0.057 (1.0000) | -0.075 (0.2338) | +0.033 (1.0000) | +0.007 (1.0000) |
 
 Head `mlp`, geometry `grid-2x2`:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.031 (1.0000) | +0.006 (1.0000) | +0.016 (1.0000) | -0.016 (1.0000) |
-| 0.3 | -0.052 (1.0000) | -0.026 (1.0000) | +0.003 (1.0000) | -0.015 (1.0000) |
-| 1 | -0.118 (0.2183) | -0.114 (0.2183) | -0.026 (1.0000) | -0.038 (1.0000) |
-| 3 | -0.035 (1.0000) | +0.022 (1.0000) | +0.008 (1.0000) | -0.012 (1.0000) |
-| 10 | -0.155 (0.1284) | -0.098 (0.4204) | -0.051 (1.0000) | -0.045 (1.0000) |
-| 30 | -0.106 (1.0000) | -0.029 (1.0000) | +0.004 (1.0000) | -0.046 (1.0000) |
-| 100 | -0.059 (1.0000) | -0.027 (1.0000) | +0.050 (1.0000) | +0.002 (1.0000) |
+| 0.1 | -0.013 (1.0000) | -0.025 (1.0000) | -0.007 (1.0000) | -0.013 (1.0000) |
+| 0.3 | -0.051 (1.0000) | -0.068 (0.1212) | -0.003 (1.0000) | -0.007 (1.0000) |
+| 1 | -0.151 (0.0321 ✓) | -0.162 (0.0321 ✓) | -0.085 (0.2338) | -0.010 (1.0000) |
+| 3 | -0.010 (1.0000) | -0.021 (1.0000) | -0.037 (1.0000) | -0.041 (1.0000) |
+| 10 | -0.146 (0.0321 ✓) | -0.165 (0.0321 ✓) | -0.072 (0.3127) | -0.037 (1.0000) |
+| 30 | -0.083 (0.6888) | -0.085 (0.3127) | -0.026 (1.0000) | -0.045 (1.0000) |
+| 100 | -0.039 (1.0000) | -0.070 (1.0000) | +0.037 (1.0000) | +0.005 (1.0000) |
 
 #### Every arm against the classical baselines (MCC, paired by fold)
 
@@ -756,183 +793,192 @@ Arm A, head `linear`, geometry `chain`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.010 (1.0000) | -0.013 (1.0000) | -0.021 (1.0000) | -0.017 (1.0000) |
-| 0.3 | -0.022 (1.0000) | -0.027 (1.0000) | -0.018 (1.0000) | -0.018 (1.0000) |
-| 1 | -0.196 (0.1284) | -0.194 (0.1284) | -0.087 (0.1284) | -0.020 (1.0000) |
-| 3 | -0.079 (0.1777) | -0.072 (0.3198) | -0.018 (1.0000) | -0.053 (0.1777) |
-| 10 | -0.066 (0.3198) | -0.057 (0.1284) | -0.012 (1.0000) | -0.027 (1.0000) |
-| 30 | -0.039 (0.7827) | -0.030 (1.0000) | -0.019 (1.0000) | -0.016 (1.0000) |
-| 100 | -0.101 (0.1284) | -0.105 (0.1284) | -0.151 (0.2183) | -0.025 (1.0000) |
+| 0.1 | +0.001 (1.0000) | +0.002 (1.0000) | -0.002 (1.0000) | -0.006 (1.0000) |
+| 0.3 | -0.004 (1.0000) | -0.001 (1.0000) | -0.002 (1.0000) | -0.008 (1.0000) |
+| 1 | -0.176 (0.0321 ✓) | -0.146 (0.0321 ✓) | -0.077 (0.2338) | -0.014 (1.0000) |
+| 3 | -0.071 (0.5310) | -0.055 (1.0000) | -0.010 (1.0000) | -0.042 (1.0000) |
+| 10 | -0.044 (1.0000) | -0.034 (1.0000) | -0.004 (1.0000) | -0.015 (1.0000) |
+| 30 | -0.026 (1.0000) | -0.030 (1.0000) | -0.016 (1.0000) | -0.010 (1.0000) |
+| 100 | -0.102 (0.0509) | -0.113 (0.0321 ✓) | -0.127 (0.2338) | -0.010 (1.0000) |
 
 Arm A, head `linear`, geometry `ring`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.020 (1.0000) | -0.023 (1.0000) | -0.019 (1.0000) | -0.013 (1.0000) |
-| 0.3 | -0.047 (0.7827) | -0.035 (0.7827) | -0.035 (0.5884) | -0.023 (1.0000) |
-| 1 | -0.458 (0.1284) | -0.452 (0.1284) | -0.267 (0.1284) | -0.034 (0.7827) |
-| 3 | -0.042 (0.5884) | -0.040 (0.7827) | -0.064 (0.2183) | -0.213 (0.1284) |
-| 10 | -0.251 (0.1284) | -0.238 (0.1284) | -0.116 (0.1284) | -0.059 (0.1777) |
-| 30 | -0.341 (0.1284) | -0.361 (0.1284) | -0.195 (0.1284) | -0.044 (0.1284) |
-| 100 | -0.312 (0.1284) | -0.313 (0.1284) | -0.164 (0.1284) | -0.026 (1.0000) |
+| 0.1 | -0.002 (1.0000) | -0.006 (1.0000) | -0.004 (1.0000) | -0.007 (1.0000) |
+| 0.3 | -0.027 (1.0000) | -0.026 (1.0000) | -0.017 (1.0000) | -0.009 (1.0000) |
+| 1 | -0.430 (0.0321 ✓) | -0.424 (0.0321 ✓) | -0.273 (0.0321 ✓) | -0.034 (1.0000) |
+| 3 | -0.009 (1.0000) | -0.024 (1.0000) | -0.059 (1.0000) | -0.185 (0.0321 ✓) |
+| 10 | -0.263 (0.0321 ✓) | -0.225 (0.0321 ✓) | -0.125 (0.0321 ✓) | -0.051 (1.0000) |
+| 30 | -0.335 (0.0321 ✓) | -0.322 (0.0321 ✓) | -0.143 (0.0509) | -0.046 (1.0000) |
+| 100 | -0.293 (0.0321 ✓) | -0.289 (0.0321 ✓) | -0.169 (0.0321 ✓) | -0.001 (1.0000) |
 
 Arm A, head `linear`, geometry `grid-2x2`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.022 (1.0000) | -0.022 (1.0000) | -0.019 (1.0000) | -0.013 (1.0000) |
-| 0.3 | -0.045 (1.0000) | -0.048 (0.3198) | -0.041 (0.3198) | -0.023 (1.0000) |
-| 1 | -0.400 (0.1284) | -0.391 (0.1284) | -0.285 (0.1284) | -0.038 (0.2183) |
-| 3 | -0.390 (0.1284) | -0.356 (0.1284) | -0.042 (1.0000) | -0.219 (0.1284) |
-| 10 | -0.305 (0.1284) | -0.294 (0.1284) | -0.115 (0.1284) | -0.062 (0.3198) |
-| 30 | -0.287 (0.1284) | -0.295 (0.1284) | -0.177 (0.1284) | -0.055 (0.1284) |
-| 100 | -0.298 (0.1284) | -0.306 (0.1284) | -0.171 (0.1284) | -0.020 (1.0000) |
+| 0.1 | -0.010 (1.0000) | -0.007 (1.0000) | -0.002 (1.0000) | -0.009 (1.0000) |
+| 0.3 | -0.035 (1.0000) | -0.034 (1.0000) | -0.014 (1.0000) | -0.012 (1.0000) |
+| 1 | -0.370 (0.0321 ✓) | -0.382 (0.0321 ✓) | -0.313 (0.0321 ✓) | -0.035 (1.0000) |
+| 3 | -0.390 (0.0321 ✓) | -0.335 (0.0321 ✓) | -0.045 (1.0000) | -0.184 (0.0321 ✓) |
+| 10 | -0.297 (0.0321 ✓) | -0.286 (0.0321 ✓) | -0.096 (0.0509) | -0.051 (1.0000) |
+| 30 | -0.267 (0.0321 ✓) | -0.280 (0.0321 ✓) | -0.174 (0.0321 ✓) | -0.047 (1.0000) |
+| 100 | -0.291 (0.0321 ✓) | -0.277 (0.0321 ✓) | -0.164 (0.0321 ✓) | -0.000 (1.0000) |
 
 Arm A, head `linear`, geometry `chain`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.068 (0.2183) | -0.071 (0.2183) | -0.079 (0.1284) | -0.075 (0.3198) |
-| 0.3 | -0.080 (0.1777) | -0.085 (0.1777) | -0.076 (0.1777) | -0.076 (0.1777) |
-| 1 | -0.254 (0.1284) | -0.251 (0.1284) | -0.145 (0.1284) | -0.078 (0.1777) |
-| 3 | -0.137 (0.1284) | -0.130 (0.1284) | -0.076 (0.3198) | -0.111 (0.1777) |
-| 10 | -0.124 (0.1777) | -0.115 (0.1777) | -0.070 (0.2183) | -0.085 (0.2183) |
-| 30 | -0.097 (0.1777) | -0.087 (0.1777) | -0.077 (0.3198) | -0.074 (0.1777) |
-| 100 | -0.159 (0.1284) | -0.162 (0.1284) | -0.209 (0.1284) | -0.083 (0.1777) |
+| 0.1 | -0.052 (1.0000) | -0.050 (1.0000) | -0.055 (1.0000) | -0.059 (1.0000) |
+| 0.3 | -0.057 (1.0000) | -0.054 (1.0000) | -0.055 (1.0000) | -0.061 (1.0000) |
+| 1 | -0.229 (0.0321 ✓) | -0.198 (0.0509) | -0.130 (0.0321 ✓) | -0.067 (1.0000) |
+| 3 | -0.123 (0.0734) | -0.108 (0.2338) | -0.063 (1.0000) | -0.094 (0.8871) |
+| 10 | -0.097 (0.0509) | -0.087 (0.2338) | -0.057 (1.0000) | -0.068 (1.0000) |
+| 30 | -0.079 (1.0000) | -0.083 (1.0000) | -0.068 (1.0000) | -0.063 (1.0000) |
+| 100 | -0.155 (0.0321 ✓) | -0.166 (0.0321 ✓) | -0.179 (0.0321 ✓) | -0.062 (1.0000) |
 
 Arm A, head `linear`, geometry `ring`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.078 (0.2183) | -0.080 (0.1777) | -0.077 (0.2183) | -0.071 (0.3198) |
-| 0.3 | -0.104 (0.1777) | -0.093 (0.1777) | -0.093 (0.1777) | -0.081 (0.1777) |
-| 1 | -0.516 (0.1284) | -0.509 (0.1284) | -0.325 (0.1284) | -0.092 (0.1777) |
-| 3 | -0.100 (0.1284) | -0.097 (0.1284) | -0.122 (0.1284) | -0.270 (0.1284) |
-| 10 | -0.309 (0.1284) | -0.296 (0.1284) | -0.174 (0.1284) | -0.117 (0.1777) |
-| 30 | -0.399 (0.1284) | -0.419 (0.1284) | -0.253 (0.1284) | -0.102 (0.1284) |
-| 100 | -0.370 (0.1284) | -0.371 (0.1284) | -0.222 (0.1284) | -0.084 (0.2183) |
+| 0.1 | -0.055 (1.0000) | -0.059 (1.0000) | -0.057 (1.0000) | -0.060 (1.0000) |
+| 0.3 | -0.080 (1.0000) | -0.079 (1.0000) | -0.070 (1.0000) | -0.061 (1.0000) |
+| 1 | -0.482 (0.0321 ✓) | -0.477 (0.0321 ✓) | -0.326 (0.0321 ✓) | -0.087 (1.0000) |
+| 3 | -0.062 (1.0000) | -0.076 (1.0000) | -0.111 (0.2338) | -0.238 (0.0321 ✓) |
+| 10 | -0.315 (0.0321 ✓) | -0.278 (0.0321 ✓) | -0.177 (0.0321 ✓) | -0.104 (0.4163) |
+| 30 | -0.388 (0.0321 ✓) | -0.375 (0.0321 ✓) | -0.196 (0.0321 ✓) | -0.099 (0.4163) |
+| 100 | -0.346 (0.0321 ✓) | -0.342 (0.0321 ✓) | -0.222 (0.0321 ✓) | -0.054 (1.0000) |
 
 Arm A, head `linear`, geometry `grid-2x2`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.080 (0.2183) | -0.080 (0.1777) | -0.077 (0.2183) | -0.071 (0.3198) |
-| 0.3 | -0.103 (0.2183) | -0.106 (0.1777) | -0.099 (0.1777) | -0.080 (0.1777) |
-| 1 | -0.458 (0.1284) | -0.449 (0.1284) | -0.343 (0.1284) | -0.096 (0.1284) |
-| 3 | -0.448 (0.1284) | -0.414 (0.1284) | -0.100 (0.4204) | -0.277 (0.1284) |
-| 10 | -0.363 (0.1284) | -0.352 (0.1284) | -0.173 (0.1284) | -0.120 (0.1777) |
-| 30 | -0.345 (0.1284) | -0.353 (0.1284) | -0.234 (0.1284) | -0.113 (0.1777) |
-| 100 | -0.356 (0.1284) | -0.364 (0.1284) | -0.229 (0.1284) | -0.078 (0.1777) |
+| 0.1 | -0.063 (1.0000) | -0.060 (1.0000) | -0.054 (1.0000) | -0.061 (1.0000) |
+| 0.3 | -0.087 (1.0000) | -0.087 (1.0000) | -0.067 (1.0000) | -0.064 (1.0000) |
+| 1 | -0.422 (0.0321 ✓) | -0.435 (0.0321 ✓) | -0.366 (0.0321 ✓) | -0.087 (1.0000) |
+| 3 | -0.443 (0.0321 ✓) | -0.388 (0.0321 ✓) | -0.097 (0.1658) | -0.237 (0.0321 ✓) |
+| 10 | -0.350 (0.0321 ✓) | -0.339 (0.0321 ✓) | -0.149 (0.0321 ✓) | -0.104 (0.4163) |
+| 30 | -0.320 (0.0321 ✓) | -0.333 (0.0321 ✓) | -0.226 (0.0321 ✓) | -0.100 (0.5310) |
+| 100 | -0.344 (0.0321 ✓) | -0.330 (0.0321 ✓) | -0.217 (0.0321 ✓) | -0.053 (1.0000) |
 
 Arm A, head `mlp`, geometry `chain`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.031 (1.0000) | -0.031 (1.0000) | -0.020 (1.0000) | -0.036 (1.0000) |
-| 0.3 | -0.042 (1.0000) | -0.038 (1.0000) | -0.025 (1.0000) | -0.050 (1.0000) |
-| 1 | -0.058 (1.0000) | -0.072 (1.0000) | -0.062 (1.0000) | -0.029 (1.0000) |
-| 3 | +0.000 (1.0000) | +0.005 (1.0000) | +0.001 (1.0000) | -0.064 (1.0000) |
-| 10 | -0.008 (1.0000) | -0.024 (1.0000) | +0.012 (1.0000) | -0.030 (1.0000) |
-| 30 | +0.024 (1.0000) | +0.004 (1.0000) | +0.001 (1.0000) | -0.031 (1.0000) |
-| 100 | -0.037 (1.0000) | -0.047 (1.0000) | -0.069 (0.3198) | -0.043 (1.0000) |
+| 0.1 | +0.006 (1.0000) | -0.006 (1.0000) | -0.018 (1.0000) | -0.016 (1.0000) |
+| 0.3 | -0.026 (1.0000) | -0.006 (1.0000) | -0.011 (1.0000) | -0.011 (1.0000) |
+| 1 | -0.064 (1.0000) | -0.066 (0.5310) | -0.062 (1.0000) | -0.031 (1.0000) |
+| 3 | +0.007 (1.0000) | +0.004 (1.0000) | +0.003 (1.0000) | -0.045 (1.0000) |
+| 10 | +0.018 (1.0000) | +0.001 (1.0000) | +0.008 (1.0000) | -0.010 (1.0000) |
+| 30 | +0.004 (1.0000) | +0.019 (1.0000) | -0.001 (1.0000) | +0.001 (1.0000) |
+| 100 | -0.018 (1.0000) | -0.015 (1.0000) | -0.082 (0.1212) | -0.026 (1.0000) |
 
 Arm A, head `mlp`, geometry `ring`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.039 (1.0000) | -0.033 (1.0000) | -0.036 (1.0000) | -0.042 (1.0000) |
-| 0.3 | -0.072 (1.0000) | -0.071 (0.2183) | -0.064 (1.0000) | -0.060 (1.0000) |
-| 1 | -0.218 (0.1777) | -0.184 (0.1284) | -0.095 (0.1777) | -0.046 (0.2183) |
-| 3 | -0.034 (1.0000) | -0.003 (1.0000) | -0.032 (1.0000) | -0.042 (1.0000) |
-| 10 | -0.112 (0.1284) | -0.096 (0.1284) | -0.057 (1.0000) | -0.091 (0.1284) |
-| 30 | -0.119 (0.5884) | -0.100 (0.5884) | -0.015 (1.0000) | -0.068 (0.3198) |
-| 100 | -0.104 (0.1777) | -0.071 (1.0000) | -0.005 (1.0000) | -0.027 (1.0000) |
+| 0.1 | +0.001 (1.0000) | -0.008 (1.0000) | -0.007 (1.0000) | -0.006 (1.0000) |
+| 0.3 | -0.035 (1.0000) | -0.042 (1.0000) | -0.016 (1.0000) | -0.021 (1.0000) |
+| 1 | -0.206 (0.0321 ✓) | -0.181 (0.0321 ✓) | -0.079 (1.0000) | -0.037 (1.0000) |
+| 3 | -0.010 (1.0000) | -0.004 (1.0000) | +0.010 (1.0000) | -0.022 (1.0000) |
+| 10 | -0.116 (0.2338) | -0.088 (0.4163) | -0.053 (1.0000) | -0.035 (1.0000) |
+| 30 | -0.094 (0.4163) | -0.081 (1.0000) | -0.022 (1.0000) | -0.045 (1.0000) |
+| 100 | -0.048 (1.0000) | -0.060 (1.0000) | +0.027 (1.0000) | -0.006 (1.0000) |
 
 Arm A, head `mlp`, geometry `grid-2x2`, against C/linear:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.037 (1.0000) | -0.038 (1.0000) | -0.025 (1.0000) | -0.043 (1.0000) |
-| 0.3 | -0.058 (1.0000) | -0.070 (0.1284) | -0.038 (1.0000) | -0.042 (1.0000) |
-| 1 | -0.123 (0.1284) | -0.158 (0.1777) | -0.067 (0.5884) | -0.065 (0.1777) |
-| 3 | -0.041 (1.0000) | -0.022 (1.0000) | -0.033 (1.0000) | -0.039 (1.0000) |
-| 10 | -0.160 (0.1284) | -0.142 (0.1284) | -0.092 (0.2183) | -0.072 (0.1777) |
-| 30 | -0.112 (0.5884) | -0.073 (1.0000) | -0.037 (1.0000) | -0.073 (0.1284) |
-| 100 | -0.064 (1.0000) | -0.071 (1.0000) | +0.009 (1.0000) | -0.025 (1.0000) |
+| 0.1 | -0.004 (1.0000) | -0.009 (1.0000) | -0.012 (1.0000) | -0.026 (1.0000) |
+| 0.3 | -0.041 (1.0000) | -0.052 (1.0000) | -0.008 (1.0000) | -0.020 (1.0000) |
+| 1 | -0.141 (0.0509) | -0.146 (0.0734) | -0.090 (0.0734) | -0.023 (1.0000) |
+| 3 | -0.001 (1.0000) | -0.005 (1.0000) | -0.043 (1.0000) | -0.054 (1.0000) |
+| 10 | -0.137 (0.1658) | -0.149 (0.0509) | -0.078 (0.8871) | -0.050 (1.0000) |
+| 30 | -0.074 (1.0000) | -0.070 (1.0000) | -0.031 (1.0000) | -0.059 (1.0000) |
+| 100 | -0.029 (1.0000) | -0.055 (1.0000) | +0.031 (1.0000) | -0.008 (1.0000) |
 
 Arm A, head `mlp`, geometry `chain`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.089 (0.1777) | -0.089 (0.1777) | -0.078 (0.3198) | -0.093 (0.1284) |
-| 0.3 | -0.100 (0.1284) | -0.096 (0.1777) | -0.083 (0.2183) | -0.108 (0.2183) |
-| 1 | -0.116 (0.1284) | -0.130 (0.1777) | -0.120 (0.1777) | -0.086 (0.2183) |
-| 3 | -0.058 (0.5884) | -0.053 (0.5884) | -0.057 (0.7827) | -0.122 (0.2183) |
-| 10 | -0.065 (0.7827) | -0.082 (0.5884) | -0.046 (1.0000) | -0.088 (0.1284) |
-| 30 | -0.034 (1.0000) | -0.054 (1.0000) | -0.057 (1.0000) | -0.089 (0.1284) |
-| 100 | -0.095 (0.1777) | -0.105 (0.1284) | -0.126 (0.1284) | -0.101 (0.1284) |
+| 0.1 | -0.046 (1.0000) | -0.059 (1.0000) | -0.071 (1.0000) | -0.068 (1.0000) |
+| 0.3 | -0.079 (1.0000) | -0.059 (1.0000) | -0.064 (1.0000) | -0.064 (1.0000) |
+| 1 | -0.117 (0.4163) | -0.119 (0.0509) | -0.115 (0.2338) | -0.084 (1.0000) |
+| 3 | -0.046 (1.0000) | -0.048 (1.0000) | -0.050 (1.0000) | -0.098 (0.3127) |
+| 10 | -0.035 (1.0000) | -0.051 (0.4163) | -0.045 (1.0000) | -0.062 (1.0000) |
+| 30 | -0.049 (1.0000) | -0.033 (1.0000) | -0.053 (1.0000) | -0.052 (1.0000) |
+| 100 | -0.071 (1.0000) | -0.068 (1.0000) | -0.135 (0.0321 ✓) | -0.079 (1.0000) |
 
 Arm A, head `mlp`, geometry `ring`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.097 (0.1777) | -0.091 (0.3198) | -0.094 (0.2183) | -0.100 (0.1777) |
-| 0.3 | -0.130 (0.1284) | -0.129 (0.1284) | -0.122 (0.1777) | -0.118 (0.2183) |
-| 1 | -0.276 (0.1284) | -0.242 (0.1284) | -0.153 (0.1284) | -0.104 (0.1284) |
-| 3 | -0.092 (0.1777) | -0.060 (0.4204) | -0.089 (0.1777) | -0.100 (0.1284) |
-| 10 | -0.170 (0.1284) | -0.154 (0.1284) | -0.115 (0.1284) | -0.149 (0.1284) |
-| 30 | -0.176 (0.1777) | -0.158 (0.1284) | -0.073 (0.1284) | -0.126 (0.1284) |
-| 100 | -0.162 (0.1284) | -0.129 (0.1284) | -0.063 (0.1777) | -0.085 (0.1777) |
+| 0.1 | -0.052 (1.0000) | -0.061 (1.0000) | -0.060 (1.0000) | -0.059 (1.0000) |
+| 0.3 | -0.088 (0.6888) | -0.095 (0.5310) | -0.068 (1.0000) | -0.073 (1.0000) |
+| 1 | -0.259 (0.0321 ✓) | -0.233 (0.0321 ✓) | -0.132 (0.0509) | -0.089 (1.0000) |
+| 3 | -0.063 (1.0000) | -0.057 (1.0000) | -0.043 (1.0000) | -0.075 (1.0000) |
+| 10 | -0.169 (0.1212) | -0.140 (0.2338) | -0.105 (0.8871) | -0.088 (1.0000) |
+| 30 | -0.147 (0.3127) | -0.134 (0.1212) | -0.075 (1.0000) | -0.098 (1.0000) |
+| 100 | -0.100 (0.2338) | -0.112 (0.1212) | -0.025 (1.0000) | -0.059 (1.0000) |
 
 Arm A, head `mlp`, geometry `grid-2x2`, against C/mlp:
 
 | V/Ω | γ/Ω = 0 | γ/Ω = 0.1 | γ/Ω = 1 | γ/Ω = 10 |
 |---|---|---|---|---|
-| 0.1 | -0.094 (0.2183) | -0.096 (0.2183) | -0.083 (0.2183) | -0.101 (0.2183) |
-| 0.3 | -0.116 (0.1284) | -0.128 (0.1777) | -0.096 (0.1284) | -0.099 (0.1777) |
-| 1 | -0.181 (0.1284) | -0.215 (0.1284) | -0.125 (0.1284) | -0.123 (0.1284) |
-| 3 | -0.098 (0.2183) | -0.080 (1.0000) | -0.091 (0.1777) | -0.097 (0.1284) |
-| 10 | -0.218 (0.1284) | -0.200 (0.1284) | -0.149 (0.1284) | -0.130 (0.1284) |
-| 30 | -0.170 (0.1284) | -0.131 (0.1284) | -0.095 (0.1777) | -0.131 (0.1777) |
-| 100 | -0.122 (0.2183) | -0.129 (0.1284) | -0.049 (1.0000) | -0.083 (0.2183) |
+| 0.1 | -0.056 (1.0000) | -0.062 (1.0000) | -0.065 (1.0000) | -0.078 (1.0000) |
+| 0.3 | -0.093 (1.0000) | -0.105 (0.2338) | -0.061 (1.0000) | -0.073 (1.0000) |
+| 1 | -0.194 (0.0321 ✓) | -0.199 (0.0509) | -0.143 (0.0321 ✓) | -0.076 (1.0000) |
+| 3 | -0.053 (1.0000) | -0.058 (1.0000) | -0.096 (0.2338) | -0.106 (0.4163) |
+| 10 | -0.189 (0.0321 ✓) | -0.202 (0.0321 ✓) | -0.131 (0.0509) | -0.103 (0.8871) |
+| 30 | -0.126 (0.1212) | -0.122 (0.1658) | -0.084 (0.8871) | -0.111 (0.2338) |
+| 100 | -0.082 (1.0000) | -0.107 (0.1658) | -0.022 (1.0000) | -0.061 (1.0000) |
 
 The other arms:
 
 | arm | against C/linear | against C/mlp |
 |---|---|---|
-| B/linear γ/Ω=0 | -0.016 (1.0000) | -0.074 (0.1777) |
-| B/linear γ/Ω=0.1 | -0.015 (1.0000) | -0.073 (0.1777) |
-| B/linear γ/Ω=1 | -0.013 (1.0000) | -0.071 (0.1777) |
-| B/linear γ/Ω=10 | -0.019 (1.0000) | -0.077 (0.2183) |
-| B/mlp γ/Ω=0 | -0.005 (1.0000) | -0.063 (1.0000) |
-| B/mlp γ/Ω=0.1 | -0.044 (1.0000) | -0.102 (0.1777) |
-| B/mlp γ/Ω=1 | -0.041 (1.0000) | -0.099 (0.2183) |
-| B/mlp γ/Ω=10 | -0.027 (1.0000) | -0.085 (0.2183) |
-| D/linear | -0.324 (0.1284) | -0.382 (0.1284) |
-| D/mlp | -0.235 (0.1284) | -0.293 (0.1284) |
-| D-hybrid/hybrid | -0.081 (0.1777) | -0.138 (0.1284) |
+| B/linear γ/Ω=0 | +0.007 (1.0000) | -0.046 (1.0000) |
+| B/linear γ/Ω=0.1 | +0.005 (1.0000) | -0.048 (1.0000) |
+| B/linear γ/Ω=1 | +0.004 (1.0000) | -0.049 (1.0000) |
+| B/linear γ/Ω=10 | -0.007 (1.0000) | -0.059 (1.0000) |
+| B/mlp γ/Ω=0 | +0.010 (1.0000) | -0.043 (1.0000) |
+| B/mlp γ/Ω=0.1 | +0.016 (1.0000) | -0.037 (1.0000) |
+| B/mlp γ/Ω=1 | -0.006 (1.0000) | -0.058 (1.0000) |
+| B/mlp γ/Ω=10 | -0.013 (1.0000) | -0.066 (1.0000) |
+| D/linear | -0.336 (0.0321 ✓) | -0.389 (0.0321 ✓) |
+| D/mlp | -0.205 (0.0321 ✓) | -0.258 (0.0321 ✓) |
+| D-hybrid/hybrid | -0.089 (0.4163) | -0.141 (0.1212) |
 
 ### What the results show
 
 Everything below holds for four atoms on the three shapes of *Setup*, with one pulse, exact
 features, the stated tuning budget and these two datasets only.
 
-1. **On Iranian Churn, the ring and the grid make the interactions worse, not useful.**
-    - The chain's null result was not a property of the chain alone. The ring and the grid
-      give no gain either: their largest A − B differences are +0.006 with the linear head
-      (both geometries) and +0.041 (ring) and +0.050 (grid) with the MLP head, none won in all
-      13 folds.
-    - Instead they lose more than the chain. The linear head loses up to −0.442 (ring) and
-      −0.384 (grid) at `V/Ω = 1`, `γ/Ω = 0`, against −0.181 on the chain.
-    - A − B cells lost in all 13 folds: 14 on the ring (11 linear, 3 MLP) and 16 on the grid
-      (15 linear, 1 MLP), against one on the chain.
-    - None of this is significant in the family of 526 (*Statistics*). It is a description of
-      13 folds, not a test.
-2. **On Iranian Churn no Rydberg row beats a classical baseline in any geometry.** No ring or
-   grid A row is above C/linear (MCC 0.574) by more than +0.009 (grid, MLP, `V/Ω = 100`,
-   `γ/Ω = 1`), and no chain A row by more than +0.024 (MLP, `V/Ω = 30`, `γ/Ω = 0`), both with
-   Holm p 1.0000. Every A row is below C/mlp (0.632). Arm B is as in #502: its rows are identical across geometries,
-   and it is within 0.044 of C/linear.
+1. **On Iranian Churn, the ring and the grid make the interactions significantly worse, not
+   useful** (15 folds, one family of 526, *Statistics*).
+    - The chain's null result was not a property of the chain alone. No A − B gain is
+      significant in any geometry. The largest are +0.000 (chain), +0.005 (ring) and +0.007
+      (grid) with the linear head, and +0.014 (chain), +0.033 (ring) and +0.037 (grid) with the
+      MLP head. No A − B cell of any geometry is won in more than 12 of the 15 folds.
+    - A − B losses that are significant: 14 on the ring (13 linear, 1 MLP) and 17 on the grid
+      (13 linear, 4 MLP), against 3 on the chain (all linear: `V/Ω = 1`, `γ/Ω = 1`, −0.081, and
+      `V/Ω = 100`, `γ/Ω` = 0 and 0.1, −0.109 and −0.118). Each is lost in all 15 folds.
+    - The linear head loses −0.436 (ring) and −0.376 (grid) at `V/Ω = 1`, `γ/Ω = 0`, both
+      significant, against −0.183 on the chain (Holm p 0.0509, *Statistics*). The grid's largest
+      loss is −0.397 at `V/Ω = 3`, `γ/Ω = 0`, where the ring loses only −0.016.
+    - That the ring and the grid lose *more than the chain* is read from these cells; the
+      geometries are not compared with each other by a test.
+    - The 13-fold run (#737) showed the same picture descriptively, with 14 (ring) and 16
+      (grid) A − B cells lost in all 13 folds against one on the chain.
+2. **On Iranian Churn no Rydberg row beats a classical baseline in any geometry.** No A or B
+   row is significantly above C/linear (MCC 0.558) or C/mlp (0.611). The largest margins of an A
+   row over C/linear are +0.019 (chain, MLP, `V/Ω = 30`, `γ/Ω = 0.1`), +0.027 (ring) and +0.031
+   (grid, both MLP, `V/Ω = 100`, `γ/Ω = 1`), each with Holm p 1.0000. Every A row is below
+   C/mlp, the best at 0.589 (grid, MLP, `V/Ω = 100`, `γ/Ω = 1`). Significant losses of an A row
+   against a baseline: 9 on the chain, 29 on the ring and 33 on the grid, over both heads and
+   both baselines. Arm B is as in #502: its rows are identical across geometries, within 0.016
+   of C/linear and never significantly different from either baseline. D/linear and D/mlp are
+   significantly below both baselines; D-hybrid is below both, not significantly.
 3. **On the positive control the interactions help a linear head less clearly on the ring and the
    grid than on the chain.**
     - The chain detects the effect, as in #502 (+0.376 at `V/Ω = 1`, `γ/Ω = 0`, Holm p 0.0464).
@@ -947,18 +993,19 @@ features, the stated tuning budget and these two datasets only.
    on the ring and 3 on the grid (6 on the chain), and never gains significantly. It forms
    products of B's independent features itself, as in #502.
 5. **Dephasing.** At `γ/Ω = 10` the Iranian Churn A − B differences mostly vanish, but not
-   everywhere. The linear head still loses −0.193 (ring) and −0.200 (grid) at `V/Ω = 3`, both in
-   all 13 folds. On the chain the largest loss there is −0.037 (MLP head).
+   everywhere. The linear head still loses −0.178 (ring) and −0.177 (grid) at `V/Ω = 3`, both
+   in all 15 folds and significant, the only significant A − B cells at that `γ/Ω`. On the
+   chain the largest loss there is −0.035 (linear head, `V/Ω = 3`, Holm p 1.0000).
 
 ## Mechanism
 
 The separation measures of #500, as in #502: on the features before standardisation, on the
-real rows of each fold's training part, averaged over the 13 folds (a class-stratified subsample
-of 2,000 rows on Iranian Churn). The Spearman correlations are across the 28 grid points of one
-geometry, with a permutation p-value from 10,000 draws. They are uncorrected and over dependent
-grid points, so they rank the measures and do not test them. Arm B's values are one per `γ/Ω`,
-repeated beside every `V/Ω`. On the controls they differ between geometries, because the labels
-do.
+real rows of each fold's training part, averaged over the folds (13 on the controls, 15 on
+Iranian Churn, where a class-stratified subsample of 2,000 of the 2,940 rows is used). The
+Spearman correlations are across the 28 grid points of one geometry, with a permutation p-value
+from 10,000 draws. They are uncorrected and over dependent grid points, so they rank the
+measures and do not test them. Arm B's values are one per `γ/Ω`, repeated beside every `V/Ω`.
+On the controls they differ between geometries, because the labels do.
 
 ### Positive control, ring
 
@@ -1048,153 +1095,155 @@ do.
 | mlp | effective_rank | 0.22 | 28 | 0.2652 |
 | mlp | kernel_alignment | -0.53 | 28 | 0.0042 |
 
-### Iranian Churn
+### Iranian Churn, 15 folds
 
 Geometry `chain`:
 
 | V/Ω | γ/Ω | distance_ratio A | distance_ratio B | fisher_ratio A | fisher_ratio B | effective_rank A | effective_rank B | kernel_alignment A | kernel_alignment B |
 |---|---|---|---|---|---|---|---|---|---|
-| 0.1 | 0 | 1.028 | 1.034 | 2.163 | 2.190 | 3.912 | 3.903 | 0.125 | 0.130 |
-| 0.3 | 0 | 1.013 | 1.034 | 2.100 | 2.190 | 3.902 | 3.903 | 0.118 | 0.130 |
-| 1 | 0 | 0.954 | 1.034 | 1.387 | 2.190 | 3.140 | 3.903 | 0.091 | 0.130 |
-| 3 | 0 | 1.091 | 1.034 | 2.143 | 2.190 | 3.150 | 3.903 | 0.151 | 0.130 |
-| 10 | 0 | 1.096 | 1.034 | 2.795 | 2.190 | 3.308 | 3.903 | 0.172 | 0.130 |
-| 30 | 0 | 1.082 | 1.034 | 2.617 | 2.190 | 3.418 | 3.903 | 0.175 | 0.130 |
-| 100 | 0 | 1.057 | 1.034 | 1.484 | 2.190 | 3.153 | 3.903 | 0.106 | 0.130 |
-| 0.1 | 0.1 | 1.027 | 1.033 | 2.166 | 2.191 | 3.913 | 3.905 | 0.125 | 0.129 |
-| 0.3 | 0.1 | 1.013 | 1.033 | 2.104 | 2.191 | 3.903 | 3.905 | 0.118 | 0.129 |
-| 1 | 0.1 | 0.956 | 1.033 | 1.449 | 2.191 | 3.138 | 3.905 | 0.093 | 0.129 |
-| 3 | 0.1 | 1.100 | 1.033 | 2.175 | 2.191 | 3.025 | 3.905 | 0.154 | 0.129 |
-| 10 | 0.1 | 1.093 | 1.033 | 2.764 | 2.191 | 3.294 | 3.905 | 0.171 | 0.129 |
-| 30 | 0.1 | 1.079 | 1.033 | 2.587 | 2.191 | 3.389 | 3.905 | 0.174 | 0.129 |
-| 100 | 0.1 | 1.053 | 1.033 | 1.427 | 2.191 | 3.060 | 3.905 | 0.110 | 0.129 |
-| 0.1 | 1 | 1.020 | 1.025 | 2.176 | 2.195 | 3.917 | 3.914 | 0.124 | 0.127 |
-| 0.3 | 1 | 1.010 | 1.025 | 2.131 | 2.195 | 3.907 | 3.914 | 0.119 | 0.127 |
-| 1 | 1 | 0.972 | 1.025 | 1.801 | 2.195 | 3.310 | 3.914 | 0.107 | 0.127 |
-| 3 | 1 | 1.118 | 1.025 | 2.319 | 2.195 | 2.435 | 3.914 | 0.159 | 0.127 |
-| 10 | 1 | 1.069 | 1.025 | 2.461 | 2.195 | 3.308 | 3.914 | 0.164 | 0.127 |
-| 30 | 1 | 1.063 | 1.025 | 2.355 | 2.195 | 3.304 | 3.914 | 0.164 | 0.127 |
-| 100 | 1 | 1.041 | 1.025 | 1.493 | 2.195 | 2.798 | 3.914 | 0.135 | 0.127 |
-| 0.1 | 10 | 1.001 | 1.001 | 2.147 | 2.152 | 3.922 | 3.923 | 0.116 | 0.116 |
-| 0.3 | 10 | 1.000 | 1.001 | 2.137 | 2.152 | 3.917 | 3.923 | 0.116 | 0.116 |
-| 1 | 10 | 0.997 | 1.001 | 2.093 | 2.152 | 3.867 | 3.923 | 0.116 | 0.116 |
-| 3 | 10 | 0.997 | 1.001 | 1.933 | 2.152 | 3.406 | 3.923 | 0.115 | 0.116 |
-| 10 | 10 | 1.018 | 1.001 | 2.110 | 2.152 | 3.700 | 3.923 | 0.135 | 0.116 |
-| 30 | 10 | 1.021 | 1.001 | 2.140 | 2.152 | 3.783 | 3.923 | 0.137 | 0.116 |
-| 100 | 10 | 1.019 | 1.001 | 2.093 | 2.152 | 3.747 | 3.923 | 0.135 | 0.116 |
+| 0.1 | 0 | 1.031 | 1.037 | 2.206 | 2.237 | 3.915 | 3.907 | 0.127 | 0.132 |
+| 0.3 | 0 | 1.015 | 1.037 | 2.133 | 2.237 | 3.904 | 3.907 | 0.120 | 0.132 |
+| 1 | 0 | 0.953 | 1.037 | 1.368 | 2.237 | 3.145 | 3.907 | 0.090 | 0.132 |
+| 3 | 0 | 1.094 | 1.037 | 2.186 | 2.237 | 3.151 | 3.907 | 0.154 | 0.132 |
+| 10 | 0 | 1.100 | 1.037 | 2.859 | 2.237 | 3.312 | 3.907 | 0.175 | 0.132 |
+| 30 | 0 | 1.086 | 1.037 | 2.664 | 2.237 | 3.423 | 3.907 | 0.178 | 0.132 |
+| 100 | 0 | 1.058 | 1.037 | 1.527 | 2.237 | 3.159 | 3.907 | 0.108 | 0.132 |
+| 0.1 | 0.1 | 1.030 | 1.036 | 2.208 | 2.237 | 3.916 | 3.908 | 0.127 | 0.131 |
+| 0.3 | 0.1 | 1.015 | 1.036 | 2.137 | 2.237 | 3.905 | 3.908 | 0.120 | 0.131 |
+| 1 | 0.1 | 0.954 | 1.036 | 1.431 | 2.237 | 3.143 | 3.908 | 0.092 | 0.131 |
+| 3 | 0.1 | 1.103 | 1.036 | 2.215 | 2.237 | 3.026 | 3.908 | 0.157 | 0.131 |
+| 10 | 0.1 | 1.096 | 1.036 | 2.827 | 2.237 | 3.299 | 3.908 | 0.174 | 0.131 |
+| 30 | 0.1 | 1.083 | 1.036 | 2.634 | 2.237 | 3.394 | 3.908 | 0.176 | 0.131 |
+| 100 | 0.1 | 1.053 | 1.036 | 1.466 | 2.237 | 3.066 | 3.908 | 0.111 | 0.131 |
+| 0.1 | 1 | 1.023 | 1.027 | 2.213 | 2.235 | 3.919 | 3.916 | 0.126 | 0.129 |
+| 0.3 | 1 | 1.012 | 1.027 | 2.162 | 2.235 | 3.908 | 3.916 | 0.121 | 0.129 |
+| 1 | 1 | 0.972 | 1.027 | 1.800 | 2.235 | 3.313 | 3.916 | 0.107 | 0.129 |
+| 3 | 1 | 1.122 | 1.027 | 2.353 | 2.235 | 2.436 | 3.916 | 0.161 | 0.129 |
+| 10 | 1 | 1.072 | 1.027 | 2.510 | 2.235 | 3.313 | 3.916 | 0.166 | 0.129 |
+| 30 | 1 | 1.066 | 1.027 | 2.395 | 2.235 | 3.310 | 3.916 | 0.166 | 0.129 |
+| 100 | 1 | 1.042 | 1.027 | 1.508 | 2.235 | 2.806 | 3.916 | 0.136 | 0.129 |
+| 0.1 | 10 | 1.002 | 1.003 | 2.171 | 2.176 | 3.922 | 3.923 | 0.117 | 0.117 |
+| 0.3 | 10 | 1.001 | 1.003 | 2.160 | 2.176 | 3.917 | 3.923 | 0.117 | 0.117 |
+| 1 | 10 | 0.998 | 1.003 | 2.113 | 2.176 | 3.867 | 3.923 | 0.117 | 0.117 |
+| 3 | 10 | 0.997 | 1.003 | 1.941 | 2.176 | 3.408 | 3.923 | 0.115 | 0.117 |
+| 10 | 10 | 1.019 | 1.003 | 2.131 | 2.176 | 3.702 | 3.923 | 0.135 | 0.117 |
+| 30 | 10 | 1.023 | 1.003 | 2.163 | 2.176 | 3.785 | 3.923 | 0.138 | 0.117 |
+| 100 | 10 | 1.020 | 1.003 | 2.112 | 2.176 | 3.748 | 3.923 | 0.136 | 0.117 |
 
 | head | measure | Spearman ρ (Δmeasure, ΔMCC) | n grid points | permutation p |
 |---|---|---|---|---|
-| linear | distance_ratio | -0.02 | 28 | 0.9382 |
-| linear | fisher_ratio | 0.48 | 28 | 0.0123 |
-| linear | effective_rank | 0.70 | 28 | 1.00e-04 |
-| linear | kernel_alignment | 0.22 | 28 | 0.2557 |
-| mlp | distance_ratio | 0.59 | 28 | 1.00e-03 |
-| mlp | fisher_ratio | 0.69 | 28 | 3.00e-04 |
-| mlp | effective_rank | -0.07 | 28 | 0.7373 |
-| mlp | kernel_alignment | 0.66 | 28 | 3.00e-04 |
+| linear | distance_ratio | -0.11 | 28 | 0.6002 |
+| linear | fisher_ratio | 0.38 | 28 | 0.0471 |
+| linear | effective_rank | 0.82 | 28 | 1.00e-04 |
+| linear | kernel_alignment | 0.12 | 28 | 0.5327 |
+| mlp | distance_ratio | 0.62 | 28 | 5.00e-04 |
+| mlp | fisher_ratio | 0.80 | 28 | 1.00e-04 |
+| mlp | effective_rank | 0.17 | 28 | 0.3981 |
+| mlp | kernel_alignment | 0.70 | 28 | 2.00e-04 |
 
 Geometry `ring`:
 
 | V/Ω | γ/Ω | distance_ratio A | distance_ratio B | fisher_ratio A | fisher_ratio B | effective_rank A | effective_rank B | kernel_alignment A | kernel_alignment B |
 |---|---|---|---|---|---|---|---|---|---|
-| 0.1 | 0 | 1.023 | 1.034 | 2.161 | 2.190 | 3.909 | 3.903 | 0.122 | 0.130 |
-| 0.3 | 0 | 0.994 | 1.034 | 2.084 | 2.190 | 3.889 | 3.903 | 0.106 | 0.130 |
-| 1 | 0 | 0.949 | 1.034 | 0.099 | 2.190 | 3.721 | 3.903 | 0.007 | 0.130 |
-| 3 | 0 | 1.231 | 1.034 | 2.609 | 2.190 | 3.222 | 3.903 | 0.210 | 0.130 |
-| 10 | 0 | 1.034 | 1.034 | 1.069 | 2.190 | 2.507 | 3.903 | 0.102 | 0.130 |
-| 30 | 0 | 0.954 | 1.034 | 0.443 | 2.190 | 3.794 | 3.903 | 0.027 | 0.130 |
-| 100 | 0 | 0.972 | 1.034 | 0.622 | 2.190 | 3.817 | 3.903 | 0.039 | 0.130 |
-| 0.1 | 0.1 | 1.023 | 1.033 | 2.163 | 2.191 | 3.910 | 3.905 | 0.122 | 0.129 |
-| 0.3 | 0.1 | 0.995 | 1.033 | 2.088 | 2.191 | 3.891 | 3.905 | 0.106 | 0.129 |
-| 1 | 0.1 | 0.938 | 1.033 | 0.154 | 2.191 | 3.728 | 3.905 | 0.010 | 0.129 |
-| 3 | 0.1 | 1.263 | 1.033 | 2.553 | 2.191 | 2.842 | 3.905 | 0.212 | 0.129 |
-| 10 | 0.1 | 1.038 | 1.033 | 1.156 | 2.191 | 2.460 | 3.905 | 0.109 | 0.129 |
-| 30 | 0.1 | 0.943 | 1.033 | 0.437 | 2.191 | 3.807 | 3.905 | 0.027 | 0.129 |
-| 100 | 0.1 | 0.968 | 1.033 | 0.722 | 2.191 | 3.767 | 3.905 | 0.046 | 0.129 |
-| 0.1 | 1 | 1.017 | 1.025 | 2.172 | 2.195 | 3.915 | 3.914 | 0.121 | 0.127 |
-| 0.3 | 1 | 0.997 | 1.025 | 2.113 | 2.195 | 3.903 | 3.914 | 0.110 | 0.127 |
-| 1 | 1 | 0.913 | 1.025 | 1.180 | 2.195 | 3.821 | 3.914 | 0.055 | 0.127 |
-| 3 | 1 | 1.289 | 1.025 | 2.316 | 2.195 | 1.677 | 3.914 | 0.193 | 0.127 |
-| 10 | 1 | 1.071 | 1.025 | 1.821 | 2.195 | 2.618 | 3.914 | 0.153 | 0.127 |
-| 30 | 1 | 0.966 | 1.025 | 1.534 | 2.195 | 3.595 | 3.914 | 0.091 | 0.127 |
-| 100 | 1 | 0.990 | 1.025 | 2.132 | 2.195 | 3.257 | 3.914 | 0.108 | 0.127 |
-| 0.1 | 10 | 1.000 | 1.001 | 2.145 | 2.152 | 3.923 | 3.923 | 0.115 | 0.116 |
-| 0.3 | 10 | 0.997 | 1.001 | 2.130 | 2.152 | 3.921 | 3.923 | 0.113 | 0.116 |
-| 1 | 10 | 0.987 | 1.001 | 2.057 | 2.152 | 3.912 | 3.923 | 0.106 | 0.116 |
-| 3 | 10 | 0.962 | 1.001 | 1.637 | 2.152 | 3.904 | 3.923 | 0.084 | 0.116 |
-| 10 | 10 | 1.021 | 1.001 | 2.014 | 2.152 | 3.839 | 3.923 | 0.138 | 0.116 |
-| 30 | 10 | 1.033 | 1.001 | 2.030 | 2.152 | 3.694 | 3.923 | 0.145 | 0.116 |
-| 100 | 10 | 1.019 | 1.001 | 2.147 | 2.152 | 3.728 | 3.923 | 0.134 | 0.116 |
+| 0.1 | 0 | 1.026 | 1.037 | 2.201 | 2.237 | 3.911 | 3.907 | 0.124 | 0.132 |
+| 0.3 | 0 | 0.996 | 1.037 | 2.106 | 2.237 | 3.889 | 3.907 | 0.107 | 0.132 |
+| 1 | 0 | 0.948 | 1.037 | 0.096 | 2.237 | 3.719 | 3.907 | 0.007 | 0.132 |
+| 3 | 0 | 1.237 | 1.037 | 2.664 | 2.237 | 3.226 | 3.907 | 0.213 | 0.132 |
+| 10 | 0 | 1.035 | 1.037 | 1.068 | 2.237 | 2.515 | 3.907 | 0.103 | 0.132 |
+| 30 | 0 | 0.955 | 1.037 | 0.441 | 2.237 | 3.789 | 3.907 | 0.027 | 0.132 |
+| 100 | 0 | 0.972 | 1.037 | 0.615 | 2.237 | 3.802 | 3.907 | 0.039 | 0.132 |
+| 0.1 | 0.1 | 1.025 | 1.036 | 2.202 | 2.237 | 3.912 | 3.908 | 0.124 | 0.131 |
+| 0.3 | 0.1 | 0.996 | 1.036 | 2.111 | 2.237 | 3.891 | 3.908 | 0.108 | 0.131 |
+| 1 | 0.1 | 0.937 | 1.036 | 0.149 | 2.237 | 3.725 | 3.908 | 0.010 | 0.131 |
+| 3 | 0.1 | 1.269 | 1.036 | 2.607 | 2.237 | 2.847 | 3.908 | 0.215 | 0.131 |
+| 10 | 0.1 | 1.038 | 1.036 | 1.156 | 2.237 | 2.468 | 3.908 | 0.110 | 0.131 |
+| 30 | 0.1 | 0.943 | 1.036 | 0.437 | 2.237 | 3.800 | 3.908 | 0.027 | 0.131 |
+| 100 | 0.1 | 0.969 | 1.036 | 0.720 | 2.237 | 3.750 | 3.908 | 0.046 | 0.131 |
+| 0.1 | 1 | 1.019 | 1.027 | 2.207 | 2.235 | 3.916 | 3.916 | 0.123 | 0.129 |
+| 0.3 | 1 | 0.999 | 1.027 | 2.137 | 2.235 | 3.903 | 3.916 | 0.111 | 0.129 |
+| 1 | 1 | 0.913 | 1.027 | 1.167 | 2.235 | 3.816 | 3.916 | 0.054 | 0.129 |
+| 3 | 1 | 1.294 | 1.027 | 2.340 | 2.235 | 1.682 | 3.916 | 0.196 | 0.129 |
+| 10 | 1 | 1.073 | 1.027 | 1.827 | 2.235 | 2.627 | 3.916 | 0.154 | 0.129 |
+| 30 | 1 | 0.968 | 1.027 | 1.566 | 2.235 | 3.584 | 3.916 | 0.092 | 0.129 |
+| 100 | 1 | 0.991 | 1.027 | 2.171 | 2.235 | 3.253 | 3.916 | 0.109 | 0.129 |
+| 0.1 | 10 | 1.001 | 1.003 | 2.169 | 2.176 | 3.922 | 3.923 | 0.116 | 0.117 |
+| 0.3 | 10 | 0.999 | 1.003 | 2.152 | 2.176 | 3.920 | 3.923 | 0.114 | 0.117 |
+| 1 | 10 | 0.988 | 1.003 | 2.072 | 2.176 | 3.911 | 3.923 | 0.106 | 0.117 |
+| 3 | 10 | 0.962 | 1.003 | 1.630 | 2.176 | 3.901 | 3.923 | 0.084 | 0.117 |
+| 10 | 10 | 1.021 | 1.003 | 2.025 | 2.176 | 3.840 | 3.923 | 0.138 | 0.117 |
+| 30 | 10 | 1.034 | 1.003 | 2.043 | 2.176 | 3.695 | 3.923 | 0.146 | 0.117 |
+| 100 | 10 | 1.021 | 1.003 | 2.170 | 2.176 | 3.729 | 3.923 | 0.134 | 0.117 |
 
 | head | measure | Spearman ρ (Δmeasure, ΔMCC) | n grid points | permutation p |
 |---|---|---|---|---|
-| linear | distance_ratio | 0.56 | 28 | 0.0029 |
-| linear | fisher_ratio | 0.85 | 28 | 1.00e-04 |
-| linear | effective_rank | 0.50 | 28 | 0.0069 |
-| linear | kernel_alignment | 0.72 | 28 | 1.00e-04 |
-| mlp | distance_ratio | 0.43 | 28 | 0.0253 |
-| mlp | fisher_ratio | 0.69 | 28 | 2.00e-04 |
-| mlp | effective_rank | -0.01 | 28 | 0.9712 |
-| mlp | kernel_alignment | 0.55 | 28 | 0.0032 |
+| linear | distance_ratio | 0.61 | 28 | 0.0014 |
+| linear | fisher_ratio | 0.89 | 28 | 1.00e-04 |
+| linear | effective_rank | 0.44 | 28 | 0.0208 |
+| linear | kernel_alignment | 0.75 | 28 | 1.00e-04 |
+| mlp | distance_ratio | 0.49 | 28 | 0.0079 |
+| mlp | fisher_ratio | 0.82 | 28 | 1.00e-04 |
+| mlp | effective_rank | 0.22 | 28 | 0.2506 |
+| mlp | kernel_alignment | 0.64 | 28 | 4.00e-04 |
 
 Geometry `grid-2x2`:
 
 | V/Ω | γ/Ω | distance_ratio A | distance_ratio B | fisher_ratio A | fisher_ratio B | effective_rank A | effective_rank B | kernel_alignment A | kernel_alignment B |
 |---|---|---|---|---|---|---|---|---|---|
-| 0.1 | 0 | 1.026 | 1.034 | 2.157 | 2.190 | 3.909 | 3.903 | 0.126 | 0.130 |
-| 0.3 | 0 | 1.002 | 1.034 | 2.036 | 2.190 | 3.900 | 3.903 | 0.113 | 0.130 |
-| 1 | 0 | 0.975 | 1.034 | 0.182 | 2.190 | 3.899 | 3.903 | 0.012 | 0.130 |
-| 3 | 0 | 0.982 | 1.034 | 0.284 | 2.190 | 3.281 | 3.903 | 0.012 | 0.130 |
-| 10 | 0 | 0.893 | 1.034 | 0.458 | 2.190 | 2.130 | 3.903 | 0.019 | 0.130 |
-| 30 | 0 | 0.975 | 1.034 | 0.532 | 2.190 | 3.803 | 3.903 | 0.035 | 0.130 |
-| 100 | 0 | 0.980 | 1.034 | 0.651 | 2.190 | 3.813 | 3.903 | 0.040 | 0.130 |
-| 0.1 | 0.1 | 1.025 | 1.033 | 2.159 | 2.191 | 3.910 | 3.905 | 0.126 | 0.129 |
-| 0.3 | 0.1 | 1.003 | 1.033 | 2.042 | 2.191 | 3.902 | 3.905 | 0.113 | 0.129 |
-| 1 | 0.1 | 0.962 | 1.033 | 0.129 | 2.191 | 3.909 | 3.905 | 0.008 | 0.129 |
-| 3 | 0.1 | 0.985 | 1.033 | 0.423 | 2.191 | 2.888 | 3.905 | 0.013 | 0.129 |
-| 10 | 0.1 | 0.887 | 1.033 | 0.527 | 2.191 | 2.109 | 3.905 | 0.018 | 0.129 |
-| 30 | 0.1 | 0.980 | 1.033 | 0.685 | 2.191 | 3.769 | 3.905 | 0.045 | 0.129 |
-| 100 | 0.1 | 0.976 | 1.033 | 0.760 | 2.191 | 3.762 | 3.905 | 0.048 | 0.129 |
-| 0.1 | 1 | 1.019 | 1.025 | 2.166 | 2.195 | 3.916 | 3.914 | 0.124 | 0.127 |
-| 0.3 | 1 | 1.003 | 1.025 | 2.082 | 2.195 | 3.913 | 3.914 | 0.115 | 0.127 |
-| 1 | 1 | 0.926 | 1.025 | 0.854 | 2.195 | 3.897 | 3.914 | 0.039 | 0.127 |
-| 3 | 1 | 0.957 | 1.025 | 2.001 | 2.195 | 1.735 | 3.914 | 0.019 | 0.127 |
-| 10 | 1 | 0.889 | 1.025 | 1.657 | 2.195 | 2.360 | 3.914 | 0.027 | 0.127 |
-| 30 | 1 | 1.013 | 1.025 | 1.823 | 2.195 | 3.531 | 3.914 | 0.114 | 0.127 |
-| 100 | 1 | 0.989 | 1.025 | 2.156 | 2.195 | 3.262 | 3.914 | 0.105 | 0.127 |
-| 0.1 | 10 | 1.000 | 1.001 | 2.144 | 2.152 | 3.923 | 3.923 | 0.115 | 0.116 |
-| 0.3 | 10 | 0.998 | 1.001 | 2.128 | 2.152 | 3.921 | 3.923 | 0.113 | 0.116 |
-| 1 | 10 | 0.988 | 1.001 | 2.051 | 2.152 | 3.914 | 3.923 | 0.106 | 0.116 |
-| 3 | 10 | 0.951 | 1.001 | 1.574 | 2.152 | 3.852 | 3.923 | 0.070 | 0.116 |
-| 10 | 10 | 0.971 | 1.001 | 1.993 | 2.152 | 3.711 | 3.923 | 0.087 | 0.116 |
-| 30 | 10 | 0.974 | 1.001 | 2.033 | 2.152 | 3.557 | 3.923 | 0.088 | 0.116 |
-| 100 | 10 | 1.003 | 1.001 | 2.145 | 2.152 | 3.703 | 3.923 | 0.116 | 0.116 |
+| 0.1 | 0 | 1.029 | 1.037 | 2.197 | 2.237 | 3.912 | 3.907 | 0.128 | 0.132 |
+| 0.3 | 0 | 1.004 | 1.037 | 2.057 | 2.237 | 3.902 | 3.907 | 0.114 | 0.132 |
+| 1 | 0 | 0.973 | 1.037 | 0.183 | 2.237 | 3.894 | 3.907 | 0.012 | 0.132 |
+| 3 | 0 | 0.981 | 1.037 | 0.287 | 2.237 | 3.282 | 3.907 | 0.013 | 0.132 |
+| 10 | 0 | 0.893 | 1.037 | 0.457 | 2.237 | 2.135 | 3.907 | 0.019 | 0.132 |
+| 30 | 0 | 0.976 | 1.037 | 0.535 | 2.237 | 3.794 | 3.907 | 0.036 | 0.132 |
+| 100 | 0 | 0.980 | 1.037 | 0.645 | 2.237 | 3.797 | 3.907 | 0.040 | 0.132 |
+| 0.1 | 0.1 | 1.028 | 1.036 | 2.198 | 2.237 | 3.913 | 3.908 | 0.128 | 0.131 |
+| 0.3 | 0.1 | 1.005 | 1.036 | 2.064 | 2.237 | 3.903 | 3.908 | 0.115 | 0.131 |
+| 1 | 0.1 | 0.959 | 1.036 | 0.127 | 2.237 | 3.903 | 3.908 | 0.008 | 0.131 |
+| 3 | 0.1 | 0.984 | 1.036 | 0.429 | 2.237 | 2.890 | 3.908 | 0.013 | 0.131 |
+| 10 | 0.1 | 0.888 | 1.036 | 0.527 | 2.237 | 2.114 | 3.908 | 0.018 | 0.131 |
+| 30 | 0.1 | 0.981 | 1.036 | 0.689 | 2.237 | 3.759 | 3.908 | 0.046 | 0.131 |
+| 100 | 0.1 | 0.977 | 1.036 | 0.758 | 2.237 | 3.744 | 3.908 | 0.048 | 0.131 |
+| 0.1 | 1 | 1.021 | 1.027 | 2.201 | 2.235 | 3.918 | 3.916 | 0.125 | 0.129 |
+| 0.3 | 1 | 1.005 | 1.027 | 2.106 | 2.235 | 3.914 | 3.916 | 0.116 | 0.129 |
+| 1 | 1 | 0.924 | 1.027 | 0.840 | 2.235 | 3.890 | 3.916 | 0.039 | 0.129 |
+| 3 | 1 | 0.957 | 1.027 | 2.017 | 2.235 | 1.736 | 3.916 | 0.019 | 0.129 |
+| 10 | 1 | 0.890 | 1.027 | 1.666 | 2.235 | 2.361 | 3.916 | 0.028 | 0.129 |
+| 30 | 1 | 1.015 | 1.027 | 1.854 | 2.235 | 3.519 | 3.916 | 0.116 | 0.129 |
+| 100 | 1 | 0.990 | 1.027 | 2.195 | 2.235 | 3.258 | 3.916 | 0.106 | 0.129 |
+| 0.1 | 10 | 1.002 | 1.003 | 2.168 | 2.176 | 3.922 | 3.923 | 0.116 | 0.117 |
+| 0.3 | 10 | 0.999 | 1.003 | 2.151 | 2.176 | 3.921 | 3.923 | 0.114 | 0.117 |
+| 1 | 10 | 0.989 | 1.003 | 2.066 | 2.176 | 3.913 | 3.923 | 0.106 | 0.117 |
+| 3 | 10 | 0.950 | 1.003 | 1.565 | 2.176 | 3.847 | 3.923 | 0.069 | 0.117 |
+| 10 | 10 | 0.972 | 1.003 | 2.003 | 2.176 | 3.707 | 3.923 | 0.087 | 0.117 |
+| 30 | 10 | 0.975 | 1.003 | 2.046 | 2.176 | 3.554 | 3.923 | 0.088 | 0.117 |
+| 100 | 10 | 1.004 | 1.003 | 2.168 | 2.176 | 3.702 | 3.923 | 0.117 | 0.117 |
 
 | head | measure | Spearman ρ (Δmeasure, ΔMCC) | n grid points | permutation p |
 |---|---|---|---|---|
-| linear | distance_ratio | 0.77 | 28 | 1.00e-04 |
-| linear | fisher_ratio | 0.96 | 28 | 1.00e-04 |
-| linear | effective_rank | 0.39 | 28 | 0.0410 |
-| linear | kernel_alignment | 0.89 | 28 | 1.00e-04 |
-| mlp | distance_ratio | 0.54 | 28 | 0.0024 |
-| mlp | fisher_ratio | 0.55 | 28 | 0.0025 |
-| mlp | effective_rank | 0.05 | 28 | 0.8151 |
-| mlp | kernel_alignment | 0.51 | 28 | 0.0057 |
+| linear | distance_ratio | 0.81 | 28 | 1.00e-04 |
+| linear | fisher_ratio | 0.95 | 28 | 1.00e-04 |
+| linear | effective_rank | 0.49 | 28 | 0.0092 |
+| linear | kernel_alignment | 0.92 | 28 | 1.00e-04 |
+| mlp | distance_ratio | 0.78 | 28 | 1.00e-04 |
+| mlp | fisher_ratio | 0.73 | 28 | 1.00e-04 |
+| mlp | effective_rank | 0.24 | 28 | 0.2019 |
+| mlp | kernel_alignment | 0.68 | 28 | 2.00e-04 |
 
 ### What the measures show
 
-- **Iranian Churn, linear head.** On the ring and the grid its A − B tracks the class
+- **Iranian Churn, linear head** (15 folds). On the ring and the grid its A − B tracks the class
   separation more closely than on the chain:
-    - Fisher ratio: ρ = 0.85 (ring) and 0.96 (grid), against 0.48 on the chain;
-    - kernel alignment: 0.72 and 0.89;
-    - all with permutation p = 1.00e-04.
+    - Fisher ratio: ρ = 0.89 (ring) and 0.95 (grid), against 0.38 on the chain (p = 0.0471);
+    - kernel alignment: 0.75 and 0.92, against 0.12 on the chain (p = 0.5327);
+    - distance ratio: 0.61 (p = 0.0014) and 0.81, against −0.11 on the chain (p = 0.6002);
+    - permutation p = 1.00e-04 where not given.
 
-  Where the linear head loses most, at `V/Ω = 1`, `γ/Ω = 0`, arm A's Fisher ratio is 0.099
-  (ring) and 0.182 (grid), against B's 2.190: on those features the classes have nearly lost
-  their mean separation. At `γ/Ω = 0` the one ring cell with A's Fisher ratio above B's (2.609
-  at `V/Ω = 3`; at `V/Ω = 3` it is also above B's for `γ/Ω` = 0.1 and 1) has an A − B of only
-  −0.026, against −0.236 to −0.442 at `V/Ω` = 1, 10, 30 and 100.
+  On the chain it goes with the effective rank instead (ρ = 0.82), as #502 found on its folds
+  (0.70). Where the linear head loses most on the square, at `V/Ω = 1`, `γ/Ω = 0`, arm A's
+  Fisher ratio is 0.096 (ring) and 0.183 (grid), against B's 2.237: on those features the
+  classes have nearly lost their mean separation. At `γ/Ω = 0` the one ring cell with A's
+  Fisher ratio above B's (2.664 at `V/Ω = 3`; at `V/Ω = 3` it is also above B's for `γ/Ω` = 0.1
+  and 1) has an A − B of only −0.016, against −0.269 to −0.436 at `V/Ω` = 1, 10, 30 and 100.
 - **Positive control, linear head:** as on the chain, its gains go with the distance ratio, the
   Fisher ratio and the kernel alignment:
     - ring: ρ = 0.64, 0.60 and 0.65, p ≤ 6.00e-04;
@@ -1205,9 +1254,10 @@ Geometry `grid-2x2`:
   (grid), not distinguishable from none.
 
 So the linear head's A − B moves with the class-separation measures on the control in all three
-geometries, and on Iranian Churn most clearly on the ring and the grid (on the chain only the
-Fisher ratio, ρ = 0.48). There the ring and the grid move those measures down, and the score with
-them.
+geometries, and on Iranian Churn on the ring and the grid (on the chain only weakly, through
+the Fisher ratio, ρ = 0.38). There the ring and the grid move those measures down, and the score
+with them. On the 13 folds of #737 the same ordering held (Fisher ratio ρ = 0.85 ring, 0.96 grid,
+0.48 chain).
 
 ## Limits
 
@@ -1222,8 +1272,16 @@ datasets, fold intervals). In addition:
   `V/Ω ≥ 10` every pair of the square is blockaded. So the geometries differ both in their
   neighbours and in how strong the second-order coupling is, and this run does not separate
   the two.
-- **Iranian Churn is descriptive only** (*Statistics*). With three geometries in one family of
-  526, 13 folds cannot reach α. The 15-fold rerun is #746.
+- **Iranian Churn: 15 folds detect only unanimous results** (*Statistics*). With three
+  geometries in one family of 526, 15 folds are the fewest that can reach α, and in this run
+  only comparisons won or lost in every fold do. A difference that goes the other way in one
+  fold, such as the chain's −0.183 at `V/Ω = 1`, `γ/Ω = 0` (lost in 14 of 15 folds), is not
+  significant, however large. The tests are of each geometry against B and the baselines; the
+  geometries are not tested against each other.
+- **Two Iranian Churn runs.** The 13-fold run of #737 stays in `docs/results/` as its record;
+  read alone it is descriptive, since 13 folds cannot reach α in a family of 526. The two runs
+  share data and seeds but not folds, and are not pooled or tested together. Its chain lines
+  reproduce #502's; the 15-fold run's do not, because its folds differ.
 - **The controls are three tasks.** Each geometry's control has its own label, and so its own B,
   C and D rows and its own family of 190. The control's detection on the chain and its
   weaker results on the ring and the grid are about each geometry on its own task, not one task

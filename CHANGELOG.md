@@ -672,6 +672,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as on its own under a heading that adds its `label_bonds`, where they used to be refused. A
   line without `label_bonds` (a UCI dataset, or a control written before #738) is keyed `None`;
   a dataset of one group prints exactly what it printed before (#741, #750)
+- `docs/results/rydberg-geometries-benchmark.md` reports Iranian Churn from a rerun with 15
+  folds (`docs/results/rydberg_features_geometries_iranian_churn_15_folds.jsonl.xz`), so its
+  Holm family of 526 can reach α. The ring and the grid lose to arm B significantly in 14 and 17
+  cells against 3 on the chain, and no geometry has a significant gain. The 13-fold file stays
+  unchanged as the record of #737's run; the 15-fold chain lines do not reproduce #502's, since
+  their folds differ (#746, #755)
 
 ### Fixed
 - `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same
