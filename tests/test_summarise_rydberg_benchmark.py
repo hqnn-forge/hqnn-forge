@@ -755,6 +755,139 @@ def test_the_committed_15_fold_churn_results_reach_alpha() -> None:
 
 
 # ---------------------------------------------------------------------------
+# One group, one split (#753)
+# ---------------------------------------------------------------------------
+
+#: The tail of every refusal of :func:`summary._check_one_split`.
+SPLIT_ADVICE = (
+    "Its folds and Holm family would pair lines of different splits by fold index; "
+    "summarise each run's lines on their own."
+)
+
+
+def _refusal(records: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]) -> str:
+    """The message ``main`` refuses ``records`` with, read as one input, after printing nothing."""
+    with pytest.raises(ValueError) as caught:
+        summary.main(["joined.jsonl", "--permutations", "99"], read=lambda _: records)
+    assert capsys.readouterr() == ("", "")
+    return str(caught.value)
+
+
+@pytest.mark.slow
+def test_the_two_committed_churn_runs_read_together_are_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    #753: the 13-fold (#745) and the 15-fold (#746) Iranian Churn files have the same data
+    and no label bonds, so #742's guard lets them through as one group, whose fold ``k`` would
+    pair a fold of one split with a fold of another.  Read as one input, in either order, they
+    are refused before anything is printed, naming the dataset and each ``n_splits`` with its
+    number of lines (the files' lengths, counted here).
+    """
+    thirteen = summary.read_records(ROOT / "docs/results" / GEOMETRY_RESULTS[3][0])
+    fifteen = summary.read_records(ROOT / "docs/results" / CHURN_15_FOLDS)
+    assert (len(thirteen), len(fifteen)) == (4433, 5115)
+    assert {r["n_splits"] for r in thirteen} == {13} and {r["n_splits"] for r in fifteen} == {15}
+    # One fingerprint and one label over both: only the split tells the two runs apart.
+    assert summary.data_fingerprints(thirteen + fifteen) == {CHURN_SHA: 4433 + 5115}
+    assert list(summary.groups(thirteen + fifteen)) == [("iranian-churn", None)]
+    for first, second in ((thirteen, fifteen), (fifteen, thirteen)):
+        found = ", ".join(f"{r[0]['n_splits']} ({len(r)} lines)" for r in (first, second))
+        assert _refusal(first + second, capsys) == (
+            f"dataset 'iranian-churn' has lines of 2 fold counts (n_splits): {found}.  "
+            + SPLIT_ADVICE
+        )
+    assert "13 (4433 lines), 15 (5115 lines)" in _refusal(thirteen + fifteen, capsys)
+
+
+def _with_split(
+    lines: list[dict[str, Any]], n_splits: int | None, test_idx: Any
+) -> list[dict[str, Any]]:
+    """
+    ``lines`` with ``n_splits`` and, per line, ``test_idx(fold)`` as the runner writes them.
+
+    ``None`` drops the field, as on a line written without it.
+    """
+    out = []
+    for r in lines:
+        split = {"n_splits": n_splits, "test_idx": test_idx(r["fold"])}
+        line = {k: v for k, v in r.items() if k not in split}
+        out.append({**line, **{k: v for k, v in split.items() if v is not None}})
+    return out
+
+
+def _partition(fold: int) -> list[int]:
+    """Fold ``fold`` of 13 over 78 rows: rows ``fold, fold + 13, …, fold + 65``."""
+    return list(range(fold, 78, 13))
+
+
+def test_two_control_runs_of_different_fold_counts_are_refused_with_their_label_bonds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    The same refusal in a group with label bonds, which it names as #742's guard does; a line
+    without ``n_splits`` counts as one more fold count, ``not recorded``.
+    """
+    run, sha = _control_run(geometries=("chain",))
+    thirteen = _with_split(run, 13, _partition)
+    fifteen = _with_split(run, 15, lambda k: list(range(k, 78, 15)))
+    assert summary.data_fingerprints(thirteen + fifteen) == {sha: 2 * LINES_PER_FOLD * N_FOLDS}
+    lines = LINES_PER_FOLD * N_FOLDS
+    assert _refusal(thirteen + fifteen, capsys) == (
+        "dataset 'positive-control' (label_bonds [[0, 1], [1, 2], [2, 3]]) has lines of 2 fold "
+        f"counts (n_splits): 13 ({lines} lines), 15 ({lines} lines).  " + SPLIT_ADVICE
+    )
+    old = _with_split(run, None, _partition)
+    assert "n_splits" not in old[0]
+    assert f"13 ({lines} lines), not recorded ({lines} lines)." in _refusal(thirteen + old, capsys)
+
+
+def _digest(rows: list[int]) -> str:
+    """The first 12 hex digits of the SHA-256 of ``rows`` written as ``"3,16,29"``."""
+    return hashlib.sha256(",".join(map(str, rows)).encode()).hexdigest()[:12]
+
+
+def test_lines_of_one_fold_count_but_other_test_sets_are_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    Two runs of one UCI dataset (one fingerprint, no label bonds) with the same ``n_splits``
+    but another split, as two ``--seed`` values draw: here the second swaps rows 68 and 72
+    between folds 3 and 7.  Refused, naming the folds whose lines disagree and, for the first,
+    each test set by its size and digest with its number of lines; a line without
+    ``test_idx`` counts as one more test set, ``not recorded``.
+    """
+    first = _with_split([{**r, "data_sha256": "f" * 64} for r in _records()], 13, _partition)
+    swap = {3: [3, 16, 29, 42, 55, 72], 7: [7, 20, 33, 46, 59, 68]}
+    second = _with_split(first, 13, lambda k: swap.get(k, _partition(k)))
+    assert _partition(3) == [3, 16, 29, 42, 55, 68] and _partition(7)[-1] == 72
+    # Each run's folds partition the same 78 rows: only the assignment to folds differs.
+    for run in (first, second):
+        rows = sorted(i for k in range(N_FOLDS) for i in run[LINES_PER_FOLD * k]["test_idx"])
+        assert rows == list(range(78))
+    assert summary.data_fingerprints(first + second) == {"f" * 64: 2 * LINES_PER_FOLD * N_FOLDS}
+    a, b = _digest(_partition(3)), _digest(swap[3])
+    assert a != b
+    assert _refusal(first + second, capsys) == (
+        "dataset 'toy' has lines of 2 test sets (test_idx) for fold 3: "
+        f"6 rows, sha256 {a} ({LINES_PER_FOLD} lines), "
+        f"6 rows, sha256 {b} ({LINES_PER_FOLD} lines) "
+        "(folds with more than one: [3, 7]).  " + SPLIT_ADVICE
+    )
+    # The same split, written twice, is one test set per fold: summarised as each run alone.
+    assert summary.summarise(first + first, permutations=99) == summary.summarise(
+        first, permutations=99
+    )
+    old = _with_split(first, 13, lambda k: None)
+    assert "test_idx" not in old[0]
+    assert (
+        f"for fold 0: 6 rows, sha256 {_digest(_partition(0))} ({LINES_PER_FOLD} lines), "
+        f"not recorded ({LINES_PER_FOLD} lines) (folds with more than one: "
+        f"{list(range(N_FOLDS))})."
+    ) in _refusal(first + old, capsys)
+
+
+# ---------------------------------------------------------------------------
 # PCA degeneracy (#747)
 # ---------------------------------------------------------------------------
 
