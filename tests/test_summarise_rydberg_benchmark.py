@@ -734,7 +734,8 @@ def test_the_committed_15_fold_churn_results_reach_alpha() -> None:
     assert np.allclose(p[unanimous], 2 / 2**15, rtol=1e-12, atol=0)
     assert np.allclose(holm[unanimous], m * 2 / 2**15, rtol=1e-12, atol=0)
     significant = holm <= summary.ALPHA
-    assert significant[unanimous].all()
+    # The note's *Statistics*: every significant comparison is won or lost in all 15 folds.
+    assert np.array_equal(significant, unanimous)
     a_minus_b = np.arange(m) < len(a_rows)
     counts = {
         geometry: (
