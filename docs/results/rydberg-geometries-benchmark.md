@@ -79,8 +79,8 @@ have 13 folds, as in #502. Iranian Churn has 15, so that its Holm family can rea
   1,521 on each. The chain control, summarised alone, prints #502's positive-control tables,
   apart from the measured seconds. They are not repeated here. The 15-fold run has the same
   data, the same split seed and the same seeds for each of its first 13 folds, but other folds:
-  15 stratified test parts of 210 rows instead of 13 of 242 to 244. Its chain lines therefore do not reproduce #502's, and its chain cells below differ from
-  those of #502's note.
+  15 stratified test parts of 210 rows instead of 13 of 242 to 244. Its chain lines therefore
+  do not reproduce #502's, and its chain cells below differ from those of #502's note.
 - **Geometries** (`docs/rydberg-model.md`, *Geometry*). Four atoms each. `V/Ω` is the
   nearest-neighbour interaction `C6/a⁶` in every geometry, set through the spacing as in #502
   (`a` = 12.76 µm at `V/Ω = 0.1` down to 4.03 µm at 100). Input `i` (the `i`-th principal
@@ -1001,11 +1001,11 @@ features, the stated tuning budget and these two datasets only.
 
 The separation measures of #500, as in #502: on the features before standardisation, on the
 real rows of each fold's training part, averaged over the folds (13 on the controls, 15 on
-Iranian Churn, where a class-stratified subsample of 2,000 of the 2,940 rows is used). The Spearman correlations are across the 28 grid points of one
-geometry, with a permutation p-value from 10,000 draws. They are uncorrected and over dependent
-grid points, so they rank the measures and do not test them. Arm B's values are one per `γ/Ω`,
-repeated beside every `V/Ω`. On the controls they differ between geometries, because the labels
-do.
+Iranian Churn, where a class-stratified subsample of 2,000 of the 2,940 rows is used). The
+Spearman correlations are across the 28 grid points of one geometry, with a permutation p-value
+from 10,000 draws. They are uncorrected and over dependent grid points, so they rank the
+measures and do not test them. Arm B's values are one per `γ/Ω`, repeated beside every `V/Ω`.
+On the controls they differ between geometries, because the labels do.
 
 ### Positive control, ring
 
@@ -1276,8 +1276,8 @@ datasets, fold intervals). In addition:
   geometries in one family of 526, 15 folds are the fewest that can reach α, and in this run
   only comparisons won or lost in every fold do. A difference that goes the other way in one
   fold, such as the chain's −0.183 at `V/Ω = 1`, `γ/Ω = 0` (lost in 14 of 15 folds), is not
-  significant, however large. The tests are of
-  each geometry against B and the baselines; the geometries are not tested against each other.
+  significant, however large. The tests are of each geometry against B and the baselines; the
+  geometries are not tested against each other.
 - **Two Iranian Churn runs.** The 13-fold run of #737 stays in `docs/results/` as its record;
   read alone it is descriptive, since 13 folds cannot reach α in a family of 526. The two runs
   share data and seeds but not folds, and are not pooled or tested together. Its chain lines
