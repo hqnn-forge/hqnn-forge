@@ -366,7 +366,7 @@ def _check_one_split(
     test_sets: dict[int, dict[tuple[int, ...] | None, int]] = {}
     for r in records:
         idx = r.get("test_idx")
-        key = None if idx is None else tuple(int(i) for i in idx)
+        key = None if idx is None else tuple(sorted(int(i) for i in idx))
         per_fold = test_sets.setdefault(int(r["fold"]), {})
         per_fold[key] = per_fold.get(key, 0) + 1
     differing = sorted(k for k, sets in test_sets.items() if len(sets) > 1)

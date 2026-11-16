@@ -842,6 +842,31 @@ def test_two_control_runs_of_different_fold_counts_are_refused_with_their_label_
     assert f"13 ({lines} lines), not recorded ({lines} lines)." in _refusal(thirteen + old, capsys)
 
 
+def test_different_splits_in_different_groups_are_not_refused() -> None:
+    """
+    The check is per group: a 13-fold chain control and a 15-fold ring control, two labels and
+    so two groups, differ in ``n_splits`` and in every fold's ``test_idx`` but are each one
+    split, so they are summarised as each run on its own under a heading naming its bonds.
+    A ``test_idx`` written in another order is the same test set.
+    """
+    chain, _ = _control_run(geometries=("chain",))
+    ring, _ = _control_run(geometries=("ring",))
+    thirteen = _with_split(chain, 13, _partition)
+    fifteen = _with_split(ring, 15, lambda k: list(range(k, 78, 15)))
+    alone = {
+        "[[0, 1], [1, 2], [2, 3]]": summary.summarise(thirteen, permutations=99),
+        "[[0, 1], [0, 3], [1, 2], [2, 3]]": summary.summarise(fifteen, permutations=99),
+    }
+    headed = [
+        text.replace("## positive-control\n", f"## positive-control, label_bonds {bonds}\n", 1)
+        for bonds, text in alone.items()
+    ]
+    assert summary.summarise(thirteen + fifteen, permutations=99) == "\n".join(headed)
+    shuffled = _with_split(chain, 13, lambda k: _partition(k)[::-1])
+    assert shuffled[0]["test_idx"] != thirteen[0]["test_idx"]
+    assert summary.summarise(thirteen + shuffled, permutations=99) == next(iter(alone.values()))
+
+
 def _digest(rows: list[int]) -> str:
     """The first 12 hex digits of the SHA-256 of ``rows`` written as ``"3,16,29"``."""
     return hashlib.sha256(",".join(map(str, rows)).encode()).hexdigest()[:12]
