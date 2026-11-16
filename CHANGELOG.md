@@ -871,7 +871,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValueError` naming the dataset, its label bonds and the values found, before printing
   anything. The 13- and 15-fold Iranian Churn files read together, or two runs of a UCI dataset
   with different seeds, passed the fingerprint guard and were paired by fold index across
-  different splits in one Holm family (#753)
+  different splits in one Holm family (#753, #756)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
