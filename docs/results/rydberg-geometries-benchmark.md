@@ -69,10 +69,12 @@ have 13 folds, as in #502. Iranian Churn has 15, so that its Holm family can rea
     one dataset name. The summariser refused them read together when this note was written
     (#742); since #741 it prints them as three sections, one per `label_bonds`, each its own
     family of 190 and identical to that file's summary apart from its heading. Never join the two
-    Iranian Churn files into one input: they have the same data and no label bonds, so the
-    summariser would read their lines as one group and pair them by fold index, although the
-    13 and the 15 folds are different splits. Every table below is that output, with its
-    headings moved down a level and its separation measures moved to *Mechanism*.
+    Iranian Churn files into one input: they have the same data and no label bonds, so they
+    fall into one group, whose lines would be paired by fold index although the 13 and the 15
+    folds are different splits. Since #753 the summariser refuses such a group (more than one
+    `n_splits`, or more than one `test_idx` for a fold) before printing anything. Every table
+    below is that output, with its headings moved down a level and its separation measures
+    moved to *Mechanism*.
 - **The chain reproduces #502 on the control, not on Iranian Churn with 15 folds.** Every chain
   line of the control run and of the 13-fold Iranian Churn run equals the line of #502's file
   for the same arm, head, grid point and fold in `mcc`, `pr_auc` and `data_sha256`: 1,521 of

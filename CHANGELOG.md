@@ -866,6 +866,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   geometries or seeds read together used to be merged into one section without a word, arm B,
   C and D from whichever run came last, paired by fold with arm A of the other data in one
   Holm family (#742, #744)
+- `examples/summarise_rydberg_benchmark.py` refuses a group (dataset and label bonds) whose
+  lines record more than one `n_splits`, or more than one `test_idx` for one fold, with a
+  `ValueError` naming the dataset, its label bonds and the values found, before printing
+  anything. The 13- and 15-fold Iranian Churn files read together, or two runs of a UCI dataset
+  with different seeds, passed the fingerprint guard and were paired by fold index across
+  different splits in one Holm family (#753, #756)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

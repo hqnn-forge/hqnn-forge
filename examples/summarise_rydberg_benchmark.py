@@ -76,6 +76,18 @@ the dataset, its label bonds and each fingerprint with its number of lines
 printing anything; summarise each run on its own.  Lines of different
 labels carry different fingerprints too, but are in different groups.
 
+**One group, one split** (#753).  Lines are paired by fold index, so every
+line of a group must also carry the same ``n_splits``, and every line of one
+fold the same ``test_idx``.  Two runs of one dataset with another
+``--folds`` (the 13- and the 15-fold Iranian Churn files, #746), or of a UCI
+dataset with another ``--seed``, have the same fingerprint and label bonds,
+so the guard above lets them through.  The script refuses them too, before
+printing anything, with a ``ValueError`` naming the dataset, its label bonds
+and each ``n_splits`` with its number of lines, or the folds whose test sets
+differ and, for the first, each test set by its size and digest
+(:func:`_check_one_split`); a line without the field counts as one more
+value, ``not recorded``.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
@@ -89,6 +101,7 @@ The committed file is the runner's JSONL, xz-compressed; the runner's
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import math
 import sys
@@ -289,6 +302,80 @@ def _check_one_fingerprint(
             f"dataset {dataset!r}{label} has lines of {len(counts)} data fingerprints "
             f"(data_sha256): {found}.  Its folds and Holm family would pair lines of "
             "different data; summarise each run's lines on their own."
+        )
+
+
+def _test_set_text(test_idx: tuple[int, ...] | None) -> str:
+    """
+    A fold's ``test_idx`` as its size and digest: ``6 rows, sha256 <12 hex digits>``.
+
+    The digest is the first 12 hex digits of the SHA-256 of the sorted row
+    indices written in decimal, joined by commas without spaces (``3,16,29``).
+    ``not recorded`` for a line without the field.
+    """
+    if test_idx is None:
+        return "not recorded"
+    digest = hashlib.sha256(",".join(map(str, test_idx)).encode()).hexdigest()[:12]
+    return f"{len(test_idx)} rows, sha256 {digest}"
+
+
+def _check_one_split(
+    dataset: str, records: Sequence[Mapping[str, Any]], bonds: Bonds | None = None
+) -> None:
+    """
+    Refuse ``records`` of ``dataset`` unless they all rest on the same outer split.
+
+    ``records`` are one group of :func:`groups`, ``bonds`` its
+    ``label_bonds``.  :func:`_rows` keys a row's lines by ``fold``, the
+    0-based index ``k`` of the outer fold, and :func:`comparisons` pairs two
+    rows by it, so every line of fold ``k`` must have the same test rows.
+    Two runs of one dataset and label with another ``--folds`` (the 13- and
+    15-fold Iranian Churn files, #746), or of a UCI dataset with another
+    ``--seed`` (its data, and so its fingerprint, do not depend on the
+    seed), pass :func:`_check_one_fingerprint` but not this check:
+
+    1. Every line must record the same ``n_splits``; otherwise the
+       ``ValueError`` names each value found with its number of lines.
+    2. Within each fold ``k``, every line must record the same ``test_idx``
+       (the sorted row indices of the fold's test part); otherwise it names
+       the folds where they differ and, for the first of them, each test set
+       (:func:`_test_set_text`) with its number of lines.
+
+    As in :func:`_check_one_fingerprint`, a line without the field counts as
+    one more value, ``not recorded``, and values are listed in the order
+    first seen.
+    """
+    label = "" if bonds is None else f" (label_bonds {_bonds_text(bonds)})"
+    advice = (
+        "Its folds and Holm family would pair lines of different splits by fold index; "
+        "summarise each run's lines on their own."
+    )
+    n_splits: dict[int | None, int] = {}
+    for r in records:
+        n = r.get("n_splits")
+        n_splits[n] = n_splits.get(n, 0) + 1
+    if len(n_splits) > 1:
+        found = ", ".join(
+            f"{'not recorded' if n is None else n} ({count} lines)"
+            for n, count in n_splits.items()
+        )
+        raise ValueError(
+            f"dataset {dataset!r}{label} has lines of {len(n_splits)} fold counts "
+            f"(n_splits): {found}.  {advice}"
+        )
+    test_sets: dict[int, dict[tuple[int, ...] | None, int]] = {}
+    for r in records:
+        idx = r.get("test_idx")
+        key = None if idx is None else tuple(sorted(int(i) for i in idx))
+        per_fold = test_sets.setdefault(int(r["fold"]), {})
+        per_fold[key] = per_fold.get(key, 0) + 1
+    differing = sorted(k for k, sets in test_sets.items() if len(sets) > 1)
+    if differing:
+        first = test_sets[differing[0]]
+        found = ", ".join(f"{_test_set_text(idx)} ({count} lines)" for idx, count in first.items())
+        raise ValueError(
+            f"dataset {dataset!r}{label} has lines of {len(first)} test sets (test_idx) for "
+            f"fold {differing[0]}: {found} (folds with more than one: {differing}).  {advice}"
         )
 
 
@@ -702,11 +789,15 @@ def summarise(
     ValueError
         If the lines of one group carry more than one ``data_sha256``
         (a line without it counting as one more), naming the dataset, its
-        label bonds and the fingerprints; nothing is printed then.
+        label bonds and the fingerprints; or if they do not rest on one
+        outer split, more than one ``n_splits`` or, for one fold, more than
+        one ``test_idx`` (:func:`_check_one_split`), naming the dataset, its
+        label bonds and the values found.  Nothing is printed then.
     """
     by_group = groups(records)
     for (dataset, bonds), recs in by_group.items():
         _check_one_fingerprint(dataset, recs, bonds)
+        _check_one_split(dataset, recs, bonds)
     labels_per_dataset: dict[str, int] = {}
     for dataset, _ in by_group:
         labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1
