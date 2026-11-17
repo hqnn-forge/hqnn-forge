@@ -717,6 +717,16 @@ pipeline to detect anything.
   Iranian Churn) is one side winning all 13 folds, and the next possible p-value, `4.88e-4`
   (12 of 13 folds, the lost one smallest), was not significant after Holm anywhere (adjusted
   0.0542 at best).
+- **Other folds.** Neither of this run's two Holm-significant A − B cells on Iranian Churn is
+  significant on the 15 folds of #746: the same data and split seed in 15 stratified folds
+  instead of 13, with the chain, the ring and the `2 × 2` grid in one Holm family of 526 (the
+  companion note's [*Statistics*](rydberg-geometries-benchmark.md#statistics)). There the
+  chain's linear loss at `V/Ω = 1`, `γ/Ω = 0` is −0.183, lost in 14 of 15 folds (Holm p
+  0.0509), and its MLP gain at `V/Ω = 10`, `γ/Ω = 1` is +0.013, won in 10 of 15 folds (Holm p
+  1.0000). These are different tests, on other folds and in another family, not a correction
+  of this run: on its 13 folds and in its family of 190 both cells are significant (Holm p
+  0.0464), as *What the results show* states. The loss is about as large on the other folds;
+  the gain, this run's only significant one on Iranian Churn, is not.
 - **Which component is on which atom.** A PCA fit with two equal eigenvalues among its four
   components, or at the cutoff, leaves the assignment of components to atoms, and with it
   A − B, to the LAPACK build. The lines of this run predate the runner's record of that
