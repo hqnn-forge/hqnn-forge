@@ -678,6 +678,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells against 3 on the chain, and no geometry has a significant gain. The 13-fold file stays
   unchanged as the record of #737's run; the 15-fold chain lines do not reproduce #502's, since
   their folds differ (#746, #755)
+- `docs/results/rydberg-features-benchmark.md` says in *Limits* that its two Holm-significant
+  Iranian Churn cells are not significant on the 15 folds of #746 (family of 526): the chain's
+  linear loss at `V/Ω = 1`, `γ/Ω = 0` is −0.183 there (Holm p 0.0509), its MLP gain at
+  `V/Ω = 10`, `γ/Ω = 1` +0.013 (Holm p 1.0000). Its own tables and tests are unchanged (#754)
 
 ### Fixed
 - `apply_shots(model, None)` and a `shot_sweep` with `None` in `shots` raise the same
