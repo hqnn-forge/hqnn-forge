@@ -517,6 +517,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tol = 1e-6` against the exponential of the Liouvillian (#598, #761)
 
 ### Changed
+- `examples/benchmark_rydberg_features.py --shots` draws every feature matrix from a shot stream
+  of its own: its generator (arm D: its device) is seeded with the first four bytes of the
+  SHA-256 of the matrix's config, which holds `shot_seed`, and of its inputs
+  (`shot_stream_seed`). Folds, tuning folds, grid points and arms A, B and D no longer share
+  their draws, which made the fold spread and the paired tests over folds understate the shot
+  noise; the same matrix is still drawn alike in a repeated or resumed run. Lines record the
+  seeds as `shot_stream_seed` and `tuning["shot_stream_seeds"]`, and the config gains
+  `"shot_stream": "per-matrix"`; lines without them were drawn as before and are still read.
+  Exact features are unchanged, and their lines record `null` for the seeds (#523, #762)
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
   that requires grad while some of the weights do, where it used to count every weight entry as
   inert. From the tape alone this cannot be told apart from a tape built under

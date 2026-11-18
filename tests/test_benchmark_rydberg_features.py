@@ -641,12 +641,23 @@ class TestRydbergArms:
         assert config_a == _map_by_hand(4, 3.0, 1.0, 200).get_config()
         assert rep_a.heads == rep_b.heads == ("linear", "mlp")
 
-    def test_shots_are_drawn_with_the_recorded_seed(self) -> None:
+    def test_shots_are_drawn_with_the_seed_of_the_matrix(self) -> None:
+        """
+        From a generator seeded with the matrix's seed (#523): the rule of
+        :func:`shot_stream_seed` over the config, which holds ``shot_seed``,
+        and the inputs, by hand.
+        """
         settings = bench.Settings(v_over_omega=(1.0,), gamma_over_omega=(0.0,), shots=64)
         features = self._features(settings, "A", 1.0, 0.0)
         shot_seed = bench.run_seeds(settings.random_state)["shot_seed"]
+        config = _rydberg_config_by_hand(_map_by_hand(4, 1.0, 0.0, 1).get_config(), 64, shot_seed)
+        (rep,) = bench.representations(_replace(settings, arms=("A",)))
+        assert rep.config == config
+        seed = _stream_seed_by_hand(config, self.X)
+        assert bench.shot_stream_seed(rep.config, self.X) == seed
+        assert 0 <= seed < 2**32 and seed != shot_seed
         by_hand = _map_by_hand(4, 1.0, 0.0, 1).transform(
-            self.X, shots=64, generator=torch.Generator().manual_seed(shot_seed)
+            self.X, shots=64, generator=torch.Generator().manual_seed(seed)
         )
         np.testing.assert_array_equal(features, by_hand.numpy())
         # multiples of 1/64, and within the binomial error of the exact features
@@ -749,9 +760,9 @@ class TestCircuitArm:
 
     def test_sampled_features_depend_on_the_inputs_and_the_seed_alone(self) -> None:
         """
-        With shots, a matrix is drawn from the start of the ``shot_seed``
-        stream whatever was sampled before it: the cache key (inputs and
-        config) then determines the features, also when a run is resumed.
+        With shots, a matrix is drawn by a device seeded with the matrix's
+        seed (#523), whatever was sampled before it: the cache key (inputs
+        and config) then determines the features, also when a run is resumed.
         """
         settings = bench.Settings(n_atoms=3, circuit_layers=2, shots=64)
         (rep,) = [
@@ -760,12 +771,15 @@ class TestCircuitArm:
         seeds = bench.run_seeds(settings.random_state)
         assert rep.config["shots"] == 64
         assert rep.config["shot_seed"] == seeds["shot_seed"]
+        assert rep.config["shot_stream"] == "per-matrix"
         X = np.random.default_rng(6).uniform(-math.pi, math.pi, size=(7, 3))
         first = rep.compute(X)
         rep.compute(X[:3])  # another matrix in between moves no stream
         np.testing.assert_array_equal(rep.compute(X), first)
-        # by hand: a circuit built here, evaluated once
-        fresh = bench.frozen_circuit(settings, seeds["circuit_seed"])
+        # by hand: a circuit built here with the matrix's seed, evaluated once
+        seed = _stream_seed_by_hand(rep.config, X)
+        assert seed != seeds["shot_seed"]
+        fresh = bench.frozen_circuit(settings, seeds["circuit_seed"], seed)
         with torch.no_grad():
             by_hand = fresh(torch.from_numpy(X)).double().numpy()
             again = fresh(torch.from_numpy(X)).double().numpy()
@@ -4286,6 +4300,7 @@ FIELDS = {
     "reused_from_geometry",
     "measurement",
     "shots",
+    "shot_stream_seed",
     "fold",
     "n_splits",
     "train_idx",
@@ -4593,18 +4608,364 @@ class TestShotsRun:
         shot_seed = records[0]["seeds"]["shot_seed"]
         assert read[0]["feature_map"]["shots"] == 32
         assert read[0]["feature_map"]["shot_seed"] == shot_seed
-        # The script's features of the fold's rows, drawn by hand with that seed.
+        # The script's features of the fold's rows, drawn by hand with the seed of that matrix.
         stacked = np.concatenate(
             [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
         )
+        seed = _stream_seed_by_hand(read[0]["feature_map"], stacked)
+        assert read[0]["shot_stream_seed"] == read[1]["shot_stream_seed"] == seed
+        assert read[2]["shot_stream_seed"] is None  # arm C draws nothing
         sampled = _map_by_hand(4, 1.0, 0.1, 40).transform(
-            stacked, shots=32, generator=torch.Generator().manual_seed(shot_seed)
+            stacked, shots=32, generator=torch.Generator().manual_seed(seed)
         )
         test = sampled[-fold.test_idx.size :].numpy()
         expected = separation_measures(test, y[fold.test_idx]).to_dict()
         assert read[0]["separation"]["test"] == pytest.approx(expected, rel=1e-9)
         exact = _map_by_hand(4, 1.0, 0.1, 40).transform(fold.inputs[fold.test_idx]).numpy()
         assert np.abs(test - exact).max() > 0.01  # sampled, not exact
+
+
+# ---------------------------------------------------------------------------
+# Shot streams: one per feature matrix (#523)
+# ---------------------------------------------------------------------------
+
+
+def _stream_seed_by_hand(config: dict[str, Any], inputs: np.ndarray) -> int:
+    """
+    The seed of a matrix's shot stream, written out: the first four bytes,
+    big-endian, of the SHA-256 of the canonical JSON of the matrix's config
+    and of the SHA-256 of its inputs' shape and float64 bytes.
+    """
+    contiguous = np.ascontiguousarray(inputs, dtype=np.float64)
+    inputs_sha256 = hashlib.sha256(repr(contiguous.shape).encode() + contiguous.tobytes())
+    text = json.dumps({"config": config, "inputs": inputs_sha256.hexdigest()}, sort_keys=True)
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
+
+
+def _rydberg_config_by_hand(map_config: dict[str, Any], shots: int, shot_seed: int) -> Any:
+    """``Representation.config`` of a chain map with shots, typed in."""
+    return {
+        "feature_map": "RydbergFeatureMap",
+        "config": map_config,
+        "shots": shots,
+        "shot_seed": shot_seed,
+        "shot_stream": "per-matrix",
+    }
+
+
+def _torch_uniforms(state: torch.Tensor, n: int = 256) -> np.ndarray:
+    """The next ``n`` float64 uniforms of a torch generator in ``state``."""
+    generator = torch.Generator()
+    generator.set_state(state)
+    return torch.rand(n, generator=generator, dtype=torch.float64).numpy()
+
+
+def _numpy_uniforms(seed: int, n: int = 256) -> np.ndarray:
+    """The first ``n`` uniforms of ``numpy.random.default_rng(seed)``, a sampling device's generator."""
+    return np.random.default_rng(seed).random(n)
+
+
+def _share_no_draw(streams: list[np.ndarray]) -> bool:
+    """Whether no two of ``streams`` hold the same value at any one position."""
+    return all(
+        not np.any(streams[i] == streams[j])
+        for i in range(len(streams))
+        for j in range(i + 1, len(streams))
+    )
+
+
+def _spy_on_draws(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """
+    Every sampled ``RydbergFeatureMap.transform`` call (the map's config, the
+    inputs, the seed and the state of its generator on entry) and every seed
+    arm D's sampling device is built with, in order.
+    """
+    spied = SimpleNamespace(transforms=[], circuit_seeds=[])
+    transform = RydbergFeatureMap.transform
+    frozen_circuit = bench.frozen_circuit
+
+    def spy_transform(self: Any, X: Any, *args: Any, **kwargs: Any) -> Any:
+        generator = kwargs.get("generator")
+        if generator is not None:
+            spied.transforms.append(
+                SimpleNamespace(
+                    config=self.get_config(),
+                    inputs=torch.as_tensor(X).numpy().astype(np.float64),
+                    seed=generator.initial_seed(),
+                    state=generator.get_state(),
+                )
+            )
+        return transform(self, X, *args, **kwargs)
+
+    def spy_circuit(settings: Any, circuit_seed: int, shot_seed: int | None = None) -> Any:
+        if shot_seed is not None:
+            spied.circuit_seeds.append(shot_seed)
+        return frozen_circuit(settings, circuit_seed, shot_seed)
+
+    monkeypatch.setattr(RydbergFeatureMap, "transform", spy_transform)
+    monkeypatch.setattr(bench, "frozen_circuit", spy_circuit)
+    return spied
+
+
+#: Two folds with tuning, two interaction strengths, arms A, B (reused at the
+#: second ``V/Ω``) and D, with shots.
+STREAM_SETTINGS = _replace(
+    QUICK,
+    arms=("A", "B", "D"),
+    shots=16,
+    v_over_omega=(1.0, 3.0),
+    max_folds=2,
+    n_trials=1,
+)
+
+
+@pytest.fixture(scope="class")
+def stream_run(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """A run of :data:`STREAM_SETTINGS` without a cache, with every draw it made."""
+    settings = STREAM_SETTINGS
+    data = {"positive-control": bench.load_dataset("positive-control", settings)}
+    out = tmp_path_factory.mktemp("streams") / "streams.jsonl"
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        spied = _spy_on_draws(monkeypatch)
+        records = bench.run(data, settings, out, cache_dir=None)
+    return SimpleNamespace(
+        records=records,
+        lines=bench.read_records(out),
+        transforms=spied.transforms,
+        circuit_seeds=spied.circuit_seeds,
+        shot_seed=bench.run_seeds(settings.random_state)["shot_seed"],
+    )
+
+
+@pytest.mark.slow
+class TestShotStreams:
+    """
+    Every feature matrix is drawn from a stream of its own, seeded from
+    ``shot_seed``, the matrix's config and its inputs (#523): folds, tuning
+    folds, grid points and arms share no draw, and the same matrix is drawn
+    from the same stream whenever it is computed.
+    """
+
+    X = np.random.default_rng(7).uniform(-math.pi, math.pi, size=(9, 4))
+
+    def _with_another_tail(self) -> np.ndarray:
+        """:attr:`X` with its first row kept and every other row redrawn: another fold's matrix."""
+        other = np.random.default_rng(8).uniform(-math.pi, math.pi, size=self.X.shape)
+        other[0] = self.X[0]
+        return other
+
+    def test_two_folds_do_not_share_draws_on_a_row_they_have_in_common(self) -> None:
+        """
+        Row 0 has the same populations in both matrices.  Drawn from one
+        stream, as before #523, it would get the same bitstrings and the same
+        estimates in both (checked by hand below); from two streams it does
+        not, and the two streams share no uniform.
+        """
+        settings = bench.Settings(v_over_omega=(1.0,), gamma_over_omega=(0.0,), shots=64)
+        other = self._with_another_tail()
+        reps = bench.representations(_replace(settings, arms=("A", "D")))
+        rep_a, rep_d = reps[0], reps[1]
+        assert (rep_a.arm, rep_d.arm) == ("A", "D")
+        for rep in (rep_a, rep_d):
+            first, second = rep.compute(self.X), rep.compute(other)
+            assert not np.array_equal(first[0], second[0])
+            seeds = [_stream_seed_by_hand(rep.config, m) for m in (self.X, other)]
+            assert seeds[0] != seeds[1]
+            if rep.arm == "A":
+                streams = [
+                    _torch_uniforms(torch.Generator().manual_seed(s).get_state()) for s in seeds
+                ]
+            else:
+                streams = [_numpy_uniforms(s) for s in seeds]
+            assert _share_no_draw(streams)
+
+        # What one shared stream gives: the same estimates for the shared row.
+        fmap = _map_by_hand(4, 1.0, 0.0, 1)
+        shared = [
+            fmap.transform(m, shots=64, generator=torch.Generator().manual_seed(5)).numpy()
+            for m in (self.X, other)
+        ]
+        np.testing.assert_array_equal(shared[0][0], shared[1][0])
+        circuit_seed = bench.run_seeds(settings.random_state)["circuit_seed"]
+        shared_d = []
+        for m in (self.X, other):
+            with torch.no_grad():
+                circuit = bench.frozen_circuit(settings, circuit_seed, 5)
+                shared_d.append(circuit(torch.from_numpy(m)).double().numpy())
+        np.testing.assert_array_equal(shared_d[0][0], shared_d[1][0])
+
+    def test_every_matrix_of_a_run_has_a_stream_of_its_own(self, stream_run: Any) -> None:
+        """
+        Folds, tuning folds, grid points and arms: every matrix the run
+        sampled was drawn from the seed of the rule, and no two share a
+        uniform at any position, in arms A and B (one torch generator per
+        matrix) as in arm D (one sampling device per matrix).
+        """
+        settings = STREAM_SETTINGS
+        transforms = stream_run.transforms
+        # 2 folds × (1 + 2 tuning folds) × (A at two V/Ω + B once): B is reused at V/Ω = 3.
+        per_matrix = settings.max_folds * (1 + settings.inner_folds)
+        assert len(transforms) == per_matrix * 3
+        assert sum(t.config["interactions"] for t in transforms) == per_matrix * 2
+        for t in transforms:
+            config = _rydberg_config_by_hand(t.config, 16, stream_run.shot_seed)
+            assert t.seed == _stream_seed_by_hand(config, t.inputs)
+        assert len({t.seed for t in transforms}) == len(transforms)
+        assert _share_no_draw([_torch_uniforms(t.state) for t in transforms])
+
+        circuit_seeds = stream_run.circuit_seeds
+        assert len(circuit_seeds) == per_matrix
+        assert len(set(circuit_seeds)) == per_matrix
+        assert _share_no_draw([_numpy_uniforms(s) for s in circuit_seeds])
+        # and A, B and D draw from different seeds too
+        assert not {t.seed for t in transforms} & set(circuit_seeds)
+
+    def test_the_line_records_the_seed_of_its_matrices(self, stream_run: Any) -> None:
+        """
+        ``shot_stream_seed`` is the seed of the fold's matrix and
+        ``tuning["shot_stream_seeds"]`` those of its tuning folds' matrices,
+        so the seeds on the lines are exactly the seeds the run drew from.
+        """
+        by_arm: dict[str, set[int]] = {"A": set(), "B": set(), "D": set()}
+        for line in stream_run.lines:
+            if line["arm"] in ("C", "D-hybrid"):
+                assert line["shot_stream_seed"] is None
+                assert line["tuning"]["shot_stream_seeds"] == [None] * STREAM_SETTINGS.inner_folds
+                continue
+            assert line["feature_map"]["shot_stream"] == "per-matrix"
+            seeds = [line["shot_stream_seed"], *line["tuning"]["shot_stream_seeds"]]
+            by_arm[line["arm"]].update(seeds)
+        assert by_arm["A"] | by_arm["B"] == {t.seed for t in stream_run.transforms}
+        assert by_arm["D"] == set(stream_run.circuit_seeds)
+        # The fold's own matrix: the seed of the transform call on the fold's stacked inputs.
+        fold_a = [
+            r
+            for r in stream_run.lines
+            if r["arm"] == "A" and r["head"] == "linear" and r["v_over_omega"] == 1.0
+        ]
+        assert [r["fold"] for r in fold_a] == [0, 1]
+        sizes = {t.seed: t.inputs.shape[0] for t in stream_run.transforms}
+        for r in fold_a:
+            n_rows = (
+                r["n_synthetic"] + len(r["train_idx"]) + len(r["val_idx"]) + len(r["test_idx"])
+            )
+            assert sizes[r["shot_stream_seed"]] == n_rows
+        # fold 0 by hand: the seed of its stacked inputs (training with synthetic, validation, test)
+        X, y, _ = bench.load_dataset("positive-control", STREAM_SETTINGS)
+        fold = _fold_by_hand(X, y, STREAM_SETTINGS, 0)
+        stacked = np.concatenate(
+            [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+        )
+        map_config = _map_by_hand(4, 1.0, 0.1, 40).get_config()
+        config = _rydberg_config_by_hand(map_config, 16, stream_run.shot_seed)
+        assert fold_a[0]["feature_map"] == config
+        assert fold_a[0]["shot_stream_seed"] == _stream_seed_by_hand(config, stacked)
+
+    def test_a_reused_arm_b_line_shares_the_draws_of_its_source(self, stream_run: Any) -> None:
+        """
+        Arm B at ``V/Ω = 3`` is the matrix computed at ``V/Ω = 1``, reused:
+        the same draws, and the line records its source's seeds.
+        """
+        for fold in (0, 1):
+            source, reused = [
+                r
+                for r in stream_run.lines
+                if r["arm"] == "B" and r["head"] == "linear" and r["fold"] == fold
+            ]
+            assert reused["reused_from_v_over_omega"] == source["v_over_omega"] == 1.0
+            assert reused["shot_stream_seed"] == source["shot_stream_seed"]
+            assert reused["tuning"]["shot_stream_seeds"] == source["tuning"]["shot_stream_seeds"]
+            assert reused["separation"] == source["separation"]
+
+    def test_the_same_matrix_is_drawn_from_the_same_stream(self, tmp_path: Path) -> None:
+        """
+        The units meant to share draws are the requests of one matrix: the
+        same inputs under the same config, from maps built anew, give the
+        same stream and the same features bit for bit.  The labels do not
+        enter: two cache entries that differ in their labels only hold the
+        same features.
+        """
+        settings = bench.Settings(v_over_omega=(1.0,), gamma_over_omega=(0.0,), shots=64)
+        for arm in ("A", "D"):
+            first, second = (
+                next(
+                    r
+                    for r in bench.representations(_replace(settings, arms=(arm,)))
+                    if r.arm == arm
+                )
+                for _ in range(2)
+            )
+            assert first.config == second.config
+            assert bench.shot_stream_seed(first.config, self.X) == _stream_seed_by_hand(
+                second.config, self.X.copy()
+            )
+            np.testing.assert_array_equal(first.compute(self.X), second.compute(self.X.copy()))
+        (rep,) = bench.representations(_replace(settings, arms=("A",)))
+        cache = bench.FeatureCache(tmp_path)
+        labels = np.array([0, 1] * 4 + [0], dtype=np.int64)
+        other_labels = 1 - labels
+        assert cache.path(self.X, labels, rep.config) != cache.path(
+            self.X, other_labels, rep.config
+        )
+        one = cache.fetch(self.X, labels, rep.config, rep.compute)
+        two = cache.fetch(self.X, other_labels, rep.config, rep.compute)
+        assert (one.hit, two.hit) == (False, False)
+        np.testing.assert_array_equal(one.features, two.features)
+
+    def test_a_stream_needs_shots_and_a_seed(self) -> None:
+        """Exact features draw nothing, and a sampling circuit without a seed is refused."""
+        exact = bench.Settings(v_over_omega=(1.0,), gamma_over_omega=(0.0,), arms=("A",))
+        (rep,) = bench.representations(exact)
+        assert "shot_stream" not in rep.config
+        with pytest.raises(ValueError, match="shots and an integer shot_seed"):
+            bench.shot_stream_seed(rep.config, self.X)
+        with pytest.raises(ValueError, match="shot_seed"):
+            bench.frozen_circuit(bench.Settings(n_atoms=3, shots=8), 1)
+
+    def test_a_repeated_and_a_resumed_run_reproduce_every_matrix_bit_for_bit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream_run: Any
+    ) -> None:
+        """
+        Every matrix the run fetched, again without a cache, and once more
+        resumed from a cache that a run of arm B alone filled first, so that
+        arm A's matrices are sampled after fewer others: bit for bit the same,
+        in the same order, with the same seeds on the lines.
+        """
+        settings = STREAM_SETTINGS
+        data = {"positive-control": bench.load_dataset("positive-control", settings)}
+        fetched: list[np.ndarray] = []
+        fetch = bench.FeatureCache.fetch
+
+        def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+            result = fetch(self, *args, **kwargs)
+            fetched.append(result.features)
+            return result
+
+        monkeypatch.setattr(bench.FeatureCache, "fetch", spy)
+        runs = []
+        for cache_dir in (None, tmp_path / "cache"):
+            if cache_dir is not None:
+                bench.run(
+                    data,
+                    _replace(settings, arms=("B",)),
+                    tmp_path / "b.jsonl",
+                    cache_dir=cache_dir,
+                )
+            fetched.clear()
+            records = bench.run(data, settings, tmp_path / "run.jsonl", cache_dir=cache_dir)
+            runs.append((list(fetched), records))
+        (plain, plain_records), (resumed, resumed_records) = runs
+        # Per fold and tuning fold: A at two V/Ω, B once (reused at the second), D.
+        assert len(plain) == len(resumed) == 2 * (1 + 2) * 4
+        for a, b in zip(plain, resumed, strict=True):
+            assert a.tobytes() == b.tobytes()
+
+        def seeds(records: list[dict[str, Any]]) -> list[Any]:
+            return [(r["shot_stream_seed"], r["tuning"]["shot_stream_seeds"]) for r in records]
+
+        assert seeds(plain_records) == seeds(resumed_records) == seeds(stream_run.records)
+        assert [r["mcc"] for r in plain_records] == [r["mcc"] for r in stream_run.records]
+        assert any(r["feature_cache_hit"] for r in resumed_records if r["arm"] == "B")
 
 
 # ---------------------------------------------------------------------------
