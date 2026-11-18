@@ -31,7 +31,7 @@ reference, generated from the docstrings.
 |---|---|
 | [`hqnn_forge.encoding`](api/encoding.md) | Quantum feature maps (angle, IQP, amplitude, data re-uploading) and the circuit pieces they share |
 | [`hqnn_forge.models`](api/models.md) | The hybrid classifiers, their MLP control and a linear classifier |
-| [`hqnn_forge.noise`](api/noise.md) | Noise channels (depolarizing, amplitude and phase damping, bit and phase flip), post hoc and during training |
+| [`hqnn_forge.noise`](api/noise.md) | Noise channels (depolarizing, amplitude and phase damping, bit and phase flip, atom loss), post hoc and during training, and the kept fraction of an erasure (detected atom loss) |
 | [`hqnn_forge.kernels`](api/kernels.md) | Quantum fidelity kernels |
 | [`hqnn_forge.diagnostics`](api/diagnostics.md) | Circuit summaries, gradient variance, Fisher spectrum, effective dimension, expressibility, entangling capability, separation measures of a fixed feature matrix |
 | [`hqnn_forge.evaluation`](api/evaluation.md) | Metrics, threshold search, statistical tests, [plots](api/evaluation.plots.md) |

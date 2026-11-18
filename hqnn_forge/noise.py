@@ -752,8 +752,9 @@ def _erasure_kept_fraction(p: float, n_sites: int) -> float:
     took ``K1`` or ``K2``, so a kept sample took ``K0`` at every site.  With
     ``U_j`` the gates between sites, its unnormalised state is
     ``K0 U_k ⋯ K0 U_1 ρ U_1† K0† ⋯ U_k† K0†``.  ``K0`` is a multiple of the
-    identity, so it commutes with every ``U_j`` and the ``k`` factors
-    ``sqrt(1 − p)`` on each side multiply to ``(1 − p)^k``: the state is
+    identity, so it commutes with every ``U_j``; the ``k`` factors
+    ``sqrt(1 − p)`` on each side give ``(1 − p)^(k/2)`` there, so
+    ``(1 − p)^k`` for both sides together: the state is
     ``(1 − p)^k U ρ U†``, with ``U = U_k ⋯ U_1`` the noiseless circuit.  Its
     trace, the probability of the sample being kept, is ``(1 − p)^k``
     because ``Tr(U ρ U†) = 1``; it is dimensionless and does not depend on
@@ -1803,8 +1804,9 @@ def erasure_kept_fraction(
     ``K1`` or ``K2``, so an unflagged one took ``K0`` at every site.  With
     ``U_1, …, U_k`` the gates between the sites, its unnormalised state is
     ``K0 U_k ⋯ K0 U_1 ρ U_1† K0† ⋯ U_k† K0†``.  ``K0`` is a multiple of the
-    identity and commutes with every ``U_j``, so the ``k`` factors
-    ``sqrt(1 − p)`` on each side multiply to ``(1 − p)^k``, and the
+    identity and commutes with every ``U_j``.  The ``k`` factors
+    ``sqrt(1 − p)`` on each side give ``(1 − p)^(k/2)`` there, so
+    ``(1 − p)^k`` for both sides together, and the
     post-selected state is ``(1 − p)^k U ρ U†``, with ``U = U_k ⋯ U_1`` the
     noiseless circuit.  Its trace is the probability of no flag, the kept
     fraction ``(1 − p)^k`` (``Tr U ρ U† = 1``), the same for every input and

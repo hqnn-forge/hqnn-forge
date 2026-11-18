@@ -202,7 +202,7 @@ from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _bits
 if tuple(int(part) for part in torch.__version__.split(".")[:2]) < (2, 4):
     import torch._dynamo
 
-__all__ = ["evolve", "readout"]
+__all__ = ["evolve", "readout", "step_count"]
 
 #: Largest ``|H − H†|`` entry :func:`evolve` accepts in a sample, relative to
 #: the largest ``|H|`` entry of that sample.  A matrix built in ``float64`` from
@@ -214,6 +214,18 @@ _HERMITIAN_RTOL = 1e-12
 #: The epsilon is that of single precision at most: with a half-precision
 #: one (``bfloat16``: 100 ε = 0.78) the bound would accept nearly any matrix.
 _HERMITIAN_EPS = 100
+#: Smallest ``tol`` :func:`step_count` accepts.  Below an error of about
+#: ``1e-10`` the error of :func:`evolve` stops falling by 4 per halving of
+#: ``dt``, as rounding takes over, and two runs that close say nothing about
+#: it (``evolve``, "Choosing ``n_steps``"); ``1e-9`` keeps a factor 10 above
+#: that floor.  Measured: at ``tol = 1e-11`` a four-atom case was accepted
+#: with an error of ``4.1e-11``, four times ``tol``.
+_SMALLEST_TOL = 1e-9
+#: The factor by which each estimate of :func:`step_count` must fall below the
+#: one before while it is above ``tol``.  In the second-order regime it falls
+#: by 4 (3.91 to 4.12 over the sweep of #598); a smaller fall means rounding,
+#: which grows with the step count, has taken over.
+_SMALLEST_FALL = 2.0
 
 
 def _non_negative_number(value: Any, name: str) -> float:
@@ -230,6 +242,7 @@ def _non_negative_number(value: Any, name: str) -> float:
 
 
 def _step_count(n_steps: Any) -> int:
+    """``n_steps`` as an ``int >= 1``, or a ``ValueError``; :func:`step_count` chooses one."""
     if isinstance(n_steps, bool) or not isinstance(n_steps, numbers.Integral) or n_steps < 1:
         raise ValueError(f"n_steps must be an integer >= 1; got {n_steps!r}.")
     return int(n_steps)
@@ -289,6 +302,40 @@ def _initial_state(rho0: Any, shape: torch.Size) -> torch.Tensor:
     if not bool(torch.isfinite(rho0).all()):
         raise ValueError("rho0 must be finite; got a NaN or an infinity.")
     return rho0.to(torch.complex128)
+
+
+def _hermitian(hamiltonian: torch.Tensor) -> torch.Tensor:
+    """
+    The Hermitian part of ``hamiltonian`` as ``complex128``, after checking it is Hermitian.
+
+    The caller has checked its shape and finiteness (:func:`_atom_count`).
+    ``ValueError`` if a sample's largest ``|H − H†|`` entry exceeds the bound
+    of :func:`evolve` (Notes, *Hermiticity*).
+    """
+    h = hamiltonian.to(torch.complex128)
+    # eigh reads one triangle only: a non-Hermitian matrix would be evolved as
+    # another, Hermitian one without any error.
+    # Each sample is measured against its own largest entry: one scale for the
+    # batch would let a sample with a strong interaction hide another's
+    # asymmetry.  An empty batch, which rydberg_hamiltonian returns for no
+    # samples, has no sample to compare and comes back empty.
+    eps = min(torch.finfo(hamiltonian.dtype).eps, torch.finfo(torch.float32).eps)
+    rtol = max(_HERMITIAN_RTOL, _HERMITIAN_EPS * eps)
+    scale = h.detach().abs().amax(dim=(-2, -1)).reshape(-1)
+    asymmetry = (h - h.mH).detach().abs().amax(dim=(-2, -1)).reshape(-1)
+    failed = (asymmetry > rtol * scale).nonzero()
+    if failed.numel():
+        sample = int(failed[0])
+        where = f" of sample {sample}" if h.ndim == 3 else ""
+        raise ValueError(
+            f"hamiltonian must be Hermitian; the largest |H - H†| entry{where} is "
+            f"{float(asymmetry[sample]):.3g} (largest |H| entry {float(scale[sample]):.3g})."
+        )
+    # The Hermitian part, so that the lower triangle, the only one eigh reads,
+    # determines the whole matrix: the derivatives of _Propagator treat every
+    # entry of its input as a variable, so it has to be the matrix that is
+    # evolved, not just one triangle of it.
+    return (h + h.mH) / 2
 
 
 def _divided_differences(energies: torch.Tensor, tau: float) -> torch.Tensor:
@@ -597,6 +644,8 @@ def evolve(
       rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
       of those steps is a whole number of π pulses, so between steps the
       atom is in ``|g⟩`` or ``|r⟩`` and leaves no coherence to dephase.
+      :func:`step_count` doubles from that condition on until the estimate
+      meets a tolerance, and returns the count.
     * **Cost.**  One eigendecomposition per sample, then two
       ``2^N × 2^N`` matrix products per step and sample.  A backward pass, or
       a forward-mode derivative, reuses the eigendecomposition and adds four
@@ -642,25 +691,7 @@ def evolve(
     t = _non_negative_number(t, "t")
     gamma = _non_negative_number(gamma, "gamma")
     steps = None if n_steps is None else _step_count(n_steps)
-    h = hamiltonian.to(torch.complex128)
-    # eigh reads one triangle only: a non-Hermitian matrix would be evolved as
-    # another, Hermitian one without any error.
-    # Each sample is measured against its own largest entry: one scale for the
-    # batch would let a sample with a strong interaction hide another's
-    # asymmetry.  An empty batch, which rydberg_hamiltonian returns for no
-    # samples, has no sample to compare and comes back empty.
-    eps = min(torch.finfo(hamiltonian.dtype).eps, torch.finfo(torch.float32).eps)
-    rtol = max(_HERMITIAN_RTOL, _HERMITIAN_EPS * eps)
-    scale = h.detach().abs().amax(dim=(-2, -1)).reshape(-1)
-    asymmetry = (h - h.mH).detach().abs().amax(dim=(-2, -1)).reshape(-1)
-    failed = (asymmetry > rtol * scale).nonzero()
-    if failed.numel():
-        sample = int(failed[0])
-        where = f" of sample {sample}" if h.ndim == 3 else ""
-        raise ValueError(
-            f"hamiltonian must be Hermitian; the largest |H - H†| entry{where} is "
-            f"{float(asymmetry[sample]):.3g} (largest |H| entry {float(scale[sample]):.3g})."
-        )
+    h = _hermitian(hamiltonian)
     # Asked for before the eigendecomposition, the expensive part of a call.
     if gamma > 0 and steps is None:
         raise ValueError(
@@ -668,11 +699,6 @@ def evolve(
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the spread E_max - E_min of the energies of the Hamiltonian."
         )
-    # The Hermitian part, so that the lower triangle, the only one eigh reads,
-    # determines the whole matrix: the derivatives of _Propagator treat every
-    # entry of its input as a variable, so it has to be the matrix that is
-    # evolved, not just one triangle of it.
-    h = (h + h.mH) / 2
 
     if gamma == 0 or steps is None:  # no steps only without dephasing, see above
         if start is not None:
@@ -704,6 +730,213 @@ def evolve(
         # two adjacent half steps are one full step; the last step ends on a half
         rho = rho * (full_damping if step < steps - 1 else half_damping)
     return rho
+
+
+def _tolerance(value: Any) -> float:
+    """``value`` as a float ``>= _SMALLEST_TOL``, or a ``ValueError`` naming ``tol``."""
+    number = math.nan
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        try:
+            number = float(value)
+        except OverflowError:  # an int beyond the float range
+            number = math.inf
+    if not math.isfinite(number) or number < _SMALLEST_TOL:
+        raise ValueError(
+            f"tol must be a finite number >= {_SMALLEST_TOL:g}; got {value!r}.  Below an "
+            "error of about 1e-10 the solver's rounding, not its step, sets the difference "
+            "of two runs, and the estimate says nothing (see evolve, 'Choosing n_steps')."
+        )
+    return number
+
+
+def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float) -> int:
+    """
+    A step count for :func:`evolve` whose estimated feature error is at most ``tol``.
+
+    One integer for the whole batch: the smallest count tried at which the
+    estimated error of the features ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (those of
+    :func:`readout` with ``pairs=True``) is at most ``tol`` for every sample.
+    The counts tried start at the resolution condition of :func:`evolve`
+    ("Choosing ``n_steps``"), not at 1.  ``evolve`` itself is unchanged: the
+    caller passes the result to it, or to
+    :class:`~hqnn_forge.rydberg.RydbergFeatureMap`, as ``n_steps``.
+
+    **The estimate.**  The splitting's global error is of second order
+    (module docstring, *Splitting*): ``S(dt)`` has a logarithm with odd
+    powers of ``dt`` only, so ``S(dt)^n = exp(𝓛 t + t dt² C + O(t dt⁴))``
+    with ``C`` fixed by ``H`` and γ, and every feature ``F`` comes out of
+    ``n`` steps as::
+
+        F_n = F + a / n² + O(n⁻⁴),        a independent of n
+
+    Two runs with ``n`` and ``2n`` steps then differ by::
+
+        F_n − F_2n = a/n² − a/(4n²) = (3/4) a/n² = 3 (F_2n − F)
+
+    to that order, so **the finer run is off by a third of their
+    difference**, ``|F_2n − F| ≈ |F_n − F_2n| / 3``.  The estimate at
+    ``2n`` steps is the largest of these over the features and the
+    samples.  ``F`` is a probability (no unit); ``a`` has the sign of the
+    error and drops out of the absolute values.
+
+    **The starting count.**  The expansion holds once ``dt`` resolves the
+    fastest rate of the generator, ``W + Nγ/2`` (in rad/µs: ``W = E_max −
+    E_min ≥ 0`` the spread of the energies of a sample's ``H``, ``Nγ/2`` the
+    largest rate of the dissipator for ``N`` atoms).  Before that it can
+    fail outright: one resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω`` gives
+    ``⟨n⟩ = 0`` to rounding at 1, 2, 4, 8 and 16 steps, where the answer is
+    0.358, so a doubling from 1 stops at once on two runs that agree while
+    both are wrong.  The estimate held with ``dt · (W + Nγ/2) <= 1/2`` for
+    the coarser run (#507, #599), so the coarsest run has::
+
+        n₀ = max over samples of ceil(2t · (W + Nγ/2)),    at least 1
+
+    steps (``t`` in µs, so ``2t · (W + Nγ/2)`` is a number), and the counts
+    tried are ``2n₀, 4n₀, 8n₀, …``, each with the estimate from it and the
+    count before it.  The first whose estimate is at most ``tol`` comes
+    back, so the result is ``2^k n₀`` with ``k >= 1``.  It never stops below
+    ``2n₀``, although where ``W`` is large (``V`` in the blockade) the
+    features can need far fewer steps: no estimate is backed there (#598).
+
+    Parameters
+    ----------
+    hamiltonian:
+        Shape ``(2^N, 2^N)`` or ``(batch, 2^N, 2^N)`` in rad/µs, as for
+        :func:`evolve`, with at least one sample.  **Pass the Hamiltonians
+        of all inputs at once** (see Notes).
+    t:
+        Evolution time in µs, ``>= 0``, as for :func:`evolve`.
+    gamma:
+        Dephasing rate γ in rad/µs, ``>= 0``, as for :func:`evolve`.  At
+        ``gamma = 0`` ``evolve`` is exact and does not use ``n_steps``, so
+        1 is returned without evolving anything.
+    tol:
+        The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over the
+        batch, a finite number ``>= 1e-9``, without a default (as
+        ``n_steps`` has none).  Below an error of about ``1e-10`` rounding
+        takes over and two runs say nothing about it.
+
+    Returns
+    -------
+    int
+        The step count, ``2^k n₀`` with ``k >= 1``; 1 when ``gamma = 0``.
+
+    Raises
+    ------
+    TypeError
+        If ``hamiltonian`` is not a real or complex floating tensor.
+    ValueError
+        If ``hamiltonian`` is refused by :func:`evolve` or holds no sample;
+        if ``t`` or ``gamma`` is not a finite number ``>= 0``; if ``tol`` is
+        not a finite number ``>= 1e-9``.
+    RuntimeError
+        If an estimate above ``tol`` is more than half of the one before:
+        in the second-order regime it is a quarter (3.91 to 4.12 times
+        smaller over the sweep of #598), and a smaller fall means the
+        rounding of ``evolve``, which grows with the step count, has taken
+        over, so no count reaches ``tol`` for these Hamiltonians.
+
+    Notes
+    -----
+    * **One value for the whole dataset.**  The count is a maximum over the
+      samples, and a sample with a larger ``W`` raises it for all.  Called
+      per chunk it would differ between chunkings and break the chunking
+      invariance of :class:`~hqnn_forge.rydberg.RydbergFeatureMap` (#499),
+      whose features depend on a chunk only through rounding because
+      ``n_steps`` is fixed.  Call it once, on the Hamiltonians of all inputs,
+      and pass the value to ``RydbergFeatureMap(n_steps=...)``, where
+      ``get_config()`` records it.  For a map with a
+      :class:`~hqnn_forge.rydberg.PulseEncoding` and no position jitter
+      these are ``rydberg_hamiltonian(register, encoding.omega,
+      encoding.detunings(X), c6=c6, interactions=interactions)`` at
+      ``t = encoding.t`` (example below).  The segments of a
+      :class:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding` and the displaced
+      registers of position jitter are other Hamiltonians, which a count
+      from these does not cover (#760).
+    * **Accuracy.**  ``tol`` is met to the accuracy of the estimate, which
+      is not a bound.  Over the 216 cases of #598 (1, 2 and 4 atoms, ``V/Ω``
+      0 to 100, ``γ/Ω`` 0.1 to 100, ``ΩT`` π to 16π, detunings 0 or in
+      ``[0, √3 Ω]``) every count met ``tol = 1e-6``, and the error was 0.987
+      to 1.084 times the estimate wherever it was above ``1e-10``; the
+      five seeded sweeps of #627 reached 1.64 for single atoms.  A caller
+      who needs a margin passes a smaller ``tol``.
+    * **Shots.**  The shot estimates of
+      :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.transform` are unbiased
+      for the exact features at the same count, so their bias is the
+      features' error, bounded by ``tol`` as above; their spread is that of
+      the shots.
+    * **The state.**  ``tol`` is a target for the features, not for ρ or
+      :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.states`: at ``2n₀``
+      steps, in the cases of the sweep of #598 whose ``n₀`` is at most 3000,
+      the largest entry of ρ was off by 0.13 to 20 times the features'
+      largest error (#506, #759).
+    * **Cost.**  One ``eigvalsh`` per sample for ``W``, then ``k + 1`` runs
+      of :func:`evolve` on the batch, at ``n₀, 2n₀, …, 2^k n₀`` steps:
+      ``2 · result − n₀`` steps in all, less than twice the cost of one run
+      at the result, plus one eigendecomposition per sample and run.  The
+      memory is that of one ``evolve`` on the batch.  The counts can be
+      large: one atom at ``γ = 100 Ω``, ``ΩT = 16π`` needs 328 192 steps for
+      ``tol = 1e-6``.
+
+    Examples
+    --------
+    >>> import math
+    >>> import torch
+    >>> from hqnn_forge.rydberg import (
+    ...     DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap, rydberg_hamiltonian,
+    ...     step_count,
+    ... )
+    >>> omega = 4 * math.pi
+    >>> one = rydberg_hamiltonian(AtomRegister([[0.0, 0.0]]), omega, [0.0], c6=1.0)
+    >>> step_count(one, math.pi / omega, gamma=omega, tol=1e-6)  # n₀ = ceil(3π) = 10
+    320
+
+    One count for a feature map, from all of its inputs:
+
+    >>> register = AtomRegister.chain(3, AtomRegister.blockade_radius(DEFAULT_C6, omega))
+    >>> encoding = PulseEncoding(3, omega=omega)
+    >>> X = torch.tensor([[-1.0, 0.0, 2.0], [0.5, 0.5, 0.5], [3.0, -2.0, 0.1]])
+    >>> h = rydberg_hamiltonian(register, omega, encoding.detunings(X), c6=DEFAULT_C6)
+    >>> n = step_count(h, encoding.t, gamma=omega, tol=1e-5)
+    >>> feature_map = RydbergFeatureMap(
+    ...     register, encoding, c6=DEFAULT_C6, gamma=omega, n_steps=n, correlations=True
+    ... )
+    >>> feature_map.get_config()["n_steps"] == n
+    True
+    """
+    n_atoms = _atom_count(hamiltonian, "hamiltonian")
+    t = _non_negative_number(t, "t")
+    gamma = _non_negative_number(gamma, "gamma")
+    tol = _tolerance(tol)
+    if hamiltonian.ndim == 3 and hamiltonian.shape[0] == 0:
+        raise ValueError(
+            "hamiltonian must hold at least one sample: the count is fixed by all inputs "
+            "at once; got an empty batch."
+        )
+    h = _hermitian(hamiltonian).detach()
+    if gamma == 0:  # exact without steps: any count, so the smallest
+        return 1
+    with torch.no_grad():
+        # W = E_max − E_min per sample; the batch's largest rate sets n₀
+        energies = torch.linalg.eigvalsh(h)
+        spread = (energies.amax(dim=-1) - energies.amin(dim=-1)).max().item()
+        steps = max(1, math.ceil(2 * t * (spread + n_atoms * gamma / 2)))
+        coarse = readout(evolve(h, t, gamma=gamma, n_steps=steps), pairs=True)
+        previous = math.inf
+        while True:
+            fine = readout(evolve(h, t, gamma=gamma, n_steps=2 * steps), pairs=True)
+            # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features
+            estimate = (coarse - fine).abs().max().item() / 3
+            if estimate <= tol:
+                return 2 * steps
+            if estimate > previous / _SMALLEST_FALL:
+                raise RuntimeError(
+                    f"the two-run estimate stopped falling at {2 * steps} steps "
+                    f"({previous:.3g}, then {estimate:.3g}) above tol={tol:g}: the solver's "
+                    "rounding, which grows with the step count, has taken over, and no "
+                    "count reaches this tol for these Hamiltonians."
+                )
+            steps, coarse, previous = 2 * steps, fine, estimate
 
 
 def _propagator(h: torch.Tensor, tau: float) -> torch.Tensor:

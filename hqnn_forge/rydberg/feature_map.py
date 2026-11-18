@@ -951,7 +951,9 @@ class RydbergFeatureMap:
     n_steps:
         Number of splitting steps of the solver, an integer ``>= 1``.
         **Required when ``gamma > 0``, without a default** (see
-        :func:`~hqnn_forge.rydberg.evolve` on how to choose it); not used
+        :func:`~hqnn_forge.rydberg.evolve` on how to choose it, and
+        :func:`~hqnn_forge.rydberg.step_count`, called once on all inputs,
+        for a count that meets a tolerance); not used
         when ``gamma = 0``, where the evolution is exact.  It is passed
         unchanged to every solver call, one per segment of the drive (the
         plateau and each ramp segment of a
