@@ -216,14 +216,89 @@ Measurement
 By default every feature is an exact expectation value
 (``"measurement": "exact"``).  With ``--shots S`` the features of A, B and D
 are estimated from ``S`` sampled bitstrings per sample
-(``"measurement": "shots"``), drawn with the recorded ``shot_seed``.  Every
-feature matrix of A and B is drawn from the start of that one stream, so the
-shot noise of two of them (the other arm, another grid point or fold) is not
-independent: these are common random numbers.  Arm D's device is seeded
-with the same number and starts its own stream anew for every matrix, so
-its noise is shared between D's matrices but not with A and B.
-``D-hybrid`` is always trained and scored on exact expectation values, and
-arm C has nothing to measure.
+(``"measurement": "shots"``).  ``D-hybrid`` is always trained and scored on
+exact expectation values, and arm C has nothing to measure.
+
+**Every feature matrix draws from a shot stream of its own** (#523).  A
+matrix is what one fetch from the feature cache returns: the features of one
+arm at one grid point and geometry for the rows of one fold, or of one
+tuning fold (its training rows with the synthetic ones, its validation rows
+and, for a fold, its test rows, stacked into one input matrix).  Its
+generator is seeded with
+(:func:`shot_stream_seed`)::
+
+    seed = int.from_bytes(sha256(json({"config": config,
+                                       "inputs": inputs_sha256}))[:4], "big")
+
+``config`` is the matrix's ``Representation.config``, which holds the map's
+``get_config()`` (or arm D's circuit settings), ``shots``, the run's
+``shot_seed`` (:func:`run_seeds`) and ``"shot_stream": "per-matrix"``;
+``inputs_sha256`` is the SHA-256 over the shape and float64 bytes of the
+input matrix (:func:`inputs_sha256`, the ``X`` half of the data fingerprint,
+without the labels); ``json`` is the canonical text of :func:`cache_key`;
+and the first four bytes of the digest, big-endian, are the seed.  Arms A
+and B seed a ``torch.Generator`` with it for
+:meth:`~hqnn_forge.rydberg.RydbergFeatureMap.transform`; arm D builds its
+circuit per matrix on a ``default.qubit`` device seeded with it.  So:
+
+* **folds and tuning folds** have their own streams (their inputs differ);
+* **grid points and geometries** have their own streams (the config
+  differs);
+* **arms A and B** have their own streams at the same grid point and fold
+  (the ``interactions`` flag differs), and so does arm D;
+* **the same matrix** (the same inputs under the same config) is drawn from
+  the same stream wherever and whenever it is computed: by another head, on
+  a cache miss, in a repeated or a resumed run, in any order.  An arm B line
+  reused at another ``V/Ω`` or geometry carries the features, and so the
+  draws, of the line it was reused from.
+
+The features of a matrix are thus a function of its inputs and its config
+alone, ``shot_seed`` included, which is what the cache key already says;
+the labels do not enter.
+
+*Why.*  Before #523 every matrix of A and B was drawn from the start of the
+one ``shot_seed`` stream, so row ``r`` of any two of them consumed the same
+uniforms: common random numbers across arms, grid points and folds.
+
+* **Across folds** that is wrong for this script's statistics.  The fold
+  spread of :func:`summarise`, the intervals and the paired Wilcoxon tests
+  over folds of ``examples/summarise_rydberg_benchmark.py`` treat the folds
+  as separate units; with one shot-noise realisation shared by all of them
+  the spread leaves out the part of the shot noise they share and
+  understates it.
+* **Across grid points** the same holds for a trend over ``V/Ω`` or ``γ/Ω``
+  and for the Spearman correlation across grid points of the *Mechanism*
+  tables.
+* **A against B on one fold.**  Common draws would reduce the variance of
+  the paired difference ``A − B`` and are defensible on their own.  They
+  are not possible here without breaking one of the two rules above: arm B
+  is computed once per ``γ/Ω`` and fold and reused across ``V/Ω`` and the
+  geometries (*The grid*), so it could share draws with arm A at the first
+  ``V/Ω`` only, unless arm A shared one stream across ``V/Ω`` too.  ``A −
+  B`` would then carry less shot noise at the first ``V/Ω`` than at the
+  others, and its trend over ``V/Ω`` would mix any effect with that change
+  of variance.  Arms A and B therefore get their own streams as well; each
+  paired difference then holds the shot noise of both arms, and the folds
+  stay independent units, so the paired test remains valid.
+
+The seed has 32 bits, as the script's other seeds: a ``torch.Generator``
+uses only the low 32 bits of its seed (two seeds that differ above them
+give the same stream), so a wider one would only seem to give more
+streams.  Two different matrices of a run therefore share a seed with a
+probability of about ``n²/2³³`` for ``n`` matrices (about 2e-4 for the
+roughly 1,300 matrices of a default 10-fold run with tuning); such a pair
+would draw coupled, not equal, estimates, since their probabilities differ.
+
+Each line records the seed of its fold's matrix as ``shot_stream_seed`` and
+those of its tuning folds' matrices as ``tuning["shot_stream_seeds"]``
+(``null`` for exact features, arm C and ``D-hybrid``), so a line's features
+can be drawn again as ``transform(inputs, shots=S,
+generator=torch.Generator().manual_seed(shot_stream_seed))``.  A line with
+shots written before #523 records neither, and its ``feature_map`` has no
+``shot_stream``: its arms A and B were drawn from the start of the
+``shot_seed`` stream itself, arm D from a device seeded with ``shot_seed``
+for every matrix, so its fold spread understates the shot noise as above.
+Such lines are still read and summarised as before.
 
 Feature cache
 -------------
@@ -235,7 +310,8 @@ computed once and stored under ``--cache-dir``, keyed by the SHA-256
 * ``data``: the data fingerprint, :func:`hqnn_forge.benchmark.fingerprint`
   of the input matrix handed to the map and its labels;
 * ``config``: the map's ``get_config()``, with the number of shots and the
-  shot seed, and for a ring or a grid the geometry (``"geometry"``, and
+  shot seed (with shots also ``"shot_stream"``, "Measurement" above), and
+  for a ring or a grid the geometry (``"geometry"``, and
   ``"grid_shape"`` as ``[rows, cols]``).  A chain's config has no such entry
   and is exactly the config from before ``--geometry`` existed, so its
   entries are still hit; a ring and a chain at the same grid point never
@@ -360,14 +436,17 @@ arms C, D and ``D-hybrid``) and the map's ``get_config()``
 record was reused across the grid, both ``null`` if the record was computed
 rather than reused; for reused
 records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
-all zero, and ``feature_cache_hit``, ``feature_environment`` and the
-``feature_cache_hits`` and ``feature_environments`` of ``tuning`` are those
+all zero, and ``feature_cache_hit``, ``feature_environment``,
+``shot_stream_seed`` and the ``feature_cache_hits``,
+``feature_environments`` and ``shot_stream_seeds`` of ``tuning`` are those
 of the record it was reused from: they say how the features both lines
 rest on were obtained when that record was computed.  Nothing is fetched
 for a reused line, and the cache holds no entry under its own
 ``feature_map``, so its ``feature_cache_hit`` is ``false`` on a cold cache
-and ``true`` on a warm one, as its source line's is); ``measurement`` and
-``shots``; the fold (``fold``, ``n_splits``,
+and ``true`` on a warm one, as its source line's is); ``measurement``,
+``shots`` and ``shot_stream_seed`` (the seed of the fold's matrix,
+"Measurement" above; ``null`` without shots, for arm C and ``D-hybrid``,
+and absent from lines written before #523); the fold (``fold``, ``n_splits``,
 ``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
 dataset, ``n_synthetic``); ``pca``, the degeneracy of the fold's PCA fit
 of step 2 (:func:`pca_degeneracy`: the relative eigenvalue gaps among the
@@ -386,7 +465,9 @@ with their scores, the analogous ``raw_constant_columns`` and
 on, so a degenerate one can change which candidate is chosen, but not the
 inputs of the fold itself), and whether its features were a cache hit
 and the ``environment()`` they were computed in (``feature_cache_hits``,
-``feature_environments``, like the fields of the fold below); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
+``feature_environments``, like the fields of the fold below) and the seeds
+of their matrices' shot streams (``shot_stream_seeds``, like
+``shot_stream_seed``); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
 features, or 0.0 for reused records), ``feature_cache_hit`` and
 ``feature_environment`` (the ``environment()`` the fold's features were
@@ -575,6 +656,9 @@ _CIRCUIT_CHUNK = 1024
 _CIRCUIT_ROTATION: Final = "X"
 #: Second entry of the seed sequence of the seeds that belong to the run, not to a fold.
 _RUN_STREAM = 1 << 16
+#: How a sampled matrix's stream is seeded, recorded as ``"shot_stream"`` in the config of
+#: every map with shots: :func:`shot_stream_seed` ("Measurement" in the module docstring, #523).
+SHOT_STREAM: Final = "per-matrix"
 
 
 @dataclass(frozen=True)
@@ -618,7 +702,9 @@ class Settings:
     n_steps:
         Solver steps of every map with ``γ > 0``.
     shots:
-        ``None`` for exact features, or the bitstrings per sample.
+        ``None`` for exact features, or the bitstrings per sample, each
+        feature matrix drawn from a stream of its own ("Measurement" in the
+        module docstring).
     arms:
         A subset of :data:`ARMS`.
     hidden:
@@ -1146,6 +1232,60 @@ def run_seeds(random_state: int) -> dict[str, int]:
     return {"data_seed": data_seed, "shot_seed": shot_seed, "circuit_seed": circuit_seed}
 
 
+def inputs_sha256(inputs: npt.ArrayLike) -> str:
+    """
+    SHA-256 over the shape and bytes of ``inputs`` as C-ordered float64, in hexadecimal.
+
+    The half of :func:`hqnn_forge.benchmark.fingerprint` that covers ``X``,
+    without the labels: ``sha256(repr(shape) ‖ bytes)``.
+    """
+    contiguous = np.ascontiguousarray(inputs, dtype=np.float64)
+    digest = hashlib.sha256(repr(contiguous.shape).encode())
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+def shot_stream_seed(config: Mapping[str, Any], inputs: npt.ArrayLike) -> int:
+    """
+    The seed of the shot stream of one feature matrix (#523).
+
+    ::
+
+        seed = int.from_bytes(sha256(json({"config": config,
+                                           "inputs": inputs_sha256(inputs)}))[:4], "big")
+
+    with ``json`` the canonical JSON text of :func:`cache_key` (keys sorted
+    at every level, Python's default separators, no NaN), UTF-8 encoded,
+    and the first four bytes of the digest read as a big-endian unsigned
+    integer: ``0 <= seed < 2³²``.
+
+    Parameters
+    ----------
+    config:
+        The matrix's ``Representation.config``: the map's settings, the
+        number of shots, the run's ``shot_seed`` and ``"shot_stream"``.
+    inputs:
+        The input matrix handed to the map (:func:`inputs_sha256`).
+
+    Raises
+    ------
+    ValueError
+        If ``config`` has no number of shots or no integer ``shot_seed``:
+        exact features draw nothing.
+    """
+    if config.get("shots") is None or not _integer(config.get("shot_seed")):
+        raise ValueError(
+            f"a shot stream needs a config with shots and an integer shot_seed; got "
+            f"shots={config.get('shots')!r}, shot_seed={config.get('shot_seed')!r}."
+        )
+    text = json.dumps(
+        {"config": _plain(config), "inputs": inputs_sha256(inputs)},
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
+
+
 def fold_seeds(random_state: int, dataset: str, n_splits: int) -> tuple[int, list[dict[str, int]]]:
     """
     The outer split seed of a dataset and, per fold, the seeds every arm shares.
@@ -1565,7 +1705,9 @@ def grid(settings: Settings) -> list[tuple[float, float]]:
     return list(itertools.product(settings.v_over_omega, settings.gamma_over_omega))
 
 
-def frozen_circuit(settings: Settings, circuit_seed: int) -> QuantumEncodingLayer:
+def frozen_circuit(
+    settings: Settings, circuit_seed: int, shot_seed: int | None = None
+) -> QuantumEncodingLayer:
     """
     Arm D's fixed gate-based feature map.
 
@@ -1580,15 +1722,19 @@ def frozen_circuit(settings: Settings, circuit_seed: int) -> QuantumEncodingLaye
     the small-angle initialisation of the trainable models: near the
     identity the circuit would hardly mix the inputs, and this arm is the
     gate-based counterpart of a map that does.  With ``settings.shots`` the
-    readout is estimated from that many shots, seeded with the run's
-    ``shot_seed``: the first matrix a circuit evaluates is drawn from the
-    start of that stream and a later one from where the stream then stands,
-    which is why arm D builds a circuit per feature matrix.
+    readout is estimated from that many shots by a device seeded with
+    ``shot_seed``, which is then required: arm D passes the seed of the
+    matrix (:func:`shot_stream_seed`).  The first matrix a circuit evaluates
+    is drawn from the start of that stream and a later one from where the
+    stream then stands, which is why arm D builds a circuit per feature
+    matrix.  Without shots ``shot_seed`` is not used.
     """
+    if settings.shots is not None and shot_seed is None:
+        raise ValueError("a frozen circuit with shots needs the shot_seed of its device.")
     sampling: dict[str, Any] = (
         {"diff_method": "backprop"}
         if settings.shots is None
-        else {"shots": settings.shots, "seed": run_seeds(settings.random_state)["shot_seed"]}
+        else {"shots": settings.shots, "seed": shot_seed}
     )
     layer = QuantumEncodingLayer(
         settings.n_atoms,
@@ -1629,8 +1775,10 @@ class Representation:
         ``(rows, cols)``; ``None`` for the arms without a grid point.
     config:
         The settings the features are cached under: the map's
-        ``get_config()`` (or arm D's circuit settings) with the shots.
-        ``None`` for the inputs themselves.
+        ``get_config()`` (or arm D's circuit settings) with the shots, and
+        with shots the run's ``shot_seed`` and ``"shot_stream"``, from which
+        each matrix's stream is seeded (:func:`shot_stream_seed`).  ``None``
+        for the inputs themselves.
     compute:
         Inputs ``(n, N)`` to features ``(n, d)``, float64; ``None`` for the
         inputs themselves.
@@ -1668,8 +1816,22 @@ def _rydberg_representation(
         else {"geometry": geometry, **({} if shape is None else {"grid_shape": list(shape)})}
     )
 
+    config: dict[str, Any] = {
+        "feature_map": "RydbergFeatureMap",
+        "config": fmap.get_config(),
+        "shots": shots,
+        "shot_seed": None if shots is None else shot_seed,
+        **({} if shots is None else {"shot_stream": SHOT_STREAM}),
+        **shape_config,
+    }
+
     def compute(inputs: FloatArray) -> FloatArray:
-        generator = None if shots is None else torch.Generator().manual_seed(shot_seed)
+        # Each matrix its own stream, from its config and its inputs (#523).
+        generator = (
+            None
+            if shots is None
+            else torch.Generator().manual_seed(shot_stream_seed(config, inputs))
+        )
         features = fmap.transform(torch.from_numpy(inputs), shots=shots, generator=generator)
         result: FloatArray = features.numpy()
         return result
@@ -1682,13 +1844,7 @@ def _rydberg_representation(
         gamma_over_omega=gamma,
         geometry=geometry,
         grid_shape=shape,
-        config={
-            "feature_map": "RydbergFeatureMap",
-            "config": fmap.get_config(),
-            "shots": shots,
-            "shot_seed": None if shots is None else shot_seed,
-            **shape_config,
-        },
+        config=config,
         compute=compute,
     )
 
@@ -1696,14 +1852,37 @@ def _rydberg_representation(
 def _circuit_representation(
     settings: Settings, circuit_seed: int, shot_seed: int
 ) -> Representation:
-    layer = frozen_circuit(settings, circuit_seed)
+    # Exact: the layer the features are computed with without shots, and the one the
+    # config and the frozen parameters are read off with them (it evaluates nothing then).
+    layer = frozen_circuit(dataclasses.replace(settings, shots=None), circuit_seed)
+    config: dict[str, Any] = {
+        "feature_map": "QuantumEncodingLayer",
+        "config": {
+            "n_qubits": layer.n_qubits,
+            "n_layers": layer.n_layers,
+            "rotation": _CIRCUIT_ROTATION,
+            "entangler": layer.entangler,
+            "readout": layer.readout,
+            "device_name": "default.qubit",
+            "weights": "uniform(-pi, pi)",
+            "circuit_seed": circuit_seed,
+        },
+        "shots": settings.shots,
+        "shot_seed": None if settings.shots is None else shot_seed,
+        **({} if settings.shots is None else {"shot_stream": SHOT_STREAM}),
+    }
 
     def compute(inputs: FloatArray) -> FloatArray:
         # A sampling device draws from one stream that runs on from call to
-        # call.  A circuit built anew starts it at ``shot_seed`` again, so the
-        # features depend on the inputs and the config alone, as their cache
-        # key says, and not on how many matrices were sampled before.
-        circuit = layer if settings.shots is None else frozen_circuit(settings, circuit_seed)
+        # call.  A circuit built anew, seeded with this matrix's seed (#523),
+        # starts that stream again, so the features depend on the inputs and
+        # the config alone, as their cache key says, and not on how many
+        # matrices were sampled before.
+        circuit = (
+            layer
+            if settings.shots is None
+            else frozen_circuit(settings, circuit_seed, shot_stream_seed(config, inputs))
+        )
         x = torch.from_numpy(inputs)
         with torch.no_grad():
             chunks = [
@@ -1717,21 +1896,7 @@ def _circuit_representation(
         arm="D",
         kind="frozen-circuit",
         heads=HEADS,
-        config={
-            "feature_map": "QuantumEncodingLayer",
-            "config": {
-                "n_qubits": layer.n_qubits,
-                "n_layers": layer.n_layers,
-                "rotation": _CIRCUIT_ROTATION,
-                "entangler": layer.entangler,
-                "readout": layer.readout,
-                "device_name": "default.qubit",
-                "weights": "uniform(-pi, pi)",
-                "circuit_seed": circuit_seed,
-            },
-            "shots": settings.shots,
-            "shot_seed": None if settings.shots is None else shot_seed,
-        },
+        config=config,
         compute=compute,
         n_frozen_parameters=int(layer.qlayer.weights.numel()),
     )
@@ -2197,6 +2362,17 @@ class FeatureCache:
             unreadable=tuple(unreadable),
             not_removed=tuple(not_removed),
         )
+
+
+def matrix_shot_seed(rep: Representation, split: Split) -> int | None:
+    """
+    The :func:`shot_stream_seed` of ``rep``'s features for the rows of
+    ``split``, as :func:`features_of` draws them; ``None`` for a
+    representation that draws nothing (exact features, arm C, ``D-hybrid``).
+    """
+    if rep.compute is None or rep.config is None or rep.config.get("shots") is None:
+        return None
+    return shot_stream_seed(rep.config, split.inputs)
 
 
 def features_of(rep: Representation, split: Split, cache: FeatureCache) -> CachedFeatures:
@@ -2866,6 +3042,7 @@ def run_dataset(
                         "feature_constant_columns": tuning_feature_constant_columns,
                         "feature_cache_hits": [c.hit for c in tuning_cached],
                         "feature_environments": [c.environment for c in tuning_cached],
+                        "shot_stream_seeds": [matrix_shot_seed(rep, s) for s in tuning_splits],
                     }
                 hyperparameters = {**settings.defaults, **chosen}
                 model = build_model(head, head_matrix.shape[1], settings, seeds["init_seed"])
@@ -2890,6 +3067,7 @@ def run_dataset(
                     "reused_from_geometry": None,
                     "measurement": "shots" if sampled else "exact",
                     "shots": settings.shots if sampled else None,
+                    "shot_stream_seed": matrix_shot_seed(rep, split),
                     **fold_info,
                     "feature_dim": int(matrix.shape[1]),
                     "feature_constant_columns": feature_constant_columns,
@@ -3368,7 +3546,10 @@ def _parser() -> argparse.ArgumentParser:
         "--shots",
         type=int,
         default=None,
-        help="bitstrings per sample for arms A, B and D; omit for exact expectation values",
+        help=(
+            "bitstrings per sample for arms A, B and D, each feature matrix drawn from a shot "
+            "stream of its own (module docstring, Measurement); omit for exact expectation values"
+        ),
     )
     parser.add_argument(
         "--arms",
