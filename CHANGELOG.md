@@ -514,7 +514,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `n₀ = ceil(2t (W + Nγ/2))` of `evolve`, not at 1, where two runs can agree while both are
   wrong. `tol` has no default and must be at least `1e-9`; called once on all inputs, the
   result is passed to `RydbergFeatureMap(n_steps=...)`. Over #598's 216 cases every count met
-  `tol = 1e-6` against the exponential of the Liouvillian (#598)
+  `tol = 1e-6` against the exponential of the Liouvillian (#598, #761)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
