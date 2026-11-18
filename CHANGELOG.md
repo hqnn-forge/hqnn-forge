@@ -517,7 +517,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   noise; the same matrix is still drawn alike in a repeated or resumed run. Lines record the
   seeds as `shot_stream_seed` and `tuning["shot_stream_seeds"]`, and the config gains
   `"shot_stream": "per-matrix"`; lines without them were drawn as before and are still read.
-  Exact features are unchanged, and their lines record `null` for the seeds (#523)
+  Exact features are unchanged, and their lines record `null` for the seeds (#523, #762)
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor
   that requires grad while some of the weights do, where it used to count every weight entry as
   inert. From the tape alone this cannot be told apart from a tape built under
