@@ -507,6 +507,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `tuning["pca"]` of #525, counted per fold, not per line), and `not recorded` for lines
   written before #525, as in every committed results file, whose tables are otherwise unchanged
   (#747, #752)
+- `hqnn_forge.rydberg.step_count(hamiltonian, t, *, gamma, tol)`: one step count for `evolve`
+  for a whole batch, the first of `2n₀, 4n₀, …` at which a third of the difference of two runs
+  (the error of the finer one, by the second order of the splitting) is at most `tol` in every
+  feature `⟨n_i⟩`, `⟨n_i n_j⟩` of every sample. It starts at the resolution condition
+  `n₀ = ceil(2t (W + Nγ/2))` of `evolve`, not at 1, where two runs can agree while both are
+  wrong. `tol` has no default and must be at least `1e-9`; called once on all inputs, the
+  result is passed to `RydbergFeatureMap(n_steps=...)`. Over #598's 216 cases every count met
+  `tol = 1e-6` against the exponential of the Liouvillian (#598)
 
 ### Changed
 - `count_inert_weights` raises `ValueError` for a tape whose gate parameters include no tensor

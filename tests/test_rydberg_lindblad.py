@@ -4,7 +4,9 @@ tests/test_rydberg_lindblad.py
 ``evolve`` and ``readout`` (#497) against the closed-form limits of
 ``docs/rydberg-model.md``: the detuned and the damped Rabi oscillation of one
 atom, the product state without interactions, the blockade of two atoms, the
-maximally mixed state under strong dephasing, and the order of the splitting.
+maximally mixed state under strong dephasing, and the order of the splitting;
+``step_count`` (#598) by the feature error of the count it returns, over a
+subset of #598's sweep.
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -34,10 +36,13 @@ from hqnn_forge.rydberg import (
     DEFAULT_C6,
     MAX_ATOMS,
     AtomRegister,
+    PulseEncoding,
+    RydbergFeatureMap,
     evolve,
     lindblad,
     readout,
     rydberg_hamiltonian,
+    step_count,
 )
 from hqnn_forge.rydberg.lindblad import _populations_to_features
 
@@ -61,9 +66,10 @@ def checked_evolve(
     trace = rho.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
     # U = V e^(−iE dt) V† is unitary to rounding only, and the same U is applied
     # in every step, so the trace drifts by a few 1e-16 per step (measured:
-    # −4e-16), not as a random walk.
+    # −4e-16), not as a random walk.  ``evolve`` documents up to 1.4e-15 per step;
+    # two atoms at V = γ = 100 Ω drift by 1.1e-15 per step over 10 096 steps.
     steps_taken = (n_steps or 0) if gamma > 0 else 0
-    drift = 1e-12 + 1e-15 * steps_taken
+    drift = 1e-12 + 2e-15 * steps_taken
     assert torch.allclose(trace, torch.ones_like(trace), rtol=0, atol=drift)
     assert torch.allclose(rho, rho.mH, rtol=0, atol=1e-12)
     # eigvalsh reads one triangle only; Hermiticity was asserted just above
@@ -847,6 +853,291 @@ class TestChoosingTheStepCount:
         # the smallest error at these points is 1.7e-8
         assert error > 1e-9
         assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+
+def features_of(h: torch.Tensor, t: float, gamma: float, n_steps: int) -> torch.Tensor:
+    """``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of ``evolve`` at ``n_steps``, one row per sample."""
+    batch = h if h.ndim == 3 else h[None]
+    return readout(checked_evolve(batch, t, gamma=gamma, n_steps=n_steps), pairs=True)
+
+
+def exact_features(h: torch.Tensor, t: float, gamma: float) -> torch.Tensor:
+    """The same features from :func:`liouvillian_reference`, sample by sample."""
+    batch = h if h.ndim == 3 else h[None]
+    return torch.stack([readout(liouvillian_reference(s, t, gamma), pairs=True) for s in batch])
+
+
+def two_run_estimate(h: torch.Tensor, t: float, gamma: float, n_steps: int) -> float:
+    """A third of the largest ``|F_(n/2) − F_n|`` over samples and features."""
+    coarse = features_of(h, t, gamma, n_steps // 2)
+    return (coarse - features_of(h, t, gamma, n_steps)).abs().max().item() / 3
+
+
+#: One case of the sweep of #598: atoms in a unit chain, ``V/Ω`` between
+#: neighbours, ``γ/Ω``, ``ΩT`` and the detunings ``Δ_i/Ω``, at the reference
+#: ``Ω = 4π`` rad/µs.
+SweepCase = tuple[int, float, float, float, list[float]]
+
+#: 23 of the 216 cases of #598's sweep.  Every value of every axis appears
+#: (1, 2 and 4 atoms; ``V/Ω`` 0, 1, 10, 100; ``γ/Ω`` 0.1, 1, 10, 100; ``ΩT``
+#: π, 4π, 16π; detunings all 0 or spread over ``[0, Δ_max = √3]``), and so do
+#: the cases that make the design: the false agreement (first row), the point
+#: where the estimate is furthest from the error (one atom, ``γ = 10 Ω``,
+#: ``ΩT = 16π``, 1.08), the issue's four-atom counter-example (``V = γ = 10 Ω``,
+#: ``ΩT = 4π``), and points where the starting count alone leaves an error
+#: below the rounding floor (``V/Ω = 100``).  Left out for run time: the 61
+#: cases that take more than half a second at ``tol = 1e-6`` (all of
+#: ``γ = 100 Ω`` beyond ``ΩT = π`` and the longest ``V/Ω = 10`` runs), up to
+#: 13 s and 400 000 steps each; one of them is the slow test below.  The full
+#: sweep, run by hand for #598, met ``1e-6`` in all 216 cases.
+SWEEP: list[SweepCase] = [
+    (1, 0.0, 0.1, 16 * math.pi, [0.0]),
+    (1, 0.0, 0.1, 4 * math.pi, [1.23]),
+    (1, 0.0, 1.0, math.pi, [0.0]),
+    (1, 0.0, 10.0, math.pi, [0.77]),
+    (1, 0.0, 10.0, 16 * math.pi, [0.0]),
+    (1, 0.0, 100.0, math.pi, [0.0]),
+    (2, 0.0, 1.0, 4 * math.pi, [0.41, 1.57]),
+    (2, 1.0, 0.1, 16 * math.pi, [1.05, 0.2]),
+    (2, 1.0, 1.0, 16 * math.pi, [0.0, 0.0]),
+    (2, 10.0, 0.1, math.pi, [0.41, 1.57]),
+    (2, 10.0, 10.0, 4 * math.pi, [1.05, 0.2]),
+    (2, 100.0, 1.0, math.pi, [0.0, 0.0]),
+    (2, 100.0, 10.0, math.pi, [0.41, 1.57]),
+    (2, 100.0, 100.0, math.pi, [0.0, 0.0]),
+    (4, 0.0, 0.1, 16 * math.pi, [0.3, 1.5, 0.9, 1.7]),
+    (4, 0.0, 10.0, math.pi, [0.0, 0.0, 0.0, 0.0]),
+    (4, 1.0, 1.0, 4 * math.pi, [0.3, 1.5, 0.9, 1.7]),
+    (4, 1.0, 10.0, 4 * math.pi, [0.0, 0.0, 0.0, 0.0]),
+    (4, 10.0, 10.0, 4 * math.pi, [0.0, 0.0, 0.0, 0.0]),
+    (4, 10.0, 1.0, math.pi, [0.3, 1.5, 0.9, 1.7]),
+    (4, 100.0, 0.1, math.pi, [0.0, 0.0, 0.0, 0.0]),
+    (4, 100.0, 10.0, 4 * math.pi, [0.3, 1.5, 0.9, 1.7]),
+    (4, 100.0, 100.0, math.pi, [0.3, 1.5, 0.9, 1.7]),
+]
+
+
+class TestStepCount:
+    """
+    ``step_count`` (#598) against the exponential of the full Liouvillian and
+    the closed forms of ``docs/rydberg-model.md``: the count it returns gives
+    features within ``tol``, not only an integer.
+    """
+
+    OMEGA = 4.0 * math.pi  # the reference Ω of the model page
+
+    def case(self, case: SweepCase) -> tuple[torch.Tensor, float, float]:
+        """``(H, t, γ)`` of a sweep case; ``V = c6 / 1⁶`` between neighbours."""
+        n_atoms, v_over_omega, gamma_over_omega, omega_t, delta_over_omega = case
+        h = rydberg_hamiltonian(
+            AtomRegister.chain(n_atoms, 1.0),
+            self.OMEGA,
+            [d * self.OMEGA for d in delta_over_omega],
+            c6=v_over_omega * self.OMEGA,
+        )
+        return h, omega_t / self.OMEGA, gamma_over_omega * self.OMEGA
+
+    @pytest.mark.parametrize("case", SWEEP)
+    def test_the_count_meets_tol_over_the_sweep(self, case: SweepCase) -> None:
+        tol = 1e-6
+        h, t, gamma = self.case(case)
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        error = (features_of(h, t, gamma, n) - exact_features(h, t, gamma)).abs().max().item()
+        assert error <= tol
+
+    @pytest.mark.slow
+    def test_the_count_meets_tol_at_gamma_100_omega_over_four_pi_pulses(self) -> None:
+        """One of the cases left out of :data:`SWEEP` for run time: 82 000 steps."""
+        tol = 1e-6
+        h, t, gamma = self.case((1, 0.0, 100.0, 4 * math.pi, [0.0]))
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        error = (features_of(h, t, gamma, n) - exact_features(h, t, gamma)).abs().max().item()
+        assert error <= tol
+
+    def test_the_false_agreement_does_not_stop_it(self) -> None:
+        """
+        One resonant atom, ``ΩT = 16π``, ``γ = 0.1 Ω``: doubling from one step
+        would stop at once, since 1 and 2 steps agree to rounding, at
+        ``⟨n⟩ = 0`` where the damped-Rabi closed form gives 0.358.  The count
+        returned starts from ``2t (W + γ/2)``, with ``W = Ω`` for one resonant
+        atom: 106 steps, so at least 212 come back.
+        """
+        tol = 1e-4
+        h = single_atom(self.OMEGA, 0.0)
+        gamma = 0.1 * self.OMEGA
+        t = 16 * math.pi / self.OMEGA
+        exact = damped_rabi(self.OMEGA, gamma, t)
+        assert exact == pytest.approx(0.3578, abs=1e-4)
+        assert two_run_estimate(h, t, gamma, 2) < 1e-12  # the false agreement
+        assert features_of(h, t, gamma, 2).item() < 1e-12
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        assert n >= 2 * math.ceil(2 * t * (self.OMEGA + gamma / 2)) == 212
+        assert features_of(h, t, gamma, n).item() == pytest.approx(exact, abs=tol)
+
+    @pytest.mark.slow
+    def test_the_counter_example_of_the_model_page(self) -> None:
+        """
+        ``γ = 100 Ω``, ``Ωt = 10``: ``⟨n⟩ = 0.0905`` by the overdamped closed
+        form, 0.128 with 200 steps (#507).  At ``tol = 1e-6`` the count meets it.
+        """
+        tol = 1e-6
+        h = single_atom(self.OMEGA, 0.0)
+        gamma = 100 * self.OMEGA
+        t = 10 / self.OMEGA
+        exact = damped_rabi(self.OMEGA, gamma, t)
+        assert exact == pytest.approx(0.0905, abs=1e-4)
+        assert features_of(h, t, gamma, 200).item() == pytest.approx(0.128, abs=1e-3)
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        assert features_of(h, t, gamma, n).item() == pytest.approx(exact, abs=tol)
+
+    @pytest.mark.parametrize(
+        ("delta_over_omega", "gamma_over_omega", "omega_t"),
+        [(0.0, 1.0, math.pi), (0.77, 10.0, math.pi), (1.23, 0.1, 4 * math.pi)],
+    )
+    def test_it_is_the_smallest_count_tried_from_the_resolution_condition(
+        self, delta_over_omega: float, gamma_over_omega: float, omega_t: float
+    ) -> None:
+        """
+        One atom, ``H = [[0, Ω/2], [Ω/2, −Δ]]``: its energies are
+        ``(−Δ ± √(Ω² + Δ²))/2``, so ``W = √(Ω² + Δ²)`` and the coarsest run has
+        ``n₀ = ceil(2t (W + γ/2))`` steps.  The counts tried are ``2n₀, 4n₀, …``
+        (the run with ``n₀`` steps is only ever the coarser one); with a
+        ``tol`` every estimate meets, the first comes back.  With a tight
+        ``tol``, the returned count's estimate meets it and that of the count
+        before it, if one was tried, does not.
+        """
+        omega = self.OMEGA
+        delta = delta_over_omega * omega
+        gamma = gamma_over_omega * omega
+        t = omega_t / omega
+        h = single_atom(omega, delta)
+        start = math.ceil(2 * t * (math.sqrt(omega**2 + delta**2) + gamma / 2))
+        assert step_count(h, t, gamma=gamma, tol=1.0) == 2 * start
+        tol = 1e-7
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        doublings = math.log2(n / start)
+        assert doublings == int(doublings) >= 1
+        assert two_run_estimate(h, t, gamma, n) <= tol
+        if n > 2 * start:
+            assert two_run_estimate(h, t, gamma, n // 2) > tol
+
+    def test_one_count_for_a_batch_meets_tol_for_every_sample(self) -> None:
+        """Six samples of the four-atom counter-example of #598 with their own detunings."""
+        tol = 1e-5
+        generator = torch.Generator().manual_seed(598)
+        delta = math.sqrt(3) * self.OMEGA * torch.rand(6, 4, generator=generator, dtype=F64)
+        h = rydberg_hamiltonian(AtomRegister.chain(4, 1.0), self.OMEGA, delta, c6=10 * self.OMEGA)
+        t = 4 * math.pi / self.OMEGA
+        gamma = 10 * self.OMEGA
+        n = step_count(h, t, gamma=gamma, tol=tol)
+        errors = (features_of(h, t, gamma, n) - exact_features(h, t, gamma)).abs().amax(dim=-1)
+        assert errors.shape == (6,)
+        assert bool((errors <= tol).all())
+        # the order of the samples does not matter: the count is a maximum over them
+        assert step_count(h.flip(0), t, gamma=gamma, tol=tol) == n
+
+    def test_a_count_from_all_inputs_gives_the_feature_map_features_within_tol(self) -> None:
+        """
+        The use the docstring prescribes: one call on the Hamiltonians of all
+        inputs, the result passed to ``RydbergFeatureMap(n_steps=...)``, where
+        ``get_config()`` records it.  The map's features are then within
+        ``tol`` of the exponential of the Liouvillian, sample by sample.
+        """
+        tol = 1e-5
+        omega = self.OMEGA
+        register = AtomRegister.chain(3, AtomRegister.blockade_radius(DEFAULT_C6, omega))
+        encoding = PulseEncoding(3, omega=omega)
+        gamma = 2.0 * omega
+        X = torch.tensor([[-1.0, 0.0, 2.0], [0.5, 0.5, 0.5], [3.0, -2.0, 0.1]], dtype=F64)
+        h = rydberg_hamiltonian(register, omega, encoding.detunings(X), c6=DEFAULT_C6)
+        n = step_count(h, encoding.t, gamma=gamma, tol=tol)
+        feature_map = RydbergFeatureMap(
+            register, encoding, c6=DEFAULT_C6, gamma=gamma, n_steps=n, correlations=True
+        )
+        assert feature_map.get_config()["n_steps"] == n
+        features = feature_map.transform(X)
+        exact = exact_features(h, encoding.t, gamma)
+        assert (features - exact).abs().max().item() <= tol
+
+    def test_without_dephasing_one_step_is_exact(self) -> None:
+        """
+        ``γ = 0``: ``evolve`` is exact and does not use ``n_steps``, so the
+        smallest count, 1, meets any ``tol``; nothing is evolved for it.
+        """
+        h, t, _ = self.case((4, 10.0, 1.0, 4 * math.pi, [0.3, 1.5, 0.9, 1.7]))
+        assert step_count(h, t, gamma=0.0, tol=1e-9) == 1
+        exact = exact_features(h, t, 0.0)
+        assert torch.allclose(features_of(h, t, 0.0, 1), exact, rtol=0, atol=1e-12)
+
+    def test_it_raises_where_rounding_stops_the_estimate_falling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A solver whose rounding grows with the step count, ``−2e-12 · n`` in
+        ``⟨n⟩``, as the trace drift of ``evolve`` does, only faster.  One
+        resonant atom, ``γ = Ω``, ``ΩT = π``: the splitting's own error is
+        positive (``+4.6e-4`` at 10 steps), so the drift adds to the
+        difference of two runs, ``2e-12 · n`` for ``n`` and ``2n`` steps.  The
+        estimate falls by about 4 per doubling up to 2560 steps (``8.0e-9``),
+        by 2.3 to 5120 (``3.5e-9``), and grows after that (``3.9e-9``), so it
+        never comes down to ``tol = 1e-9`` and no count is returned.
+        """
+        real_evolve = lindblad.evolve
+
+        def drifting(h: torch.Tensor, t: float, *, gamma: float, n_steps: int) -> torch.Tensor:
+            rho = real_evolve(h, t, gamma=gamma, n_steps=n_steps).clone()
+            rho[..., 1, 1] -= 2e-12 * n_steps
+            rho[..., 0, 0] += 2e-12 * n_steps
+            return rho
+
+        monkeypatch.setattr(lindblad, "evolve", drifting)
+        h = single_atom(self.OMEGA, 0.0)
+        with pytest.raises(RuntimeError, match="stopped falling"):
+            step_count(h, math.pi / self.OMEGA, gamma=self.OMEGA, tol=1e-9)
+
+
+class TestStepCountValidation:
+    H = rydberg_hamiltonian(AtomRegister.chain(2, 1.0), 2.0, [0.1, 0.2], c6=1.0)
+
+    def test_tol_is_required_and_keyword_only(self) -> None:
+        with pytest.raises(TypeError, match="tol"):
+            step_count(self.H, 1.0, gamma=0.5)  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="positional"):
+            step_count(self.H, 1.0, 0.5, 1e-6)  # type: ignore[misc]
+
+    @pytest.mark.parametrize("tol", [0.0, -1e-6, 1e-10, math.nan, math.inf, "1e-6", True, None])
+    def test_rejects_a_tol_that_is_not_a_number_of_at_least_1e_9(self, tol: object) -> None:
+        """Below about ``1e-10`` rounding decides the estimate; ``1e-9`` keeps a factor 10."""
+        with pytest.raises(ValueError, match=r"tol must be a finite number >= 1e-09"):
+            step_count(self.H, 1.0, gamma=0.5, tol=tol)  # type: ignore[arg-type]
+
+    def test_the_smallest_tol_is_accepted(self) -> None:
+        assert step_count(self.H, 0.1, gamma=0.5, tol=1e-9) >= 2
+
+    @pytest.mark.parametrize("t", [-0.1, math.nan, "1.0", True])
+    def test_rejects_a_bad_time(self, t: object) -> None:
+        with pytest.raises(ValueError, match="t must be a finite number >= 0"):
+            step_count(self.H, t, gamma=0.5, tol=1e-6)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("gamma", [-0.1, math.nan, None])
+    def test_rejects_a_bad_rate(self, gamma: object) -> None:
+        with pytest.raises(ValueError, match="gamma must be a finite number >= 0"):
+            step_count(self.H, 1.0, gamma=gamma, tol=1e-6)  # type: ignore[arg-type]
+
+    def test_rejects_what_evolve_rejects(self) -> None:
+        with pytest.raises(TypeError, match="hamiltonian must be a torch.Tensor"):
+            step_count([[0.0, 1.0], [1.0, 0.0]], 1.0, gamma=0.5, tol=1e-6)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match=r"hamiltonian must have shape \(2\^n, 2\^n\)"):
+            step_count(torch.zeros(3, 3, dtype=C128), 1.0, gamma=0.5, tol=1e-6)
+        bad = self.H.clone()
+        bad[0, 1] = bad[0, 1] + 0.5
+        with pytest.raises(ValueError, match="hamiltonian must be Hermitian"):
+            step_count(bad, 1.0, gamma=0.5, tol=1e-6)
+
+    def test_rejects_an_empty_batch(self) -> None:
+        """No sample, no count: the result is meant to be fixed by all inputs."""
+        with pytest.raises(ValueError, match="at least one sample"):
+            step_count(torch.zeros(0, 4, 4, dtype=C128), 1.0, gamma=0.5, tol=1e-6)
 
 
 def random_density_matrix(n_atoms: int, seed: int) -> torch.Tensor:
