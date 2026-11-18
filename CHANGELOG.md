@@ -901,7 +901,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and each value found, before printing anything. An exact run and a shots run, or a shots run
   from before #762 (one shot stream for every fold) and one since (a stream per matrix), of the
   same data and folds read together were pooled in one row: the runner took its mean and spread
-  over both kinds of line, and the summariser kept the later line of each fold (#763)
+  over both kinds of line, and the summariser kept the later line of each fold (#763, #767)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
