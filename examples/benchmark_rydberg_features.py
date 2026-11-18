@@ -278,8 +278,10 @@ uniforms: common random numbers across arms, grid points and folds.
   B`` would then carry less shot noise at the first ``V/Ω`` than at the
   others, and its trend over ``V/Ω`` would mix any effect with that change
   of variance.  Arms A and B therefore get their own streams as well; each
-  paired difference then holds the shot noise of both arms, and the folds
-  stay independent units, so the paired test remains valid.
+  paired difference then holds the shot noise of both arms in full (the
+  sum of their variances, with no covariance to subtract), so its variance
+  is larger than common draws would give and the paired test over folds
+  has less power; the folds stay independent units, so it remains valid.
 
 The seed has 32 bits, as the script's other seeds: a ``torch.Generator``
 uses only the low 32 bits of its seed (two seeds that differ above them
@@ -1237,7 +1239,8 @@ def inputs_sha256(inputs: npt.ArrayLike) -> str:
     SHA-256 over the shape and bytes of ``inputs`` as C-ordered float64, in hexadecimal.
 
     The half of :func:`hqnn_forge.benchmark.fingerprint` that covers ``X``,
-    without the labels: ``sha256(repr(shape) ‖ bytes)``.
+    without the labels: ``sha256(repr(shape) ‖ bytes)``, the bytes in rows
+    as given and in the machine's byte order, as there.
     """
     contiguous = np.ascontiguousarray(inputs, dtype=np.float64)
     digest = hashlib.sha256(repr(contiguous.shape).encode())
