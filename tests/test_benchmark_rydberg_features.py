@@ -5930,6 +5930,215 @@ class TestSummary:
         assert len({len(line) for line in table.splitlines()}) == 1
 
 
+#: ``(measurement, shots, shot_stream)`` of a line of arm A, B or D with ``--shots 16`` since
+#: #762 (a stream per matrix), of one written before it (no ``shot_stream``), and of exact
+#: features, which arms C and ``D-hybrid`` always have.
+PER_MATRIX = ("shots", 16, "per-matrix")
+SHARED = ("shots", 16, None)
+EXACT = ("exact", None, None)
+#: The tail of every refusal of a row measured in more than one way (#763).
+MEASUREMENT_ADVICE = (
+    "Its mean and spread would pool lines whose features were measured differently; "
+    "summarise each run's lines on their own."
+)
+
+
+@pytest.fixture(scope="module")
+def shots_run(tmp_path_factory: pytest.TempPathFactory) -> list[dict[str, Any]]:
+    """
+    The lines, as read back, of a quick positive-control run with ``--shots 16`` and every
+    arm (A, B, C, D and with D ``D-hybrid``): two folds, no tuning.
+    """
+    settings = _replace(QUICK, shots=16, n_trials=0, max_folds=2)
+    out = tmp_path_factory.mktemp("shots") / "shots.jsonl"
+    data = {"positive-control": bench.load_dataset("positive-control", settings)}
+    bench.run(data, settings, out, cache_dir=None)
+    lines: list[dict[str, Any]] = bench.read_records(out)
+    return lines
+
+
+#: The committed result files and the SHA-256 of their :func:`summarise` on ``main`` at
+#: 9c60224, before #763.
+COMMITTED_SUMMARIES = (
+    (
+        "rydberg_features_benchmark.jsonl.xz",
+        "89c150dc9ece159497717cba5927f061a9346c0b943c10a6132ee95ff6cad5b7",
+    ),
+    (
+        "rydberg_features_geometries_control_chain.jsonl.xz",
+        "ffc8c7fa9abddcd2c20ae6a5ef40cf48eff7f98b4d425af81330a24f669e402a",
+    ),
+    (
+        "rydberg_features_geometries_control_ring.jsonl.xz",
+        "4d084ad9216f7242f33c5122a65e3b5156725b751f23b4a85d70ac15d84ce06b",
+    ),
+    (
+        "rydberg_features_geometries_control_grid.jsonl.xz",
+        "019193cce2734f21c8432b942805b86f9768059a897886841734d05716a60a0e",
+    ),
+    pytest.param(
+        "rydberg_features_geometries_iranian_churn.jsonl.xz",
+        "7fc97ed184689b1479a3c18781c76d2a649a3585b741c6051dbecd50d0cb7ea0",
+        marks=pytest.mark.slow,
+    ),
+    pytest.param(
+        "rydberg_features_geometries_iranian_churn_15_folds.jsonl.xz",
+        "25ea34a397d8c5d59fadb64f5ba6acc8cad32e4c9d94cd1a1d6b14509c5cd9b9",
+        marks=pytest.mark.slow,
+    ),
+)
+
+
+class TestSummaryMeasurement:
+    """
+    #763: a row of :func:`summarise` takes the mean and spread over its lines, so every line
+    of a row must have measured its features alike, ``(measurement, shots,
+    feature_map["shot_stream"])``; the check is per row, not per dataset.
+    """
+
+    @staticmethod
+    def _line(v: float | None, arm: str, sampled: tuple[Any, ...], **extra: Any) -> dict:
+        """A line of :class:`TestSummary` measured as ``sampled``; arm C exact, no config."""
+        measurement, shots, stream = sampled
+        config = None if arm == "C" else {"shots": shots}
+        if config is not None and stream is not None:
+            config["shot_stream"] = stream
+        return TestSummary._line(
+            v, arm, 1.0, 1.0, measurement=measurement, shots=shots, feature_map=config, **extra
+        )
+
+    def _run(self, sampled: tuple[Any, ...], **extra: Any) -> list[dict[str, Any]]:
+        """Two folds of A and B at ``V/Ω = 1`` measured as ``sampled``, and of C (exact)."""
+        return [
+            self._line(v, arm, EXACT if arm == "C" else sampled, **extra)
+            for arm, v in (("A", 1.0), ("B", 1.0), ("C", None))
+            for _ in range(2)
+        ]
+
+    @staticmethod
+    def _refusal(records: list[dict[str, Any]]) -> str:
+        with pytest.raises(ValueError) as caught:
+            bench.summarise(records)
+        return str(caught.value)
+
+    def test_an_old_and_a_new_shots_run_of_one_row_are_refused(self) -> None:
+        """
+        A shots run from before #762 and one since, joined: the rows of A and B would pool
+        both kinds of line (``n`` doubled), not that of C, exact in both.  Refused at the
+        first such row, with each value and its number of lines in the order first seen.
+        """
+        new, old = self._run(PER_MATRIX), self._run(SHARED)
+        assert self._refusal(new + old) == (
+            "dataset 'positive-control' has lines of 2 feature measurements (measurement, "
+            "shots, shot_stream) in row A/linear chain V/Ω=1 γ/Ω=0.1: measurement shots, "
+            "shots 16, shot_stream per-matrix (2 lines); measurement shots, shots 16, "
+            "shot_stream not recorded (2 lines) (rows with more than one: 2 of 3).  "
+            + MEASUREMENT_ADVICE
+        )
+        assert "shot_stream not recorded (2 lines); measurement shots" in self._refusal(old + new)
+
+    def test_an_exact_and_a_shots_run_of_one_row_are_refused_with_their_label_bonds(
+        self,
+    ) -> None:
+        """
+        The same for exact against shots lines, naming the label bonds of a control line, and
+        for two shots runs that differ only in ``--shots``; a line without the fields counts
+        as one more value, ``not recorded``.
+        """
+        bonds = {"label_bonds": [[0, 1], [1, 2], [2, 3]]}
+        exact, shots = self._run(EXACT, **bonds), self._run(PER_MATRIX, **bonds)
+        assert self._refusal(exact + shots) == (
+            "dataset 'positive-control' (label_bonds [[0, 1], [1, 2], [2, 3]]) has lines of 2 "
+            "feature measurements (measurement, shots, shot_stream) in row A/linear chain "
+            "V/Ω=1 γ/Ω=0.1: measurement exact, shots not recorded, shot_stream not recorded "
+            "(2 lines); measurement shots, shots 16, shot_stream per-matrix (2 lines) (rows "
+            "with more than one: 2 of 3).  " + MEASUREMENT_ADVICE
+        )
+        # Two shots runs that differ only in --shots.
+        assert (
+            "shots 16, shot_stream per-matrix (2 lines); measurement shots, shots 32, "
+            "shot_stream per-matrix (2 lines) (rows with more than one: 2 of 3)."
+        ) in self._refusal(shots + self._run(("shots", 32, "per-matrix"), **bonds))
+        unrecorded = [
+            {k: v for k, v in r.items() if k not in ("measurement", "shots", "feature_map")}
+            for r in exact
+        ]
+        assert (
+            "shot_stream not recorded (2 lines); measurement not recorded, shots not recorded, "
+            "shot_stream not recorded (2 lines) (rows with more than one: 3 of 3)."
+        ) in self._refusal(exact + unrecorded)
+
+    def test_rows_of_other_measurements_print_as_before(self) -> None:
+        """
+        Per row, not per dataset: A and B sampled and C exact in one run print what the same
+        lines print without the fields, the output from before #763.
+        """
+        run = self._run(PER_MATRIX)
+        before = [
+            {k: v for k, v in r.items() if k not in ("measurement", "shots", "feature_map")}
+            for r in run
+        ]
+        assert bench.summarise(run) == bench.summarise(before)
+        assert len(bench.summarise(run).splitlines()) == 4
+
+    @pytest.mark.slow
+    def test_one_shots_run_with_every_arm_summarises(
+        self, shots_run: list[dict[str, Any]]
+    ) -> None:
+        """
+        A run with shots holds both kinds of line in one dataset and still summarises: each
+        row has both folds of its arm and head, and the mean and spread of their MCCs and
+        the mean PR-AUC computed here.  The same run with ``shot_stream`` removed from every
+        config, as a run from before #762 writes it, joined to the first is refused in the 6
+        rows of A, B and D, not in the 3 of C and ``D-hybrid``.
+        """
+
+        def measured(r: dict[str, Any]) -> tuple[Any, ...]:
+            return r["measurement"], r["shots"], (r["feature_map"] or {}).get("shot_stream")
+
+        found = {(r["arm"], r["head"], measured(r)) for r in shots_run}
+        assert found == {
+            *((arm, head, PER_MATRIX) for arm in ("A", "B", "D") for head in ("linear", "mlp")),
+            ("C", "linear", EXACT),
+            ("C", "mlp", EXACT),
+            ("D-hybrid", "hybrid", EXACT),
+        }
+        table = bench.summarise(shots_run).splitlines()
+        assert len(table) == 1 + len(found)
+        for row in table[1:]:
+            cells = row.split()
+            lines = [r for r in shots_run if (r["arm"], r["head"]) == (cells[4], cells[5])]
+            mcc = np.array([r["mcc"] for r in lines])
+            pr_auc = np.mean([r["pr_auc"] for r in lines])
+            assert mcc.size == 2
+            assert cells[6:10] == [
+                f"{mcc.mean():.3f}",
+                "±",
+                f"{mcc.std(ddof=1):.3f}",
+                f"{pr_auc:.3f}",
+            ]
+            assert cells[-1] == "2"
+        old = [
+            {**r, "feature_map": {k: v for k, v in r["feature_map"].items() if k != "shot_stream"}}
+            if r["feature_map"] is not None
+            else r
+            for r in shots_run
+        ]
+        assert (
+            "in row A/linear chain V/Ω=1 γ/Ω=0.1: measurement shots, shots 16, shot_stream "
+            "per-matrix (2 lines); measurement shots, shots 16, shot_stream not recorded (2 "
+            "lines) (rows with more than one: 6 of 9)."
+        ) in self._refusal(shots_run + old)
+
+    @pytest.mark.parametrize(("name", "digest"), COMMITTED_SUMMARIES)
+    def test_the_committed_results_summarise_as_before(self, name: str, digest: str) -> None:
+        """Every committed result file prints byte for byte what it printed before #763."""
+        records = bench.read_records(ROOT / "docs" / "results" / name)
+        assert {r["measurement"] for r in records} == {"exact"}
+        text = bench.summarise(records)
+        assert hashlib.sha256(text.encode()).hexdigest() == digest
+
+
 class TestSeparationSubsamplingIntegration:
     def test_parser_options(self) -> None:
         parser = bench._parser()

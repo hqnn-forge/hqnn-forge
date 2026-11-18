@@ -300,7 +300,12 @@ shots written before #523 records neither, and its ``feature_map`` has no
 ``shot_stream``: its arms A and B were drawn from the start of the
 ``shot_seed`` stream itself, arm D from a device seeded with ``shot_seed``
 for every matrix, so its fold spread understates the shot noise as above.
-Such lines are still read and summarised as before.
+Such lines are still read and summarised as before, but not pooled with
+lines measured otherwise (#763): :func:`summarise` and
+``examples/summarise_rydberg_benchmark.py`` refuse a row whose lines differ
+in ``(measurement, shots, feature_map["shot_stream"])``
+(:func:`feature_measurement`), such as a shots line from before #523 and
+one since, or an exact line and a shots line, read together.
 
 Feature cache
 -------------
@@ -3167,6 +3172,68 @@ def label_geometry(record: Mapping[str, Any]) -> str | None:
     return None
 
 
+def feature_measurement(record: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    """
+    How a line's features were measured: ``(measurement, shots, shot_stream)``.
+
+    ``measurement`` and ``shots`` as the line records them ("What a line
+    records"); ``shot_stream`` that of its ``feature_map``: ``"per-matrix"``
+    on a shots line since #523, absent on a shots line written before it and
+    on an exact line ("Measurement").  ``None`` stands for a field the line
+    does not record (missing or ``null``; arm C and ``D-hybrid`` record
+    ``feature_map`` as ``null``).
+    """
+    config = record.get("feature_map") or {}
+    return record.get("measurement"), record.get("shots"), config.get("shot_stream")
+
+
+def _check_one_measurement(rows: Mapping[tuple[Any, ...], Sequence[Mapping[str, Any]]]) -> None:
+    """
+    Refuse ``rows`` unless the lines of each were measured alike.
+
+    ``rows`` maps the key of a row of :func:`summarise`, ``(dataset,
+    label_bonds, geometry, V/Ω, γ/Ω, arm, head)``, to its lines, in the order
+    printed.  Every line of a row must have the same
+    :func:`feature_measurement`; otherwise the ``ValueError`` names the
+    dataset, its label bonds, the first such row (``arm/head``, its
+    geometry and its grid point) and each value found there with its number
+    of lines, in the order first seen, and how many rows have more than
+    one.  A field a line does not record counts as one more value, ``not
+    recorded``.  Per row, not per dataset: in one shots run arm C and
+    ``D-hybrid`` are exact while A, B and D are sampled.
+    """
+    per_row: dict[tuple[Any, ...], dict[tuple[Any, Any, Any], int]] = {}
+    for key, lines in rows.items():
+        found = per_row[key] = {}
+        for record in lines:
+            value = feature_measurement(record)
+            found[value] = found.get(value, 0) + 1
+    mixed = [key for key, found in per_row.items() if len(found) > 1]
+    if not mixed:
+        return
+    dataset, bonds, geometry, v, gamma, arm, head = mixed[0]
+    first = per_row[mixed[0]]
+    names = ("measurement", "shots", "shot_stream")
+    found_text = "; ".join(
+        ", ".join(
+            f"{name} {'not recorded' if field is None else field}"
+            for name, field in zip(names, value, strict=True)
+        )
+        + f" ({count} lines)"
+        for value, count in first.items()
+    )
+    label = "" if bonds is None else f" (label_bonds {[list(pair) for pair in bonds]})"
+    row = f"{arm}/{head}" + ("" if geometry is None else f" {geometry}")
+    row += "" if v is None else f" V/Ω={v:g}"
+    row += "" if gamma is None else f" γ/Ω={gamma:g}"
+    raise ValueError(
+        f"dataset {dataset!r}{label} has lines of {len(first)} feature measurements "
+        f"(measurement, shots, shot_stream) in row {row}: {found_text} (rows with more than "
+        f"one: {len(mixed)} of {len(per_row)}).  Its mean and spread would pool lines whose "
+        "features were measured differently; summarise each run's lines on their own."
+    )
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     """
     Mean and fold spread of MCC and PR-AUC per dataset, label, geometry, arm, head and grid point.
@@ -3192,6 +3259,20 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     (``tuning["pca"]``), whose choice of hyperparameters may then depend on
     the platform.  A line without the field is not counted, and ``-`` means
     no line of the row records it.
+
+    Every line of a row must have measured its features alike (#763): the
+    mean and spread of a row pooling exact lines with shots lines, or shots
+    lines of a run from before #523 (one stream for every fold) with those
+    of one since (a stream per matrix), would be of neither kind
+    ("Measurement" in the module docstring).
+
+    Raises
+    ------
+    ValueError
+        If the lines of one row differ in :func:`feature_measurement`,
+        ``(measurement, shots, shot_stream)`` (:func:`_check_one_measurement`),
+        naming the dataset, its label bonds, the row and each value found
+        with its number of lines.  Lines of one run never do.
     """
     labels: dict[str, set[Any]] = {}
     for record in records:
@@ -3212,6 +3293,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
             record["head"],
         )
         groups.setdefault(key, []).append(record)
+    _check_one_measurement(groups)
     header = (
         f"{'dataset':22s} {'geometry':10s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
         f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'deg':>4s} {'t-deg':>5s} "
