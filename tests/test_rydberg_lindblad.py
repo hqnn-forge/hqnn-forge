@@ -1080,11 +1080,15 @@ class TestStepCount:
         difference of two runs, ``2e-12 · n`` for ``n`` and ``2n`` steps.  The
         estimate falls by about 4 per doubling up to 2560 steps (``8.0e-9``),
         by 2.3 to 5120 (``3.5e-9``), and grows after that (``3.9e-9``), so it
-        never comes down to ``tol = 1e-9`` and no count is returned.
+        never comes down to ``tol = 1e-9`` and no count is returned.  It has
+        to raise at 10 240 steps; a solver asked for more fails the test,
+        which would otherwise run forever without the check.
         """
         real_evolve = lindblad.evolve
 
         def drifting(h: torch.Tensor, t: float, *, gamma: float, n_steps: int) -> torch.Tensor:
+            if n_steps > 10_240:
+                pytest.fail(f"step_count went on to {n_steps} steps after the estimate rose")
             rho = real_evolve(h, t, gamma=gamma, n_steps=n_steps).clone()
             rho[..., 1, 1] -= 2e-12 * n_steps
             rho[..., 0, 0] += 2e-12 * n_steps
