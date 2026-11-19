@@ -525,6 +525,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count met `tol = 1e-6` against the chained exponential of the Liouvillian (#760, #768)
 
 ### Changed
+- `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
+  now. A tensor or array is refused with a message that says so and names `.item()` for one
+  element, or the shape for more, instead of calling a valid value "not a finite number". The
+  same holds for the arguments validated alike: `t` and `gamma` of `step_count`, `t` of
+  `PulseEncoding` and `GlobalDrivePulseEncoding` (and its `t_ramp`), `gamma` and
+  `position_jitter` of `RydbergFeatureMap`, and `gamma` of `AnalogRydbergLayer` (#530, #770)
 - `examples/benchmark_rydberg_features.py --shots` draws every feature matrix from a shot stream
   of its own: its generator (arm D: its device) is seeded with the first four bytes of the
   SHA-256 of the matrix's config, which holds `shot_seed`, and of its inputs

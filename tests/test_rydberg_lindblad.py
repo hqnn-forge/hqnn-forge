@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 import time
 from collections.abc import Callable
 
@@ -2150,23 +2151,76 @@ class TestValidation:
             evolve(self.H, 1.0, gamma=gamma, n_steps=10)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
-        "values",
-        [torch.tensor([0.5, 0.5], dtype=torch.float64), torch.full((2, 1), 0.5), np.full(2, 0.5)],
+        ("values", "kind", "shape"),
+        [
+            (torch.tensor([0.5, 0.5], dtype=torch.float64), "tensor", (2,)),
+            (torch.full((2, 1), 0.5), "tensor", (2, 1)),
+            (np.full(2, 0.5), "NumPy array", (2,)),
+        ],
         ids=["tensor (2,)", "tensor (2, 1)", "ndarray (2,)"],
     )
     @pytest.mark.parametrize("name", ["t", "gamma"])
     def test_a_time_or_rate_of_more_than_one_element_is_refused(
-        self, name: str, values: object
+        self, name: str, values: object, kind: str, shape: tuple[int, ...]
     ) -> None:
         """
         ``t`` and ``gamma`` are shared by the batch (#530): one value per
         sample is not read as such, whatever the batch size, even when every
-        element is the same valid number.
+        element is the same valid number.  The message names the shape, not
+        ``.item()``, which would fail on more than one element.
         """
         batch = torch.stack([self.H, self.H])
         args = {"t": 1.0, "gamma": 0.5, name: values}
-        with pytest.raises(ValueError, match=f"^{name} must be"):
+        message = f"{name} must be a single finite number >= 0, not a {kind} of shape {shape}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             evolve(batch, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("make", "kind"),
+        [
+            (lambda: torch.tensor(0.5, dtype=torch.float64), "tensor"),
+            (lambda: torch.tensor(0.5, dtype=torch.float64, requires_grad=True), "tensor"),
+            (lambda: torch.tensor([0.5], dtype=torch.float64), "tensor"),
+            (lambda: np.array(0.5), "NumPy array"),
+        ],
+        ids=["tensor ()", "tensor () requiring grad", "tensor (1,)", "ndarray ()"],
+    )
+    @pytest.mark.parametrize("name", ["t", "gamma"])
+    def test_a_one_element_tensor_or_array_is_refused_naming_item(
+        self, name: str, make: Callable[[], object], kind: str
+    ) -> None:
+        """
+        Numbers only (#530, option A): ``float()`` would take a one-element
+        tensor and drop its graph without a word, so it is refused, whether it
+        requires grad or not, with a message naming ``.item()``.  What
+        ``.item()`` returns is then accepted and evolves as the number does.
+        """
+        value = make()
+        args: dict[str, object] = {"t": 0.5, "gamma": 0.5, name: value}
+        message = (
+            f"{name} must be a finite number >= 0, not a {kind}; got {value!r}. "
+            f"Pass {name}.item() to use its value: no derivative with respect to "
+            f"{name} is taken."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            evolve(self.H, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
+        args[name] = value.item()  # type: ignore[attr-defined]
+        rho = evolve(self.H, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
+        assert torch.equal(rho, evolve(self.H, 0.5, gamma=0.5, n_steps=10))
+
+    @pytest.mark.parametrize("scalar", [np.float64, np.float32, np.int64])
+    def test_numpy_scalars_are_numbers(self, scalar: Callable[[float], object]) -> None:
+        """
+        A NumPy scalar is a ``numbers.Real`` and stays accepted: one resonant
+        atom ends at ``⟨n⟩ = sin²(Ωt/2)``, and ``gamma`` gives the state of
+        the same Python float.
+        """
+        one = rydberg_hamiltonian(ONE_ATOM, 2.0, [0.0], c6=1.0)
+        t = scalar(1)
+        population = readout(evolve(one, t)).item()  # type: ignore[arg-type]
+        assert population == pytest.approx(math.sin(2.0 * 1 / 2) ** 2, abs=1e-14)
+        damped = evolve(one, 1.0, gamma=scalar(2), n_steps=20)  # type: ignore[arg-type]
+        assert torch.equal(damped, evolve(one, 1.0, gamma=2.0, n_steps=20))
 
     def test_a_missing_step_count_is_reported_before_the_eigendecomposition(
         self, monkeypatch: pytest.MonkeyPatch
