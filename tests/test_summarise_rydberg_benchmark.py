@@ -11,6 +11,7 @@ and the Holm family against :func:`holm_correction` called directly.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib.util
 import math
@@ -910,6 +911,177 @@ def test_lines_of_one_fold_count_but_other_test_sets_are_refused(
         f"not recorded ({LINES_PER_FOLD} lines) (folds with more than one: "
         f"{list(range(N_FOLDS))})."
     ) in _refusal(first + old, capsys)
+
+
+# ---------------------------------------------------------------------------
+# One row, one measurement (#763)
+# ---------------------------------------------------------------------------
+
+#: The tail of every refusal of :func:`summary._check_one_measurement`.
+MEASUREMENT_ADVICE = (
+    "Its spread, intervals and paired tests would pool lines whose features were measured "
+    "differently; summarise each run's lines on their own."
+)
+#: ``(measurement, shots, shot_stream)`` of a line of arm A, B or D with ``--shots 16`` since
+#: #762 (a stream per matrix), of one written before it (no ``shot_stream``), and of exact
+#: features, which arms C and ``D-hybrid`` always have.
+PER_MATRIX = ("shots", 16, "per-matrix")
+SHARED = ("shots", 16, None)
+EXACT = ("exact", None, None)
+
+
+def _measured(lines: list[dict[str, Any]], sampled: tuple[Any, ...]) -> list[dict[str, Any]]:
+    """
+    ``lines`` as a run writes them whose arms A and B were measured as ``sampled``.
+
+    ``sampled`` is ``(measurement, shots, shot_stream)``; a ``shot_stream`` of ``None`` is left
+    out of ``feature_map``, as before #762 and in every exact config.  Arm C is exact with a
+    ``feature_map`` of ``null``, as the runner writes it.
+    """
+    measurement, shots, stream = sampled
+    out = []
+    for r in lines:
+        if r["arm"] == "C":
+            fields: dict[str, Any] = {"measurement": "exact", "shots": None, "feature_map": None}
+        else:
+            config = {"n_atoms": 4, "shots": shots}
+            if stream is not None:
+                config["shot_stream"] = stream
+            fields = {"measurement": measurement, "shots": shots, "feature_map": config}
+        out.append({**r, **fields})
+    return out
+
+
+def test_an_old_and_a_new_shots_run_of_one_row_are_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    #763: a shots run from before #762 (every fold from the one ``shot_seed`` stream) and one
+    since (a stream per matrix), of the same data, label and folds, pass the guards of #742 and
+    #753, and every row of A and B would pool both kinds of line.  Refused before anything is
+    printed, at the first such row of the scores table, naming each value with its number of
+    lines in the order first seen and how many of the 5 rows have more than one: A at two
+    ``V/Ω`` and B (keyed by ``γ/Ω`` alone), not C, exact in both runs.
+    """
+    new, old = _measured(_records(), PER_MATRIX), _measured(_records(), SHARED)
+    # One fingerprint and one split (neither recorded): only the measurement tells them apart.
+    assert summary.data_fingerprints(new + old) == {None: 2 * LINES_PER_FOLD * N_FOLDS}
+    assert list(summary.groups(new + old)) == [("toy", None)]
+    found = (
+        f"measurement shots, shots 16, shot_stream per-matrix ({N_FOLDS} lines); "
+        f"measurement shots, shots 16, shot_stream not recorded ({N_FOLDS} lines)"
+    )
+    assert _refusal(new + old, capsys) == (
+        "dataset 'toy' has lines of 2 feature measurements (measurement, shots, shot_stream) "
+        f"in row A/linear chain V/Ω=1 γ/Ω=0: {found} (rows with more than one: 3 of 5).  "
+        + MEASUREMENT_ADVICE
+    )
+    assert (
+        f"shot_stream not recorded ({N_FOLDS} lines); measurement shots, shots 16, "
+        f"shot_stream per-matrix ({N_FOLDS} lines)"
+    ) in _refusal(old + new, capsys)
+
+
+def test_an_exact_and_a_shots_run_of_one_row_are_refused_with_their_label_bonds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    The same for exact against shots lines, in a group with label bonds, which the refusal
+    names as the guards of #742 and #753 do, and for two shots runs that differ only in
+    ``--shots``.  A line without the fields counts as one more value, ``not recorded``, here
+    beside exact lines: then C differs too, so all 5 rows do.
+    """
+    run, _ = _control_run(geometries=("chain",))
+    exact, shots = _measured(run, EXACT), _measured(run, PER_MATRIX)
+    assert _refusal(exact + shots, capsys) == (
+        "dataset 'positive-control' (label_bonds [[0, 1], [1, 2], [2, 3]]) has lines of 2 "
+        "feature measurements (measurement, shots, shot_stream) in row A/linear chain V/Ω=1 "
+        f"γ/Ω=0: measurement exact, shots not recorded, shot_stream not recorded ({N_FOLDS} "
+        f"lines); measurement shots, shots 16, shot_stream per-matrix ({N_FOLDS} lines) "
+        "(rows with more than one: 3 of 5).  " + MEASUREMENT_ADVICE
+    )
+    # Two shots runs that differ only in --shots.
+    assert (
+        f"shots 16, shot_stream per-matrix ({N_FOLDS} lines); measurement shots, shots 32, "
+        f"shot_stream per-matrix ({N_FOLDS} lines) (rows with more than one: 3 of 5)."
+    ) in _refusal(shots + _measured(run, ("shots", 32, "per-matrix")), capsys)
+    unrecorded = [
+        {k: v for k, v in r.items() if k not in ("measurement", "shots", "feature_map")}
+        for r in exact
+    ]
+    assert (
+        f"shot_stream not recorded ({N_FOLDS} lines); measurement not recorded, shots not "
+        f"recorded, shot_stream not recorded ({N_FOLDS} lines) (rows with more than one: 5 of 5)."
+    ) in _refusal(exact + unrecorded, capsys)
+
+
+def test_the_check_is_per_row_and_changes_no_output() -> None:
+    """
+    In one shots run arm C is exact and arms A and B are sampled, so a check over the whole
+    group would refuse every shots run.  Per row it passes, and the run prints what the same
+    lines print without the fields, as before #763; so does a run read twice.
+    """
+    run = _measured(_records(), PER_MATRIX)
+    assert {summary.feature_measurement(r) for r in run} == {PER_MATRIX, EXACT}
+    before = summary.summarise(_records(), permutations=99, long=True)
+    assert summary.summarise(run, permutations=99, long=True) == before
+    assert summary.summarise(run + run, permutations=99, long=True) == before
+
+
+@pytest.fixture(scope="module")
+def shots_run(tmp_path_factory: pytest.TempPathFactory) -> list[dict[str, Any]]:
+    """
+    The lines, as read back, of a quick positive-control run with ``--shots 16`` and every
+    arm (A, B, C, D and with D ``D-hybrid``): two folds, no tuning.
+    """
+    settings = dataclasses.replace(bench.QUICK, shots=16, n_trials=0, max_folds=2)
+    out = tmp_path_factory.mktemp("shots") / "shots.jsonl"
+    data = {"positive-control": bench.load_dataset("positive-control", settings)}
+    bench.run(data, settings, out, cache_dir=None)
+    lines: list[dict[str, Any]] = bench.read_records(out)
+    return lines
+
+
+@pytest.mark.slow
+def test_one_shots_run_with_every_arm_summarises(
+    shots_run: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    A run of the runner with shots holds both kinds of line in one group and still
+    summarises: each row of the scores table has both folds of its arm and head, its mean
+    and sample spread those of their MCCs computed here.  The same run with ``shot_stream``
+    removed from every config, as a run from before #762 writes it, keeps its fingerprint
+    and split, and joined to the first is refused in the 6 rows of A, B and D, not in the 3
+    of C and ``D-hybrid``.
+    """
+    measured = {(r["arm"], r["head"], summary.feature_measurement(r)) for r in shots_run}
+    assert measured == {
+        *((arm, head, PER_MATRIX) for arm in ("A", "B", "D") for head in ("linear", "mlp")),
+        ("C", "linear", EXACT),
+        ("C", "mlp", EXACT),
+        ("D-hybrid", "hybrid", EXACT),
+    }
+    text = summary.summarise(shots_run, permutations=99)
+    for arm, head, _ in measured:
+        mcc = np.array([r["mcc"] for r in shots_run if (r["arm"], r["head"]) == (arm, head)])
+        assert mcc.size == 2
+        (row,) = [line for line in text.splitlines() if line.startswith(f"| {arm} | {head} |")]
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert cells[4:6] == ["2", f"{mcc.mean():.3f} ± {mcc.std(ddof=1):.3f}"]
+    old = [
+        {**r, "feature_map": {k: v for k, v in r["feature_map"].items() if k != "shot_stream"}}
+        if r["feature_map"] is not None
+        else r
+        for r in shots_run
+    ]
+    assert summary.data_fingerprints(shots_run + old) == {
+        shots_run[0]["data_sha256"]: 2 * len(shots_run)
+    }
+    assert (
+        "in row A/linear chain V/Ω=1 γ/Ω=0.1: measurement shots, shots 16, shot_stream "
+        "per-matrix (2 lines); measurement shots, shots 16, shot_stream not recorded (2 lines) "
+        "(rows with more than one: 6 of 9)."
+    ) in _refusal(shots_run + old, capsys)
 
 
 # ---------------------------------------------------------------------------
