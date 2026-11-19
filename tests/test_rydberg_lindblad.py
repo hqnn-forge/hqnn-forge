@@ -1105,7 +1105,9 @@ class TestTheSeededSweep:
     ``-s`` prints the figures of both bounds and per seed.  Each test checks
     one figure of the note to the precision the note quotes it, so a change
     to ``evolve``, to :func:`liouvillian_reference` or to the sampler that
-    moves a figure fails here, and the note has to follow.  Measured on
+    moves a figure fails here, and the note has to follow.  The one
+    exception is the spread below the floor: rounding sets it, so another
+    torch or BLAS can move it, and only its being wide is checked.  Measured on
     2026-11-19 (torch 2.15.0, CPU): at ``<= 1/2``, 1452 of the 1463 cases above
     the floor within 10 % (99.2 %), the largest-error ratio 0.906 to 1.642,
     per feature 0.837 to 5.025, 0.572 to 11.66 below the floor; at ``<= 1``,
@@ -1154,28 +1156,34 @@ class TestTheSeededSweep:
         self, seeded_rows: dict[float, list[SweepRow]]
     ) -> None:
         """
-        The note: below about ``1e-10`` "the estimate says nothing (the error
-        was 0.57 to 11.7 times it in the sweeps)".  The cases under the floor
-        leave the range that the cases above it keep, on both sides.
+        The note: below about ``1e-10`` "the estimate says nothing".  The
+        cases under the floor leave the range that the cases above it keep, on
+        both sides and not in one outlier only, while the cases above it stay
+        within the note's 0.91 to 1.64 (the test before), so the floor sits
+        where the note puts it.  The note's 0.57 and 11.7 are not pinned:
+        they are ratios of rounding errors near ``1e-13`` (measured: 14 of
+        the 37 cases outside the range above the floor, 7 beyond twice its
+        largest ratio), which another torch or BLAS can move.
         """
-        below = [row for row in seeded_rows[1 / 2] if row.largest_error <= ROUNDING_FLOOR]
-        above = above_the_floor(seeded_rows[1 / 2])
-        assert round(min(row.ratio for row in below), 2) == 0.57
-        assert round(max(row.ratio for row in below), 1) == 11.7
-        assert min(row.ratio for row in below) < min(row.ratio for row in above)
-        assert max(row.ratio for row in below) > 2 * max(row.ratio for row in above)
+        below = [row.ratio for row in seeded_rows[1 / 2] if row.largest_error <= ROUNDING_FLOOR]
+        above = [row.ratio for row in above_the_floor(seeded_rows[1 / 2])]
+        assert min(below) < min(above)
+        assert max(below) > 2 * max(above)
+        outside = [ratio for ratio in below if not min(above) <= ratio <= max(above)]
+        assert len(outside) >= len(below) / 5
 
     def test_at_one_it_is_clearly_worse(self, seeded_rows: dict[float, list[SweepRow]]) -> None:
         """
         The condition itself, not only the ratios under it: at
         ``dt · (W + Nγ/2) <= 1`` the share within 10 % falls to 90 % and the
-        largest ratio reaches 3.5, the note's figures, both clearly worse than
+        ratios spread to 0.71 and 3.5, the note's figures, clearly worse than
         at ``<= 1/2``.  Dropping the factor 2 from the note's condition is
         therefore caught over the whole sweep, not only at the one point of
         :class:`TestChoosingTheStepCount` that fails without it.
         """
         half, one = above_the_floor(seeded_rows[1 / 2]), above_the_floor(seeded_rows[1.0])
         assert round(share_within_10_percent(one), 2) == 0.90
+        assert round(min(row.ratio for row in one), 2) == 0.71
         assert round(max(row.ratio for row in one), 1) == 3.5
         assert share_within_10_percent(one) < share_within_10_percent(half) - 0.05
         assert max(row.ratio for row in one) > 1.5 * max(row.ratio for row in half)

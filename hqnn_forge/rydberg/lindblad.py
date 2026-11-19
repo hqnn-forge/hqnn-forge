@@ -673,16 +673,15 @@ def evolve(
       A single feature's error, where above ``1e-9``, was 0.84 to 5.0 times
       a third of its own difference.  At ``dt · (W + Nγ/2) <= 1`` the
       largest error was within 10 % in only 90 % of the cases above the
-      floor, and up to 3.5 times the estimate.  Errors below about
+      floor, and 0.71 to 3.5 times the estimate.  Errors below about
       ``1e-10`` stop falling by 4 per halving, as rounding takes over, and
       there the estimate says nothing (the error was 0.57 to 11.7 times it
-      in the sweeps).  The
-      sweep is ``TestTheSeededSweep`` in ``tests/test_rydberg_lindblad.py``,
-      an opt-in run (``HQNN_FORGE_REPRODUCE=1``, about 5 minutes); the
-      points behind 1.64 and 0.83 are ``TestTheRecordedPoints`` there, in
-      the default suite (#627).  ``dt · (W + Nγ/2) <= 1/2`` is a condition
-      for trusting the estimate, not the count the features need, which can
-      be far smaller.
+      in the sweeps).  The sweep is ``TestTheSeededSweep`` in
+      ``tests/test_rydberg_lindblad.py``, an opt-in run
+      (``HQNN_FORGE_REPRODUCE=1``, about 5 minutes); the points behind 1.64
+      and 0.83 are ``TestTheRecordedPoints`` there, in the default suite
+      (#627).  ``dt · (W + Nγ/2) <= 1/2`` is a condition for trusting the
+      estimate, not the count the features need, which can be far smaller.
       **Before it holds, two runs can agree while both are wrong**: one
       resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω`` ends with ``⟨n⟩ = 0`` to
       rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
