@@ -515,6 +515,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong. `tol` has no default and must be at least `1e-9`; called once on all inputs, the
   result is passed to `RydbergFeatureMap(n_steps=...)`. Over #598's 216 cases every count met
   `tol = 1e-6` against the exponential of the Liouvillian (#598, #761)
+- `RydbergFeatureMap.step_count(X, *, tol, chunk_size=None)`: the same count for the solver runs
+  of the map itself, so that a `GlobalDrivePulseEncoding` (ramp segments of their own Ω and
+  duration, chained) and position jitter (displaced registers, mixed) get a count that meets
+  `tol` too. It starts at the largest resolution count over every segment, register and sample
+  and doubles all segments together; the docstring derives why a third of the difference of two
+  runs stays the error of the chain and of the mixture. Without ramp and jitter it is
+  `step_count` of the map's Hamiltonians. Over 446 cases, 342 ramped and 163 jittered, every
+  count met `tol = 1e-6` against the chained exponential of the Liouvillian (#760, #768)
 
 ### Changed
 - `examples/benchmark_rydberg_features.py --shots` draws every feature matrix from a shot stream

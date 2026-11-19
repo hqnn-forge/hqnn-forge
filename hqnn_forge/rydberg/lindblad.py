@@ -188,6 +188,7 @@ from __future__ import annotations
 
 import math
 import numbers
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -852,7 +853,10 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
       ``t = encoding.t`` (example below).  The segments of a
       :class:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding` and the displaced
       registers of position jitter are other Hamiltonians, which a count
-      from these does not cover (#760).
+      from these does not cover:
+      :meth:`hqnn_forge.rydberg.RydbergFeatureMap.step_count` takes the
+      count from the map's own chain of segments and registers (#760), and
+      gives this function's result where the map has neither.
     * **Accuracy.**  ``tol`` is met to the accuracy of the estimate, which
       is not a bound.  Over the 216 cases of #598 (1, 2 and 4 atoms, ``V/Ω``
       0 to 100, ``γ/Ω`` 0.1 to 100, ``ΩT`` π to 16π, detunings 0 or in
@@ -918,25 +922,57 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
         return 1
     with torch.no_grad():
         # W = E_max − E_min per sample; the batch's largest rate sets n₀
-        energies = torch.linalg.eigvalsh(h)
-        spread = (energies.amax(dim=-1) - energies.amin(dim=-1)).max().item()
-        steps = max(1, math.ceil(2 * t * (spread + n_atoms * gamma / 2)))
-        coarse = readout(evolve(h, t, gamma=gamma, n_steps=steps), pairs=True)
-        previous = math.inf
-        while True:
-            fine = readout(evolve(h, t, gamma=gamma, n_steps=2 * steps), pairs=True)
-            # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features
-            estimate = (coarse - fine).abs().max().item() / 3
-            if estimate <= tol:
-                return 2 * steps
-            if estimate > previous / _SMALLEST_FALL:
-                raise RuntimeError(
-                    f"the two-run estimate stopped falling at {2 * steps} steps "
-                    f"({previous:.3g}, then {estimate:.3g}) above tol={tol:g}: the solver's "
-                    "rounding, which grows with the step count, has taken over, and no "
-                    "count reaches this tol for these Hamiltonians."
-                )
-            steps, coarse, previous = 2 * steps, fine, estimate
+        start = _starting_count(_spread(h), t, n_atoms, gamma)
+        return _doubling_count(
+            start, lambda steps: readout(evolve(h, t, gamma=gamma, n_steps=steps), pairs=True), tol
+        )
+
+
+def _spread(h: torch.Tensor) -> float:
+    """``W = E_max − E_min`` of a Hermitian ``h``, the largest over a batch; ``eigvalsh``."""
+    energies = torch.linalg.eigvalsh(h)
+    return float((energies.amax(dim=-1) - energies.amin(dim=-1)).max().item())
+
+
+def _starting_count(spread: float, t: float, n_atoms: int, gamma: float) -> int:
+    """
+    ``n₀ = ceil(2t · (W + Nγ/2))``, at least 1: ``dt · (W + Nγ/2) <= 1/2`` at ``dt = t/n₀``.
+
+    The resolution condition of :func:`step_count` for a constant ``H`` with
+    spread ``W`` (rad/µs) evolved for ``t`` µs.
+    """
+    return max(1, math.ceil(2 * t * (spread + n_atoms * gamma / 2)))
+
+
+def _doubling_count(start: int, features: Callable[[int], torch.Tensor], tol: float) -> int:
+    """
+    The doubling of :func:`step_count` from ``start`` steps, for any linear solver.
+
+    ``features(n)`` returns the features at ``n`` steps (one row per sample;
+    the maximum is taken over every entry).  Tries ``2·start, 4·start, …``
+    and returns the first count at which a third of the largest
+    ``|F_(n/2) − F_n|`` is at most ``tol``; ``RuntimeError`` when an estimate
+    above ``tol`` is more than half of the one before (``step_count``,
+    Raises).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
+    its whole chain of segments and registers as ``features``.
+    """
+    steps = start
+    coarse = features(steps)
+    previous = math.inf
+    while True:
+        fine = features(2 * steps)
+        # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features
+        estimate = (coarse - fine).abs().max().item() / 3
+        if estimate <= tol:
+            return 2 * steps
+        if estimate > previous / _SMALLEST_FALL:
+            raise RuntimeError(
+                f"the two-run estimate stopped falling at {2 * steps} steps "
+                f"({previous:.3g}, then {estimate:.3g}) above tol={tol:g}: the solver's "
+                "rounding, which grows with the step count, has taken over, and no "
+                "count reaches this tol for these Hamiltonians."
+            )
+        steps, coarse, previous = 2 * steps, fine, estimate
 
 
 def _propagator(h: torch.Tensor, tau: float) -> torch.Tensor:

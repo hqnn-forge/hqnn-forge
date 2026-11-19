@@ -6,7 +6,9 @@ tests/test_rydberg_lindblad.py
 atom, the product state without interactions, the blockade of two atoms, the
 maximally mixed state under strong dephasing, and the order of the splitting;
 ``step_count`` (#598) by the feature error of the count it returns, over a
-subset of #598's sweep.
+subset of #598's sweep, and ``RydbergFeatureMap.step_count`` (#760) by that
+of a ramped drive and of a jittered register, against the chained exponential
+of the Liouvillian per segment.
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -36,6 +38,7 @@ from hqnn_forge.rydberg import (
     DEFAULT_C6,
     MAX_ATOMS,
     AtomRegister,
+    GlobalDrivePulseEncoding,
     PulseEncoding,
     RydbergFeatureMap,
     evolve,
@@ -1142,6 +1145,353 @@ class TestStepCountValidation:
         """No sample, no count: the result is meant to be fixed by all inputs."""
         with pytest.raises(ValueError, match="at least one sample"):
             step_count(torch.zeros(0, 4, 4, dtype=C128), 1.0, gamma=0.5, tol=1e-6)
+
+
+def trapezoid_segments(
+    omega: float, t: float, t_ramp: float, n_segments: int | None
+) -> list[tuple[float, float]]:
+    """
+    ``(Ω_k, τ_k)`` of the ramped drive, typed in from #732, in time order.
+
+    ``n`` segments of ``t_ramp/n`` per edge at the midpoint values
+    ``Ω (k + ½)/n`` rising and the same values in reverse falling, the plateau
+    ``(Ω, T − t_ramp)`` between them where it is not empty; ``[(Ω, T)]``
+    without a ramp.
+    """
+    if n_segments is None:
+        return [(omega, t)]
+    tau = t_ramp / n_segments
+    rising = [(omega * (k + 0.5) / n_segments, tau) for k in range(n_segments)]
+    plateau = [(omega, t - t_ramp)] if t > t_ramp else []
+    return rising + plateau + rising[::-1]
+
+
+def displaced_registers(
+    register: AtomRegister, sigma: float, samples: int | None, seed: int | None
+) -> list[AtomRegister]:
+    """
+    The registers of position jitter, drawn by hand as the feature map documents.
+
+    One ``torch.randn((K, N, 2), float64)`` from a CPU generator seeded with
+    ``seed``: entry ``[k, i, c]`` displaces coordinate ``c`` of atom ``i`` in
+    realisation ``k`` by ``σ`` times it.  ``[register]`` without jitter.
+    """
+    if samples is None or seed is None:
+        return [register]
+    generator = torch.Generator().manual_seed(seed)
+    z = torch.randn((samples, register.n_atoms, 2), generator=generator, dtype=F64)
+    return [AtomRegister(register.positions + sigma * z[k]) for k in range(samples)]
+
+
+def chained_features(
+    registers: list[AtomRegister],
+    segments: list[tuple[float, float]],
+    delta: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    """
+    ``⟨n_i⟩``, ``⟨n_i n_j⟩`` of the exact chained evolution, averaged over ``registers``.
+
+    For every sample (row of ``delta``, in rad/µs) and register: the
+    exponential of the full Liouvillian of each segment ``(Ω_k, τ_k)`` in
+    turn (:func:`liouvillian_reference`), the first from ``|g…g⟩`` and each
+    other from the state the one before left; then the mean over the
+    registers of the final states' features.  No splitting, no
+    eigendecomposition and no mixture of states, so nothing of the feature
+    map's own path.
+    """
+    rows = []
+    for detunings in delta:
+        per_register = []
+        for register in registers:
+            rho: torch.Tensor | None = None
+            for omega, tau in segments:
+                h = rydberg_hamiltonian(register, omega, detunings, c6=DEFAULT_C6)
+                rho = liouvillian_reference(h, tau, gamma, rho)
+            assert rho is not None
+            per_register.append(readout(rho, pairs=True))
+        rows.append(torch.stack(per_register).mean(dim=0))
+    return torch.stack(rows)
+
+
+#: A feature map case of #760: atoms in a chain with ``V/Ω`` between
+#: neighbours, ``γ/Ω``, the ramp as a fraction of ``T`` with its segments per
+#: edge (``0.0, None``: the square pulse of a ``PulseEncoding``), and the
+#: jitter ``σ`` in µm with ``K`` (``0.0, None``: none), at the reference
+#: ``Ω = 4π`` rad/µs and ``T = π/Ω``.
+MapCase = tuple[int, float, float, float, int | None, float, int | None]
+
+
+class TestFeatureMapStepCount:
+    """
+    ``RydbergFeatureMap.step_count`` (#760): one count for a map that runs
+    more than one ``evolve`` per sample, the segments of a ramped drive and
+    the displaced registers of position jitter.  The expected features are
+    those of :func:`chained_features`: the exponential of the full
+    Liouvillian per segment, chained, and averaged over the registers drawn by
+    hand.  The segments are typed in, the detunings are ``√3 Ω σ(x)``.
+    """
+
+    OMEGA = 4.0 * math.pi  # the reference Ω of the model page
+    T = math.pi / OMEGA
+    SEED = 760
+    X = torch.tensor([[-1.0, 0.4, 2.0], [0.3, -0.6, 0.0]], dtype=F64)
+
+    def build(self, case: MapCase) -> tuple[RydbergFeatureMap, torch.Tensor]:
+        """The map of ``case`` (with a placeholder ``n_steps = 1``) and its inputs."""
+        n_atoms, v_over_omega, gamma_over_omega, ramp, segments, sigma, samples = case
+        omega = self.OMEGA
+        spacing = (DEFAULT_C6 / (v_over_omega * omega)) ** (1 / 6)
+        encoding: PulseEncoding | GlobalDrivePulseEncoding = (
+            PulseEncoding(n_atoms, omega=omega)
+            if segments is None
+            else GlobalDrivePulseEncoding(
+                n_atoms, omega=omega, levels=None, t_ramp=ramp * self.T, n_ramp_segments=segments
+            )
+        )
+        jitter: dict[str, float | int | None] = (
+            {}
+            if samples is None
+            else {"position_jitter": sigma, "jitter_samples": samples, "jitter_seed": self.SEED}
+        )
+        feature_map = RydbergFeatureMap(
+            AtomRegister.chain(n_atoms, spacing),
+            encoding,
+            c6=DEFAULT_C6,
+            gamma=gamma_over_omega * omega,
+            n_steps=1,
+            correlations=True,
+            **jitter,  # type: ignore[arg-type]
+        )
+        return feature_map, self.X[:, :n_atoms]
+
+    def exact(
+        self, case: MapCase, feature_map: RydbergFeatureMap, x: torch.Tensor
+    ) -> torch.Tensor:
+        _, _, _, ramp, segments, sigma, samples = case
+        registers = displaced_registers(feature_map.register, sigma, samples, self.SEED)
+        drive = trapezoid_segments(self.OMEGA, self.T, ramp * self.T, segments)
+        delta = math.sqrt(3) * self.OMEGA * torch.sigmoid(x)
+        return chained_features(registers, drive, delta, feature_map.gamma)
+
+    def starting_count(
+        self, case: MapCase, feature_map: RydbergFeatureMap, x: torch.Tensor
+    ) -> int:
+        """
+        ``n₀ = max ceil(2 τ_k (W + Nγ/2))`` over the typed-in segments, the
+        registers drawn by hand and the samples, ``W`` from ``eigvalsh``.
+        """
+        n_atoms, _, _, ramp, segments, sigma, samples = case
+        registers = displaced_registers(feature_map.register, sigma, samples, self.SEED)
+        delta = math.sqrt(3) * self.OMEGA * torch.sigmoid(x)
+        start = 1
+        for omega, tau in trapezoid_segments(self.OMEGA, self.T, ramp * self.T, segments):
+            for register in registers:
+                energies = torch.linalg.eigvalsh(
+                    rydberg_hamiltonian(register, omega, delta, c6=DEFAULT_C6)
+                )
+                spread = (energies.amax(dim=-1) - energies.amin(dim=-1)).max().item()
+                rate = spread + n_atoms * feature_map.gamma / 2
+                start = max(start, math.ceil(2 * tau * rate))
+        return start
+
+    @staticmethod
+    def features_at(feature_map: RydbergFeatureMap, x: torch.Tensor, n_steps: int) -> torch.Tensor:
+        rebuilt = RydbergFeatureMap(**{**feature_map.get_config(), "n_steps": n_steps})
+        return rebuilt.transform(x)
+
+    #: Ramped drives, a triangle, a jittered register under the square pulse,
+    #: and both at once.
+    CASES: list[MapCase] = [
+        (2, 1.0, 1.0, 0.2, 3, 0.0, None),
+        (3, 1.0, 0.1, 0.5, 2, 0.0, None),
+        (2, 10.0, 10.0, 1.0, 2, 0.0, None),
+        (3, 1.0, 1.0, 0.0, None, 0.5, 3),
+        (2, 10.0, 4.0, 0.2, 2, 0.3, 2),
+    ]
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_the_count_meets_tol_against_the_chained_liouvillian(self, case: MapCase) -> None:
+        tol = 1e-6
+        feature_map, x = self.build(case)
+        n = feature_map.step_count(x, tol=tol)
+        doublings = math.log2(n / self.starting_count(case, feature_map, x))
+        assert doublings == int(doublings) >= 1  # one doubling sequence for the whole pulse
+        error = (self.features_at(feature_map, x, n) - self.exact(case, feature_map, x)).abs()
+        assert error.max().item() <= tol
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_a_third_of_the_difference_is_the_error_of_the_chain(self, case: MapCase) -> None:
+        """
+        The design of #760, measured: with ``n₀`` from the largest rate over
+        every segment and register, the features of the whole map at ``2n₀``
+        steps per segment are off the chained exponential by a third of their
+        largest difference from ``n₀`` steps, within 10 %, as for one
+        segment (``TestChoosingTheStepCount``).
+        """
+        feature_map, x = self.build(case)
+        start = self.starting_count(case, feature_map, x)
+        coarse = self.features_at(feature_map, x, start)
+        fine = self.features_at(feature_map, x, 2 * start)
+        error = (fine - self.exact(case, feature_map, x)).abs().max().item()
+        estimate = (coarse - fine).abs().max().item() / 3
+        assert error > 1e-9  # above the rounding floor, so the ratio is not noise
+        assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+    # The plateau sets n₀, or, with a long ramp of one segment per edge, the rising edge.
+    @pytest.mark.parametrize(
+        ("ramp", "segments", "longest"), [(0.2, 2, 2), (0.0, None, 0), (0.9, 1, 0)]
+    )
+    def test_the_start_is_the_largest_over_the_segments(
+        self, ramp: float, segments: int | None, longest: int
+    ) -> None:
+        """
+        One atom, ``Δ = 0.77 Ω``, ``γ = Ω``: segment ``k`` has
+        ``W_k = √(Ω_k² + Δ²)``, so ``n₀ = max_k ceil(2 τ_k (W_k + γ/2))``,
+        typed in; with a ``tol`` that every estimate meets, ``2 n₀`` comes
+        back.  ``longest`` is the segment that sets it.
+        """
+        omega, gamma, x = self.OMEGA, self.OMEGA, 0.4
+        delta = math.sqrt(3) * omega / (1 + math.exp(-x))
+        counts = [
+            math.ceil(2 * tau * (math.sqrt(omega_k**2 + delta**2) + gamma / 2))
+            for omega_k, tau in trapezoid_segments(omega, self.T, ramp * self.T, segments)
+        ]
+        assert counts.index(max(counts)) == longest
+        feature_map, _ = self.build((1, 1.0, 1.0, ramp, segments, 0.0, None))
+        assert feature_map.step_count([[x]], tol=1.0) == 2 * max(counts)
+
+    def test_the_start_is_the_largest_over_the_displaced_registers(self) -> None:
+        """
+        Two atoms 5 µm apart (``V ≈ 28 Ω``), ``σ = 0.3`` µm: the displaced
+        registers have other couplings, hence other ``W``, and the start is
+        the largest of their counts, not the undisplaced register's.
+        """
+        omega, gamma = self.OMEGA, self.OMEGA
+        register = AtomRegister.chain(2, 5.0)
+        feature_map = RydbergFeatureMap(
+            register,
+            PulseEncoding(2, omega=omega),
+            c6=DEFAULT_C6,
+            gamma=gamma,
+            n_steps=1,
+            position_jitter=0.3,
+            jitter_samples=3,
+            jitter_seed=self.SEED,
+        )
+        x = self.X[:1, :2]
+        delta = math.sqrt(3) * omega * torch.sigmoid(x)
+
+        def count(r: AtomRegister) -> int:
+            energies = torch.linalg.eigvalsh(rydberg_hamiltonian(r, omega, delta, c6=DEFAULT_C6))
+            return math.ceil(2 * self.T * ((energies.max() - energies.min()).item() + gamma))
+
+        counts = [count(r) for r in displaced_registers(register, 0.3, 3, self.SEED)]
+        assert max(counts) != count(register)
+        assert feature_map.step_count(x, tol=1.0) == 2 * max(counts)
+
+    def test_without_ramp_or_jitter_it_is_step_count_on_the_maps_hamiltonians(self) -> None:
+        """The recipe of ``step_count``'s Notes, bit for bit: one segment, one register."""
+        tol = 1e-6
+        feature_map, x = self.build((3, 1.0, 1.0, 0.0, None, 0.0, None))
+        encoding = feature_map.encoding
+        h = rydberg_hamiltonian(
+            feature_map.register, encoding.omega, encoding.detunings(x), c6=DEFAULT_C6
+        )
+        n = step_count(h, encoding.t, gamma=feature_map.gamma, tol=tol)
+        assert feature_map.step_count(x, tol=tol) == n
+
+    def test_the_chunk_size_does_not_change_it(self) -> None:
+        feature_map, x = self.build(self.CASES[-1])
+        whole = feature_map.step_count(x, tol=1e-4)
+        assert feature_map.step_count(x, tol=1e-4, chunk_size=1) == whole
+
+    @pytest.mark.parametrize("case", [CASES[0], CASES[3]])
+    def test_it_is_the_smallest_count_tried_for_the_maps_features(self, case: MapCase) -> None:
+        """
+        The estimate at the returned count, from two runs of the whole map at
+        ``n/2`` and ``n`` steps, meets ``tol``, and that of the count before
+        it does not.  With jitter it is the estimate of the mixture, the
+        features the map returns: in the second case each displaced register
+        alone, as a map of its own, would need twice the count.
+        """
+        tol = 1e-6
+        feature_map, x = self.build(case)
+        n = feature_map.step_count(x, tol=tol)
+        assert n > 2 * self.starting_count(case, feature_map, x)  # a count before it was tried
+
+        def estimate(m: RydbergFeatureMap, steps: int) -> float:
+            coarse = self.features_at(m, x, steps // 2)
+            return (coarse - self.features_at(m, x, steps)).abs().max().item() / 3
+
+        assert estimate(feature_map, n) <= tol < estimate(feature_map, n // 2)
+        if case[-1] is not None:
+            alone = [
+                RydbergFeatureMap(
+                    **{
+                        **feature_map.get_config(),
+                        "register": register.positions.tolist(),
+                        "position_jitter": 0.0,
+                        "jitter_samples": None,
+                        "jitter_seed": None,
+                    }
+                )
+                for register in displaced_registers(
+                    feature_map.register, case[5], case[6], self.SEED
+                )
+            ]
+            assert max(estimate(m, n) for m in alone) > tol
+
+    def test_settings_after_the_state_do_not_change_it(self) -> None:
+        """
+        The map's own ``n_steps``, ``correlations`` and ``readout_error`` do not
+        enter: the target is ``⟨n_i⟩``, ``⟨n_i n_j⟩`` of the state the map reads.
+        In this case the pairs set the count (``⟨n_i⟩`` alone would meet
+        ``tol`` at half of it), so ``correlations=False`` would show.
+        """
+        feature_map, x = self.build(self.CASES[1])
+        n = feature_map.step_count(x, tol=1e-6)
+        config = feature_map.get_config()
+        for changed in (
+            {"n_steps": 977},
+            {"correlations": False},
+            {"readout_error": (0.05, 0.1)},
+        ):
+            other = RydbergFeatureMap(**{**config, **changed})
+            assert other.step_count(x, tol=1e-6) == n
+
+    def test_without_dephasing_one_step_is_exact(self) -> None:
+        """``γ = 0``: every segment is exact in one step, so 1 comes back, with jitter and ramp."""
+        feature_map, x = self.build(self.CASES[-1])
+        noiseless = RydbergFeatureMap(**{**feature_map.get_config(), "gamma": 0.0})
+        assert noiseless.step_count(x, tol=1e-9) == 1
+        exact = self.exact(self.CASES[-1], noiseless, x)
+        torch.testing.assert_close(noiseless.transform(x), exact, rtol=0, atol=1e-12)
+
+    def test_tol_is_required_and_keyword_only(self) -> None:
+        feature_map, x = self.build(self.CASES[0])
+        with pytest.raises(TypeError, match="tol"):
+            feature_map.step_count(x)  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="positional"):
+            feature_map.step_count(x, 1e-6)  # type: ignore[misc]
+
+    @pytest.mark.parametrize("tol", [0.0, 1e-10, math.nan, "1e-6", True, None])
+    def test_rejects_the_tol_step_count_rejects(self, tol: object) -> None:
+        feature_map, x = self.build(self.CASES[0])
+        with pytest.raises(ValueError, match=r"tol must be a finite number >= 1e-09"):
+            feature_map.step_count(x, tol=tol)  # type: ignore[arg-type]
+
+    def test_rejects_inputs_transform_rejects(self) -> None:
+        feature_map, x = self.build(self.CASES[0])
+        with pytest.raises(ValueError, match=r"X must have shape \(n_samples, 2\)"):
+            feature_map.step_count(self.X, tol=1e-6)
+        with pytest.raises(ValueError, match="chunk_size must be an integer >= 1"):
+            feature_map.step_count(x, tol=1e-6, chunk_size=0)
+
+    def test_rejects_an_empty_batch(self) -> None:
+        feature_map, _ = self.build(self.CASES[0])
+        with pytest.raises(ValueError, match="at least one sample"):
+            feature_map.step_count(torch.zeros(0, 2, dtype=F64), tol=1e-6)
 
 
 def random_density_matrix(n_atoms: int, seed: int) -> torch.Tensor:
