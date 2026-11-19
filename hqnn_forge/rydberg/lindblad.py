@@ -663,17 +663,25 @@ def evolve(
       generator rather than adding up shared ones.  With
       ``dt · (W + Nγ/2) <= 1/2`` for the coarser run, the finer run's largest
       error over the features ``⟨n_i⟩``, ``⟨n_i n_j⟩`` was within 10 % of a
-      third of their largest difference in 99 % of the cases of five seeded
-      sweeps of 300 cases each (#627): 1, 2 and 4 atoms, ``V/Ω`` from 0 to
+      third of their largest difference in 99 % of the cases whose error was
+      above the rounding floor of about ``1e-10`` (1452 of 1463), in five
+      seeded sweeps of 300 cases each: 1, 2 and 4 atoms, ``V/Ω`` from 0 to
       100, ``γ/Ω`` from 0.1 to 100, ``ΩT`` from π to 16π, detunings within
-      ``±2 Ω``.  It is an estimate, not a bound: single atoms reached 1.6
-      times it in the sweeps, and 0.8 at a point outside them.  A single
-      feature's error was 0.84 to 5.0 times a third of its own difference,
-      and at ``dt · (W + Nγ/2) <= 1`` the largest error was up to 3.5 times
-      the estimate.  Errors below about
-      ``1e-10`` stop falling by 4 per halving, as rounding takes over, and
-      there the estimate says nothing.  That is a condition for trusting the
-      estimate, not the count the features need, which can be far smaller.
+      ``±2 Ω``.  It is an estimate, not a bound: the largest error was 0.91
+      to 1.64 times it in the sweeps, both extremes single atoms, and 0.83
+      times it at a point within those ranges that the sweeps did not draw.
+      A single feature's error, where above ``1e-9``, was 0.84 to 5.0 times
+      a third of its own difference.  At ``dt · (W + Nγ/2) <= 1`` the
+      largest error was within 10 % in only 90 % of the cases above the
+      floor, and up to 3.5 times the estimate.  Errors below about ``1e-10`` stop falling by 4
+      per halving, as rounding takes over, and there the estimate says
+      nothing (the error was 0.57 to 11.7 times it in the sweeps).  The
+      sweep is ``TestTheSeededSweep`` in ``tests/test_rydberg_lindblad.py``,
+      an opt-in run (``HQNN_FORGE_REPRODUCE=1``, about 5 minutes); the
+      points behind 1.64 and 0.83 are ``TestTheRecordedPoints`` there, in
+      the default suite (#627).  ``dt · (W + Nγ/2) <= 1/2`` is a condition
+      for trusting the estimate, not the count the features need, which can
+      be far smaller.
       **Before it holds, two runs can agree while both are wrong**: one
       resonant atom at ``ΩT = 16π``, ``γ = 0.1 Ω`` ends with ``⟨n⟩ = 0`` to
       rounding at 1, 2, 4, 8 and 16 steps, where the answer is 0.358.  Each
