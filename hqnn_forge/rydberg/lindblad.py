@@ -792,15 +792,23 @@ def _tolerance(value: Any) -> float:
     return number
 
 
-def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float) -> int:
+#: The values of ``target`` that :func:`step_count` accepts.
+_TARGETS = ("features", "state")
+
+
+def step_count(
+    hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float, target: str = "features"
+) -> int:
     """
-    A step count for :func:`evolve` whose estimated feature error is at most ``tol``.
+    A step count for :func:`evolve` whose estimated feature or state error is at most ``tol``.
 
     One integer for the whole batch: the smallest count tried at which the
     estimated error of the features ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (those of
-    :func:`readout` with ``pairs=True``) is at most ``tol`` for every sample.
-    The counts tried start at the resolution condition of :func:`evolve`
-    ("Choosing ``n_steps``"), not at 1.  ``evolve`` itself is unchanged: the
+    :func:`readout` with ``pairs=True``; ``target="features"``, the default)
+    or the trace distance of the state ρ from the exact one
+    (``target="state"``, see *The state*) is at most ``tol`` for every
+    sample.  The counts tried start at the resolution condition of
+    :func:`evolve` ("Choosing ``n_steps``"), not at 1.  ``evolve`` itself is unchanged: the
     caller passes the result to it, or to
     :class:`~hqnn_forge.rydberg.RydbergFeatureMap`, as ``n_steps``.
 
@@ -841,6 +849,46 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
     ``2n₀``, although where ``W`` is large (``V`` in the blockade) the
     features can need far fewer steps: no estimate is backed there (#598).
 
+    **The state** (``target="state"``, #759).  The error of ρ is measured by
+    the trace distance, a probability (no unit)::
+
+        D(ρ, σ) = ½ ‖ρ − σ‖₁ = ½ Σ_k |λ_k|,        λ_k the eigenvalues of ρ − σ
+
+    The expansion above is one of the map ``S(dt)^n``, so it holds for the
+    matrix itself, ``ρ_n = ρ + A / n² + O(n⁻⁴)`` with ``A`` independent of
+    ``n``, and ``ρ_n − ρ_2n = 3 (ρ_2n − ρ)`` as matrices to that order.  A
+    norm scales with its argument, so ``D(ρ_2n, ρ) ≈ D(ρ_n, ρ_2n) / 3``: the
+    estimate at ``2n`` steps is the largest ``D(ρ_n, ρ_2n) / 3`` over the
+    samples, from one ``eigvalsh`` of the Hermitian ``ρ_n − ρ_2n`` each.
+    What it bounds follows from ``Δ = ρ_2n − ρ`` being Hermitian with
+    ``Tr Δ = 0`` (every step keeps the trace, as the exact evolution
+    does): its eigenvalues sum to 0, so
+    the positive ones sum to ``D`` and the negative ones to ``−D``, and for
+    any ``M`` with ``0 ≤ M ≤ 1`` (a projector, or a state)
+    ``Tr[M Δ] = Σ_k λ_k ⟨v_k|M|v_k⟩``, with weights in ``[0, 1]``, lies in
+    ``[−D, D]``.  Hence, at an error ``D`` of every sample:
+
+    * every measurement probability is off by at most ``D``, the features
+      ``⟨n_i⟩ = Tr[n_i ρ]`` and ``⟨n_i n_j⟩`` among them (``n_i`` and
+      ``n_i n_j`` are projectors).  The same holds for the two runs, so the
+      state's estimate is never below the features' and its count never
+      smaller, up to rounding;
+    * every entry, ``|Δ_ab| ≤ max_k |λ_k| ≤ D``;
+    * the state kernel ``K(x, x′) = Tr[ρ(x) ρ(x′)]`` of
+      ``docs/rydberg-model.md`` (*Separation measures*):
+      ``K_2n − K = Tr[Δ ρ′_2n] + Tr[ρ Δ′]``, and ``ρ′_2n`` and ``ρ`` are
+      states (every step is a physical map, module docstring), so
+      ``|K_2n − K| ≤ D(x) + D(x′)``;
+    * the page's Hilbert–Schmidt distance: ``‖Δ‖₂² = Σ_k λ_k²`` is at most
+      ``D²`` from the positive and ``D²`` from the negative eigenvalues, so
+      ``‖Δ‖₂ ≤ √2 D`` and ``‖ρ − ρ′‖₂`` moves by at most ``√2 (D + D′)``.
+
+    The Hilbert–Schmidt norm itself would bound the kernel as well, but not
+    the features: ``|Tr[(n_i − ½) Δ]| ≤ ‖n_i − ½‖₂ ‖Δ‖₂`` with
+    ``‖n_i − ½‖₂ = ½ √(2^N)``, 16 at :data:`~hqnn_forge.rydberg.MAX_ATOMS`,
+    and the largest entry bounds neither.  The counts for the state are the
+    larger, since ``D`` is at least every feature's error.
+
     Parameters
     ----------
     hamiltonian:
@@ -854,10 +902,17 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
         ``gamma = 0`` ``evolve`` is exact and does not use ``n_steps``, so
         1 is returned without evolving anything.
     tol:
-        The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over the
-        batch, a finite number ``>= 1e-9``, without a default (as
-        ``n_steps`` has none).  Below an error of about ``1e-10`` rounding
-        takes over and two runs say nothing about it.
+        The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩``, or of
+        the trace distance of ρ, over the batch, a finite number ``>= 1e-9``,
+        without a default (as ``n_steps`` has none).  Below an error of
+        about ``1e-10`` rounding takes over and two runs say nothing about
+        it.
+    target:
+        ``"features"`` (the default) for ``⟨n_i⟩`` and ``⟨n_i n_j⟩``, what
+        :class:`~hqnn_forge.rydberg.RydbergFeatureMap` returns; ``"state"``
+        for ρ in the trace distance, what
+        :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.states` returns (see
+        *The state*).
 
     Returns
     -------
@@ -871,7 +926,8 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
     ValueError
         If ``hamiltonian`` is refused by :func:`evolve` or holds no sample;
         if ``t`` or ``gamma`` is not a finite number ``>= 0``; if ``tol`` is
-        not a finite number ``>= 1e-9``.
+        not a finite number ``>= 1e-9``; if ``target`` is neither
+        ``"features"`` nor ``"state"``.
     RuntimeError
         If an estimate above ``tol`` is more than half of the one before:
         in the second-order regime it is a quarter (3.91 to 4.12 times
@@ -914,18 +970,30 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
       for the exact features at the same count, so their bias is the
       features' error, bounded by ``tol`` as above; their spread is that of
       the shots.
-    * **The state.**  ``tol`` is a target for the features, not for ρ or
+    * **The state.**  With ``target="features"`` ``tol`` is a target for
+      the features, not for ρ or
       :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.states`: at ``2n₀``
       steps, in the cases of the sweep of #598 whose ``n₀`` is at most 3000,
       the largest entry of ρ was off by 0.13 to 20 times the features'
-      largest error (#506, #759).
+      largest error (#506, #759).  For the states pass ``target="state"``:
+      over the 216 cases every count met ``tol = 1e-6`` in the trace
+      distance (largest error ``0.981 tol``), the error was 0.986 to 1.084
+      times the estimate wherever it was above ``1e-10`` (0.985 to 1.084 at
+      ``2n₀`` in the 161 cases with ``n₀ <= 3000`` and an error above
+      ``1e-9``), and the count was that of the features
+      in 126 cases, twice it in 78 and four times it in 12.
+      :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` has no state
+      target yet (#774).
     * **Cost.**  One ``eigvalsh`` per sample for ``W``, then ``k + 1`` runs
       of :func:`evolve` on the batch, at ``n₀, 2n₀, …, 2^k n₀`` steps:
       ``2 · result − n₀`` steps in all, less than twice the cost of one run
       at the result, plus one eigendecomposition per sample and run.  The
       memory is that of one ``evolve`` on the batch.  The counts can be
       large: one atom at ``γ = 100 Ω``, ``ΩT = 16π`` needs 328 192 steps for
-      ``tol = 1e-6``.
+      ``tol = 1e-6``.  ``target="state"`` adds one ``eigvalsh`` of a
+      ``2^N × 2^N`` matrix per sample and run, beside the ``eigh`` that
+      ``evolve`` makes for it, and holds the states of two runs in place of
+      one run and two matrices of features.
 
     Examples
     --------
@@ -957,6 +1025,10 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
     t = _non_negative_number(t, "t")
     gamma = _non_negative_number(gamma, "gamma")
     tol = _tolerance(tol)
+    if target not in _TARGETS:
+        raise ValueError(
+            f"target must be one of {', '.join(map(repr, _TARGETS))}; got {target!r}."
+        )
     if hamiltonian.ndim == 3 and hamiltonian.shape[0] == 0:
         raise ValueError(
             "hamiltonian must hold at least one sample: the count is fixed by all inputs "
@@ -968,6 +1040,13 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
     with torch.no_grad():
         # W = E_max − E_min per sample; the batch's largest rate sets n₀
         start = _starting_count(_spread(h), t, n_atoms, gamma)
+        if target == "state":
+            return _doubling_count(
+                start,
+                lambda steps: evolve(h, t, gamma=gamma, n_steps=steps),
+                tol,
+                distance=_largest_trace_distance,
+            )
         return _doubling_count(
             start, lambda steps: readout(evolve(h, t, gamma=gamma, n_steps=steps), pairs=True), tol
         )
@@ -989,12 +1068,37 @@ def _starting_count(spread: float, t: float, n_atoms: int, gamma: float) -> int:
     return max(1, math.ceil(2 * t * (spread + n_atoms * gamma / 2)))
 
 
-def _doubling_count(start: int, features: Callable[[int], torch.Tensor], tol: float) -> int:
+def _largest_difference(coarse: torch.Tensor, fine: torch.Tensor) -> float:
+    """``max |F_n − F_2n|`` over every entry and sample: the distance of the features."""
+    return float((coarse - fine).abs().max().item())
+
+
+def _largest_trace_distance(coarse: torch.Tensor, fine: torch.Tensor) -> float:
+    """
+    ``D = ½ Σ_k |λ_k(ρ_n − ρ_2n)|``, the largest over a batch of states; ``eigvalsh``.
+
+    The difference is made exactly Hermitian first (it is to rounding), since
+    ``eigvalsh`` reads one triangle only.
+    """
+    difference = coarse - fine
+    difference = (difference + difference.mH) / 2
+    return float(0.5 * torch.linalg.eigvalsh(difference).abs().sum(dim=-1).max().item())
+
+
+def _doubling_count(
+    start: int,
+    features: Callable[[int], torch.Tensor],
+    tol: float,
+    *,
+    distance: Callable[[torch.Tensor, torch.Tensor], float] = _largest_difference,
+) -> int:
     """
     The doubling of :func:`step_count` from ``start`` steps, for any linear solver.
 
     ``features(n)`` returns the features at ``n`` steps (one row per sample;
-    the maximum is taken over every entry).  Tries ``2·start, 4·start, …``
+    the maximum is taken over every entry), or the states, which
+    ``distance=_largest_trace_distance`` compares in place of that maximum
+    (``target="state"``).  Tries ``2·start, 4·start, …``
     and returns the first count at which a third of the largest
     ``|F_(n/2) − F_n|`` is at most ``tol``; ``RuntimeError`` when an estimate
     above ``tol`` is more than half of the one before (``step_count``,
@@ -1008,8 +1112,9 @@ def _doubling_count(start: int, features: Callable[[int], torch.Tensor], tol: fl
     previous = math.inf
     while True:
         fine = features(2 * steps)
-        # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features
-        estimate = (coarse - fine).abs().max().item() / 3
+        # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features;
+        # D(ρ_2n, ρ) ≈ D(ρ_n, ρ_2n) / 3 for the states
+        estimate = distance(coarse, fine) / 3
         if estimate <= tol:
             return 2 * steps
         if estimate > previous / _SMALLEST_FALL:

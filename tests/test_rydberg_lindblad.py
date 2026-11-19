@@ -9,9 +9,11 @@ the figures that the "Choosing ``n_steps``" note of ``evolve`` quotes, from
 the points they come from and, opt-in, from the seeded sweep behind them
 (#627); ``step_count`` (#598) by the feature error of the count it returns,
 over a subset of #598's sweep, with its counts there pinned to the integer
-(#759), and ``RydbergFeatureMap.step_count`` (#760) by that of a ramped drive
-and of a jittered register, against the chained exponential of the
-Liouvillian per segment.
+(#759), and with ``target="state"`` by the trace distance of ρ over that
+subset (the whole sweep opt-in, ``HQNN_FORGE_REPRODUCE=1``), and
+``RydbergFeatureMap.step_count`` (#760) by that of a ramped drive and of a
+jittered register, against the chained exponential of the Liouvillian per
+segment.
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -42,6 +44,7 @@ import numpy as np
 import pytest
 import torch
 
+from hqnn_forge.kernels import kernel_from_density_matrices
 from hqnn_forge.rydberg import (
     DEFAULT_C6,
     MAX_ATOMS,
@@ -1489,6 +1492,8 @@ class TestStepCountKeepsItsResults:
         expected = FEATURE_COUNTS[index]
         assert step_count(h, t, gamma=gamma, tol=1e-4) == expected[0]
         assert step_count(h, t, gamma=gamma, tol=1e-6) == expected[1]
+        # the default target is the features
+        assert step_count(h, t, gamma=gamma, tol=1e-6, target="features") == expected[1]
 
     @pytest.mark.parametrize("index", sorted(FEATURE_COUNTS_AT_THE_SMALLEST_TOL))
     def test_the_feature_counts_at_the_smallest_tol_are_unchanged(self, index: int) -> None:
@@ -1497,8 +1502,227 @@ class TestStepCountKeepsItsResults:
         assert step_count(h, t, gamma=gamma, tol=1e-9) == expected
 
 
+def states_of(h: torch.Tensor, t: float, gamma: float, n_steps: int) -> torch.Tensor:
+    """ρ from ``evolve`` at ``n_steps``, one matrix per sample."""
+    batch = h if h.ndim == 3 else h[None]
+    return checked_evolve(batch, t, gamma=gamma, n_steps=n_steps)
+
+
+def exact_states(h: torch.Tensor, t: float, gamma: float) -> torch.Tensor:
+    """ρ from :func:`liouvillian_reference`, sample by sample."""
+    batch = h if h.ndim == 3 else h[None]
+    return torch.stack([liouvillian_reference(s, t, gamma) for s in batch])
+
+
+def trace_distance(rho: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    """
+    ``½ ‖ρ − σ‖₁`` per sample, from the singular values (``ord="nuc"``), not
+    from the eigenvalues ``step_count`` uses.
+    """
+    return 0.5 * torch.linalg.matrix_norm(rho - sigma, ord="nuc")
+
+
+def two_run_state_estimate(h: torch.Tensor, t: float, gamma: float, n_steps: int) -> float:
+    """A third of the largest ``D(ρ_(n/2), ρ_n)`` over the samples."""
+    coarse = states_of(h, t, gamma, n_steps // 2)
+    return trace_distance(coarse, states_of(h, t, gamma, n_steps)).max().item() / 3
+
+
+def whole_sweep() -> list[SweepCase]:
+    """
+    The 216 cases of #598, in the units of :data:`SWEEP`: 1, 2 and 4 atoms;
+    ``V/Ω`` 0, 1, 10, 100 (one atom has no pair, so 0 only); ``γ/Ω`` 0.1, 1,
+    10, 100; ``ΩT`` π, 4π, 16π; detunings all 0, or uniform in ``[0, √3]``
+    from one generator seeded 759, drawn in this order.
+    """
+    generator = torch.Generator().manual_seed(759)
+    cases: list[SweepCase] = []
+    for n_atoms in (1, 2, 4):
+        for v in (0.0,) if n_atoms == 1 else (0.0, 1.0, 10.0, 100.0):
+            for g in (0.1, 1.0, 10.0, 100.0):
+                for omega_t in (math.pi, 4 * math.pi, 16 * math.pi):
+                    cases.append((n_atoms, v, g, omega_t, [0.0] * n_atoms))
+                    drawn = math.sqrt(3) * torch.rand(n_atoms, generator=generator, dtype=F64)
+                    cases.append((n_atoms, v, g, omega_t, drawn.tolist()))
+    return cases
+
+
+class TestStepCountForTheState:
+    """
+    ``step_count(..., target="state")`` (#759) against the exponential of the
+    full Liouvillian: the count it returns gives states within ``tol`` in the
+    trace distance, and the inequalities its docstring derives hold.
+    """
+
+    OMEGA = TestStepCount.OMEGA
+
+    @pytest.mark.parametrize("index", range(len(SWEEP)))
+    def test_the_count_meets_tol_over_the_sweep(self, index: int) -> None:
+        """
+        Over :data:`SWEEP`, at ``tol = 1e-6``; the count is never below the
+        features' at the same ``tol`` (:data:`FEATURE_COUNTS`), since ``D``
+        bounds every feature's error.
+        """
+        tol = 1e-6
+        h, t, gamma = TestStepCount().case(SWEEP[index])
+        n = step_count(h, t, gamma=gamma, tol=tol, target="state")
+        error = trace_distance(states_of(h, t, gamma, n), exact_states(h, t, gamma))
+        assert error.max().item() <= tol
+        assert n >= FEATURE_COUNTS[index][1]
+
+    @pytest.mark.reproducibility
+    @pytest.mark.slow
+    @pytest.mark.may_skip  # opt-in: skips in CI even under HQNN_FORGE_FAIL_ON_SKIP=1
+    def test_the_count_meets_tol_over_the_whole_sweep_of_598(self) -> None:
+        """
+        All 216 cases of :func:`whole_sweep` at ``tol = 1e-6``: 17 minutes
+        on a laptop, so opt-in (``HQNN_FORGE_REPRODUCE=1``).  At the count
+        returned the error is at most ``tol`` and, where the estimate is above
+        the rounding floor, 0.9 to 1.2 times it (measured: 0.986 to 1.084).
+        """
+        if os.environ.get("HQNN_FORGE_REPRODUCE") != "1":
+            pytest.skip("opt-in: set HQNN_FORGE_REPRODUCE=1 (the 216 cases of #598's sweep)")
+        tol = 1e-6
+        failures = []
+        for case in whole_sweep():
+            h, t, gamma = TestStepCount().case(case)
+            n = step_count(h, t, gamma=gamma, tol=tol, target="state")
+            error = trace_distance(states_of(h, t, gamma, n), exact_states(h, t, gamma))
+            estimate = two_run_state_estimate(h, t, gamma, n)
+            ratio = error.max().item() / estimate if estimate > 1e-10 else 1.0
+            if error.max().item() > tol or not 0.9 <= ratio <= 1.2:
+                failures.append((case, n, error.max().item(), estimate))
+        assert failures == []
+
+    @pytest.mark.parametrize(
+        ("delta_over_omega", "gamma_over_omega", "omega_t"),
+        [(0.0, 1.0, math.pi), (0.77, 10.0, math.pi), (1.23, 0.1, 4 * math.pi)],
+    )
+    def test_it_is_the_smallest_count_tried_from_the_resolution_condition(
+        self, delta_over_omega: float, gamma_over_omega: float, omega_t: float
+    ) -> None:
+        """
+        As for the features: one atom, ``W = √(Ω² + Δ²)``, the counts tried
+        are ``2n₀, 4n₀, …``, and the one returned is the first whose estimate,
+        recomputed here from the singular values, meets ``tol``.
+        """
+        omega = self.OMEGA
+        delta = delta_over_omega * omega
+        gamma = gamma_over_omega * omega
+        t = omega_t / omega
+        h = single_atom(omega, delta)
+        start = math.ceil(2 * t * (math.sqrt(omega**2 + delta**2) + gamma / 2))
+        assert step_count(h, t, gamma=gamma, tol=1.0, target="state") == 2 * start
+        tol = 1e-7
+        n = step_count(h, t, gamma=gamma, tol=tol, target="state")
+        doublings = math.log2(n / start)
+        assert doublings == int(doublings) >= 1
+        assert two_run_state_estimate(h, t, gamma, n) <= tol
+        if n > 2 * start:
+            assert two_run_state_estimate(h, t, gamma, n // 2) > tol
+
+    def test_one_count_for_a_batch_meets_tol_for_every_sample(self) -> None:
+        """
+        Two atoms at ``V = γ = Ω``, ``ΩT = 4π``: five resonant samples and one
+        detuned (``Δ = 8 Ω, 9 Ω``) whose error is 17 times theirs.  The count
+        is set by the largest error, not a typical one, so every sample meets
+        ``tol``, and the order of the samples does not matter.
+        """
+        tol = 1e-6
+        delta = torch.tensor([[0.0, 0.0]] * 5 + [[8.0, 9.0]], dtype=F64) * self.OMEGA
+        h = rydberg_hamiltonian(AtomRegister.chain(2, 1.0), self.OMEGA, delta, c6=self.OMEGA)
+        t = 4 * math.pi / self.OMEGA
+        gamma = self.OMEGA
+        n = step_count(h, t, gamma=gamma, tol=tol, target="state")
+        errors = trace_distance(states_of(h, t, gamma, n), exact_states(h, t, gamma))
+        assert errors.shape == (6,)
+        assert bool((errors <= tol).all())
+        assert errors[-1].item() > 10 * errors[0].item()
+        assert step_count(h.flip(0), t, gamma=gamma, tol=tol, target="state") == n
+
+    def test_the_trace_distance_bounds_the_features_the_entries_and_the_kernel(self) -> None:
+        """
+        The inequalities of *The state*: for ``Δ = ρ_n − ρ`` of each of four
+        samples (four atoms, ``V = γ = 10 Ω``, ``ΩT = 4π``, the
+        counter-example of #598), every feature error and every entry is at
+        most ``D``, the Hilbert–Schmidt norm at most ``√2 D``, and the state
+        kernel ``Tr[ρ ρ′]`` of every pair is off by at most ``D + D′``.  They
+        need only that every ``ρ_n`` is a state, which it is at any count, so
+        they are checked at 16 steps, far below the resolution condition
+        (``n₀ = 1269``), where the errors are large.
+        """
+        generator = torch.Generator().manual_seed(759)
+        delta = math.sqrt(3) * self.OMEGA * torch.rand(4, 4, generator=generator, dtype=F64)
+        h = rydberg_hamiltonian(AtomRegister.chain(4, 1.0), self.OMEGA, delta, c6=10 * self.OMEGA)
+        t = 4 * math.pi / self.OMEGA
+        gamma = 10 * self.OMEGA
+        rho = states_of(h, t, gamma, 16)
+        exact = exact_states(h, t, gamma)
+        d = trace_distance(rho, exact)
+        assert bool((d > 1e-2).all())  # far above rounding
+        feature_error = (readout(rho, pairs=True) - readout(exact, pairs=True)).abs().amax(-1)
+        assert bool((feature_error <= d).all())
+        assert bool(((rho - exact).abs().amax(dim=(-2, -1)) <= d).all())
+        assert bool((torch.linalg.matrix_norm(rho - exact) <= math.sqrt(2) * d).all())
+        kernel_error = (
+            kernel_from_density_matrices(rho) - kernel_from_density_matrices(exact)
+        ).abs()
+        assert bool((kernel_error <= d[:, None] + d[None, :]).all())
+
+    def test_the_hilbert_schmidt_norm_does_not_bound_the_features(self) -> None:
+        """
+        Why the target is not ``‖Δ‖₂``: four uncoupled atoms at ``γ = Ω``,
+        ``ΩT = 16π`` with drawn detunings (case 131 of :func:`whole_sweep`),
+        at ``2n₀ = 1484`` steps, the largest feature error (``4.0e-8``) is
+        above the Hilbert–Schmidt norm of ``Δ = ρ_n − ρ`` (``2.5e-8``), so a
+        count for ``‖Δ‖₂ <= tol`` can leave the features above ``tol``.  The
+        trace distance is above both.
+        """
+        case = whole_sweep()[131]
+        assert case[:4] == (4, 0.0, 1.0, 16 * math.pi)
+        h, t, gamma = TestStepCount().case(case)
+        n = 2 * math.ceil(2 * t * (lindblad._spread(h) + 4 * gamma / 2))
+        assert n == 1484
+        rho = states_of(h, t, gamma, n)
+        exact = exact_states(h, t, gamma)
+        feature_error = (readout(rho, pairs=True) - readout(exact, pairs=True)).abs().max()
+        hilbert_schmidt = torch.linalg.matrix_norm(rho - exact).max()
+        assert feature_error.item() > hilbert_schmidt.item() > 1e-9
+        assert trace_distance(rho, exact).max().item() >= feature_error.item()
+
+    def test_the_trace_distance_of_two_pure_states(self) -> None:
+        """
+        ``D(ψψ†, φφ†) = √(1 − |⟨ψ|φ⟩|²)`` for pure states, typed in; the
+        largest over a batch comes back.
+        """
+        psi = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=C128)
+        angles = torch.tensor([0.3, 1.1], dtype=F64)
+        phi = torch.stack([torch.cos(angles), 1j * torch.sin(angles)], dim=-1).to(C128)
+        rho = psi[:, :, None] * psi[:, None, :].conj()
+        sigma = phi[:, :, None] * phi[:, None, :].conj()
+        # |⟨ψ|φ⟩| = cos(angle), so D = sin(angle); the larger is sin(1.1)
+        assert lindblad._largest_trace_distance(rho, sigma) == pytest.approx(
+            math.sin(1.1), abs=1e-14
+        )
+        assert lindblad._largest_trace_distance(rho[:1], sigma[:1]) == pytest.approx(
+            math.sin(0.3), abs=1e-14
+        )
+
+    def test_without_dephasing_one_step_is_exact(self) -> None:
+        """``γ = 0``: 1 comes back for the state too, and ρ is exact at it."""
+        h, t, _ = TestStepCount().case((4, 10.0, 1.0, 4 * math.pi, [0.3, 1.5, 0.9, 1.7]))
+        assert step_count(h, t, gamma=0.0, tol=1e-9, target="state") == 1
+        error = trace_distance(states_of(h, t, 0.0, 1), exact_states(h, t, 0.0))
+        assert error.max().item() < 1e-12
+
+
 class TestStepCountValidation:
     H = rydberg_hamiltonian(AtomRegister.chain(2, 1.0), 2.0, [0.1, 0.2], c6=1.0)
+
+    @pytest.mark.parametrize("target", ["State", "trace", "", None, 1])
+    def test_rejects_an_unknown_target(self, target: object) -> None:
+        with pytest.raises(ValueError, match="target must be one of 'features', 'state'"):
+            step_count(self.H, 1.0, gamma=0.5, tol=1e-6, target=target)  # type: ignore[arg-type]
 
     def test_tol_is_required_and_keyword_only(self) -> None:
         with pytest.raises(TypeError, match="tol"):
