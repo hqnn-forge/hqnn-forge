@@ -725,6 +725,41 @@ class TestClassifiers:
         rebuilt.eval()
         torch.testing.assert_close(rebuilt(x), model(x))
 
+    @pytest.mark.parametrize("use_classical_encoder", [True, False])
+    def test_the_step_count_recipe_takes_the_layer_inputs(
+        self, use_classical_encoder: bool
+    ) -> None:
+        """
+        ``AnalogRydbergLayer.step_count`` names a model's layer inputs as
+        ``model.classical_encoder(X) * π``, or ``X`` without the encoder
+        (#769): what ``quantum_layer`` receives in ``forward``.  Its count
+        then builds the model again from the config and the state dict.
+        """
+        torch.manual_seed(0)
+        model = HybridBinaryClassifier(
+            n_input_features=2,
+            n_qubits=2,
+            n_layers=2,
+            encoding_type="analog",
+            gamma=1.5,
+            n_steps=3,
+            use_classical_encoder=use_classical_encoder,
+        ).eval()
+        layer = model.quantum_layer
+        assert isinstance(layer, AnalogRydbergLayer)
+        x = torch.rand(3, 2) * 2 - 1
+        seen: list[torch.Tensor] = []
+        layer.register_forward_pre_hook(lambda _, args: seen.append(args[0]))
+        model(x)
+        with torch.no_grad():
+            inputs = model.classical_encoder(x) * math.pi if use_classical_encoder else x
+        torch.testing.assert_close(inputs, seen[0], rtol=0, atol=0)
+        n = layer.step_count(inputs, tol=1e-6)
+        config = {**model.get_config(), "n_steps": n}
+        rebuilt = HybridBinaryClassifier(**config)
+        rebuilt.load_state_dict(model.state_dict())
+        assert rebuilt.quantum_layer.n_steps == n > 3
+
     @pytest.mark.parametrize("encoding_type", ["angle", "iqp", "amplitude", "reuploading"])
     def test_gamma_applies_to_the_analog_encoding_only(self, encoding_type: str) -> None:
         with pytest.raises(ValueError, match="gamma and n_steps apply to encoding_type='analog'"):
