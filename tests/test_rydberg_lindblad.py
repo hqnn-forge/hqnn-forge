@@ -1708,6 +1708,45 @@ class TestStepCountForTheState:
             math.sin(0.3), abs=1e-14
         )
 
+    def test_the_trace_distance_of_two_mixed_states(self) -> None:
+        """
+        Four-atom mixed states, typed in: ``σ = 1/16`` and ``ρ = σ + Δ`` with
+        ``Δ = U diag(ε/8 ×8, −ε/8 ×8) U†`` for a seeded random unitary ``U``,
+        so ``D = ½ · 16 · ε/8 = ε``, while ``‖Δ‖₂ = 4 · ε/8 = ε/2``, ``‖Δ‖₁``
+        is ``2ε`` and no entry is above ``ε/8``: Hilbert–Schmidt, the norm
+        without the ``½`` and the largest entry each miss ``D`` by a factor of
+        at least 2 here, on full, non-diagonal matrices.  Two samples, the
+        larger second, so the maximum over the batch is ``ε = 0.1``, not the
+        mean or the first sample.
+        """
+        generator = torch.Generator().manual_seed(759)
+        gaussian = torch.randn(2, 16, 16, generator=generator, dtype=F64) + 1j * torch.randn(
+            2, 16, 16, generator=generator, dtype=F64
+        )
+        unitary, _ = torch.linalg.qr(gaussian.to(C128))
+        epsilon = torch.tensor([0.025, 0.1], dtype=F64)
+        signs = torch.tensor([1.0] * 8 + [-1.0] * 8, dtype=F64)
+        spectrum = (epsilon[:, None] / 8 * signs).to(C128)
+        delta = unitary @ torch.diag_embed(spectrum) @ unitary.mH
+        sigma = torch.eye(16, dtype=C128).expand(2, 16, 16) / 16
+        rho = sigma + delta
+        # both are states: eigenvalues 1/16 ± ε/8 with ε ≤ 0.1, trace 1
+        assert torch.linalg.eigvalsh(rho).min().item() > 0.04
+        assert torch.allclose(
+            rho.diagonal(dim1=-2, dim2=-1).sum(-1).real, torch.ones(2, dtype=F64)
+        )
+        assert lindblad._largest_trace_distance(rho, sigma) == pytest.approx(0.1, abs=1e-14)
+        assert lindblad._largest_trace_distance(sigma, rho) == pytest.approx(0.1, abs=1e-14)
+        assert lindblad._largest_trace_distance(rho[:1], sigma[:1]) == pytest.approx(
+            0.025, abs=1e-14
+        )
+        # what the other norms give for the larger sample, all at least 2 away from D
+        assert torch.linalg.matrix_norm(delta[1]).item() == pytest.approx(0.05, abs=1e-14)
+        assert torch.linalg.matrix_norm(delta[1], ord="nuc").item() == pytest.approx(
+            0.2, abs=1e-14
+        )
+        assert delta[1].abs().max().item() <= 0.1 / 8 + 1e-15
+
     def test_without_dephasing_one_step_is_exact(self) -> None:
         """``γ = 0``: 1 comes back for the state too, and ρ is exact at it."""
         h, t, _ = TestStepCount().case((4, 10.0, 1.0, 4 * math.pi, [0.3, 1.5, 0.9, 1.7]))
