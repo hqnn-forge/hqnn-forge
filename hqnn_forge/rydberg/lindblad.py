@@ -957,7 +957,9 @@ def _doubling_count(start: int, features: Callable[[int], torch.Tensor], tol: fl
     ``|F_(n/2) − F_n|`` is at most ``tol``; ``RuntimeError`` when an estimate
     above ``tol`` is more than half of the one before (``step_count``,
     Raises).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
-    its whole chain of segments and registers as ``features``.
+    its whole chain of segments and registers as ``features``, and
+    :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count` the layer's
+    chain of pulse segments (#769).
     """
     steps = start
     coarse = features(steps)
