@@ -1412,8 +1412,9 @@ class TestFeatureMapStepCount:
         The estimate at the returned count, from two runs of the whole map at
         ``n/2`` and ``n`` steps, meets ``tol``, and that of the count before
         it does not.  With jitter it is the estimate of the mixture, the
-        features the map returns: in the second case each displaced register
-        alone, as a map of its own, would need twice the count.
+        features the map returns: in the second case bounding each displaced
+        register alone, as a map of its own, would need twice the count (two of
+        the three miss ``tol`` at it).
         """
         tol = 1e-6
         feature_map, x = self.build(case)
