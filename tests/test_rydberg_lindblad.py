@@ -8,9 +8,10 @@ maximally mixed state under strong dephasing, and the order of the splitting;
 the figures that the "Choosing ``n_steps``" note of ``evolve`` quotes, from
 the points they come from and, opt-in, from the seeded sweep behind them
 (#627); ``step_count`` (#598) by the feature error of the count it returns,
-over a subset of #598's sweep, and ``RydbergFeatureMap.step_count`` (#760) by
-that of a ramped drive and of a jittered register, against the chained
-exponential of the Liouvillian per segment.
+over a subset of #598's sweep, with its counts there pinned to the integer
+(#759), and ``RydbergFeatureMap.step_count`` (#760) by that of a ramped drive
+and of a jittered register, against the chained exponential of the
+Liouvillian per segment.
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -1432,6 +1433,68 @@ class TestStepCount:
         h = single_atom(self.OMEGA, 0.0)
         with pytest.raises(RuntimeError, match="stopped falling"):
             step_count(h, math.pi / self.OMEGA, gamma=self.OMEGA, tol=1e-9)
+
+
+#: ``step_count`` of the :data:`SWEEP` case at that index, at ``tol = 1e-4``
+#: and ``1e-6``, as ``main`` returned them at 3f8ca86, before a target for ρ
+#: (#759) was considered.  Every one is ``2^k n₀`` with ``k >= 1``.
+FEATURE_COUNTS: dict[int, tuple[int, int]] = {
+    0: (212, 424),
+    1: (84, 672),
+    2: (40, 320),
+    3: (320, 2560),
+    4: (1208, 1208),
+    5: (1284, 10272),
+    6: (200, 800),
+    7: (474, 948),
+    8: (666, 666),
+    9: (126, 126),
+    10: (1012, 8096),
+    11: (1280, 1280),
+    12: (1380, 2760),
+    13: (2524, 10096),
+    14: (1280, 2560),
+    15: (302, 2416),
+    16: (354, 708),
+    17: (1274, 10192),
+    18: (2602, 10408),
+    19: (396, 396),
+    20: (3830, 3830),
+    21: (16162, 16162),
+    22: (6304, 12608),
+}
+
+#: The same at ``tol = 1e-9``, for the cases that take less than half a
+#: second there (the others reach 403 456 steps).
+FEATURE_COUNTS_AT_THE_SMALLEST_TOL: dict[int, int] = {
+    0: 13568,
+    2: 10240,
+    8: 666,
+    9: 4032,
+    11: 20480,
+    19: 12672,
+    20: 7660,
+}
+
+
+class TestStepCountKeepsItsResults:
+    """
+    The counts ``step_count`` returns for the features, pinned to the integer,
+    so that a target for the state (#759) cannot change a call made today.
+    """
+
+    @pytest.mark.parametrize("index", sorted(FEATURE_COUNTS))
+    def test_the_feature_counts_of_the_sweep_are_unchanged(self, index: int) -> None:
+        h, t, gamma = TestStepCount().case(SWEEP[index])
+        expected = FEATURE_COUNTS[index]
+        assert step_count(h, t, gamma=gamma, tol=1e-4) == expected[0]
+        assert step_count(h, t, gamma=gamma, tol=1e-6) == expected[1]
+
+    @pytest.mark.parametrize("index", sorted(FEATURE_COUNTS_AT_THE_SMALLEST_TOL))
+    def test_the_feature_counts_at_the_smallest_tol_are_unchanged(self, index: int) -> None:
+        h, t, gamma = TestStepCount().case(SWEEP[index])
+        expected = FEATURE_COUNTS_AT_THE_SMALLEST_TOL[index]
+        assert step_count(h, t, gamma=gamma, tol=1e-9) == expected
 
 
 class TestStepCountValidation:
