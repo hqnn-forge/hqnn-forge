@@ -1346,7 +1346,7 @@ class TestFeatureMapStepCount:
         self, ramp: float, segments: int | None, longest: int
     ) -> None:
         """
-        One atom, ``Δ = 0.77 Ω``, ``γ = Ω``: segment ``k`` has
+        One atom, ``Δ = √3 σ(0.4) Ω ≈ 1.04 Ω``, ``γ = Ω``: segment ``k`` has
         ``W_k = √(Ω_k² + Δ²)``, so ``n₀ = max_k ceil(2 τ_k (W_k + γ/2))``,
         typed in; with a ``tol`` that every estimate meets, ``2 n₀`` comes
         back.  ``longest`` is the segment that sets it.
