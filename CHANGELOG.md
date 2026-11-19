@@ -894,6 +894,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything. The 13- and 15-fold Iranian Churn files read together, or two runs of a UCI dataset
   with different seeds, passed the fingerprint guard and were paired by fold index across
   different splits in one Holm family (#753, #756)
+- `examples/summarise_rydberg_benchmark.py` and the `summarise` of
+  `examples/benchmark_rydberg_features.py` refuse a row (arm, head, grid point) whose lines
+  differ in how their features were measured, `(measurement, shots,
+  feature_map["shot_stream"])`, with a `ValueError` naming the dataset, its label bonds, the row
+  and each value found, before printing anything. An exact run and a shots run, or a shots run
+  from before #762 (one shot stream for every fold) and one since (a stream per matrix), of the
+  same data and folds read together were pooled in one row: the runner took its mean and spread
+  over both kinds of line, and the summariser kept the later line of each fold (#763, #767)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

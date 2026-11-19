@@ -88,6 +88,25 @@ differ and, for the first, each test set by its size and digest
 (:func:`_check_one_split`); a line without the field counts as one more
 value, ``not recorded``.
 
+**One row, one measurement** (#763).  The lines of one row (arm, head, arm
+A's geometry and grid point) must also have measured their features alike:
+the same ``(measurement, shots, shot_stream)``, the last read from the
+line's ``feature_map`` (:func:`feature_measurement`).  A shots line since
+#762 draws every feature matrix from a stream of its own
+(``"shot_stream": "per-matrix"``), so the fold spread holds the shot noise
+of every fold; a shots line written before it has no ``shot_stream``, and
+all its folds carry one shot-noise realisation, whose shared part the
+spread leaves out; an exact line has none.  Two runs of the same data,
+seeds and folds that differ only in ``--shots`` or in the shot stream pass
+both guards above, and a row pooling their lines would report a spread,
+interval or paired test of neither kind.  The script refuses them too,
+before printing anything, with a ``ValueError`` naming the dataset, its
+label bonds, the first such row and each value found there with its number
+of lines (:func:`_check_one_measurement`); a field a line does not record
+counts as one more value, ``not recorded``.  The check is per row: within
+one shots run arm C and ``D-hybrid`` are exact while A, B and D are
+sampled, and such a run summarises as before.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
@@ -393,25 +412,113 @@ def geometry_label(record: Mapping[str, Any]) -> str:
     return geometry
 
 
-def _rows(records: Iterable[Mapping[str, Any]]) -> dict[Key, dict[int, Mapping[str, Any]]]:
+def _key(record: Mapping[str, Any]) -> Key:
     """
-    ``{(arm, head, geometry, V/Ω, γ/Ω): {fold: record}}``.
+    The row of a line: ``(arm, head, geometry, V/Ω, γ/Ω)``.
 
     Arm B is keyed by γ/Ω alone, and only arm A by its geometry
     (:func:`geometry_label`); the other arms have ``None`` there.
     """
+    v = None if record["arm"] == "B" else record["v_over_omega"]
+    geometry = geometry_label(record) if record["arm"] == "A" else None
+    return (record["arm"], record["head"], geometry, v, record["gamma_over_omega"])
+
+
+def _rows(records: Iterable[Mapping[str, Any]]) -> dict[Key, dict[int, Mapping[str, Any]]]:
+    """``{(arm, head, geometry, V/Ω, γ/Ω): {fold: record}}``, keyed by :func:`_key`."""
     rows: dict[Key, dict[int, Mapping[str, Any]]] = {}
     for r in records:
-        v = None if r["arm"] == "B" else r["v_over_omega"]
-        geometry = geometry_label(r) if r["arm"] == "A" else None
-        key = (r["arm"], r["head"], geometry, v, r["gamma_over_omega"])
-        folds = rows.setdefault(key, {})
+        folds = rows.setdefault(_key(r), {})
         # Arm B has one line per geometry and V/Ω, all with the same scores (reused); keep the
         # computed one.
         if r["fold"] in folds and r.get("reused_from_v_over_omega") is not None:
             continue
         folds[r["fold"]] = r
     return rows
+
+
+Measurement = tuple[Any, Any, Any]  # measurement, shots, shot_stream
+
+
+def feature_measurement(record: Mapping[str, Any]) -> Measurement:
+    """
+    How a line's features were measured: ``(measurement, shots, shot_stream)``.
+
+    ``measurement`` is ``"exact"`` or ``"shots"`` and ``shots`` the number of
+    sampled bitstrings per sample (``null`` on an exact line), as the runner
+    records them.  ``shot_stream`` is that of the line's ``feature_map``,
+    the config of its matrices: ``"per-matrix"`` on a shots line since #762,
+    whose every matrix is drawn from a stream of its own, and absent on a
+    shots line written before it, all of whose matrices started at the one
+    ``shot_seed`` stream, and on an exact line.  ``None`` stands for a field
+    the line does not record (missing or ``null``; arm C and ``D-hybrid``
+    record ``feature_map`` as ``null``).
+    """
+    config = record.get("feature_map") or {}
+    return record.get("measurement"), record.get("shots"), config.get("shot_stream")
+
+
+def _measurement_text(value: Measurement) -> str:
+    """
+    A :func:`feature_measurement` as ``measurement shots, shots 16, shot_stream per-matrix``.
+
+    ``not recorded`` for a field that is ``None``.
+    """
+    names = ("measurement", "shots", "shot_stream")
+    return ", ".join(
+        f"{name} {'not recorded' if field is None else field}"
+        for name, field in zip(names, value, strict=True)
+    )
+
+
+def _check_one_measurement(
+    dataset: str, records: Sequence[Mapping[str, Any]], bonds: Bonds | None = None
+) -> None:
+    """
+    Refuse ``records`` of ``dataset`` unless the lines of each row were measured alike.
+
+    ``records`` are one group of :func:`groups`, ``bonds`` its
+    ``label_bonds``.  A row (:func:`_key`: arm, head, arm A's geometry and
+    the grid point) is scored by the mean, spread and t-interval over its
+    lines, and :func:`comparisons` pairs it with another by fold, so its
+    lines must mean the same across folds.  Lines of the same data, label
+    and folds that differ only in how their features were measured pass
+    :func:`_check_one_fingerprint` and :func:`_check_one_split`, and
+    :func:`_rows` would keep the later line of each fold.  With a stream per
+    matrix (#762) the fold spread holds the shot noise of every fold; with
+    the one stream of a shots run from before #762 every fold carries the
+    same realisation and its shared part is missing from the spread; exact
+    lines have none.  A row of lines of more than one kind reports a
+    spread, interval or test of neither.
+
+    Every line of a row must have the same :func:`feature_measurement`;
+    otherwise the ``ValueError`` names the first such row in the order of
+    the scores table (:func:`_label`, with arm A's geometry), each value
+    found there (:func:`_measurement_text`) with its number of lines, and
+    how many of the group's rows have more than one.  The check is per row,
+    not per group: in one shots run arm C and ``D-hybrid`` are exact while
+    A, B and D are sampled.  As in :func:`_check_one_fingerprint`, a field
+    a line does not record counts as one more value, ``not recorded``, and
+    values are listed in the order first seen.
+    """
+    per_row: dict[Key, dict[Measurement, int]] = {}
+    for r in records:
+        found = per_row.setdefault(_key(r), {})
+        value = feature_measurement(r)
+        found[value] = found.get(value, 0) + 1
+    mixed = [key for key in sorted(per_row, key=_sort) if len(per_row[key]) > 1]
+    if not mixed:
+        return
+    first = per_row[mixed[0]]
+    found_text = "; ".join(f"{_measurement_text(v)} ({n} lines)" for v, n in first.items())
+    label = "" if bonds is None else f" (label_bonds {_bonds_text(bonds)})"
+    raise ValueError(
+        f"dataset {dataset!r}{label} has lines of {len(first)} feature measurements "
+        f"(measurement, shots, shot_stream) in row {_label(mixed[0], geometry=True)}: "
+        f"{found_text} (rows with more than one: {len(mixed)} of {len(per_row)}).  Its "
+        "spread, intervals and paired tests would pool lines whose features were measured "
+        "differently; summarise each run's lines on their own."
+    )
 
 
 def _label(key: Key, *, geometry: bool = False) -> str:
@@ -792,12 +899,16 @@ def summarise(
         label bonds and the fingerprints; or if they do not rest on one
         outer split, more than one ``n_splits`` or, for one fold, more than
         one ``test_idx`` (:func:`_check_one_split`), naming the dataset, its
-        label bonds and the values found.  Nothing is printed then.
+        label bonds and the values found; or if the lines of one row differ
+        in how their features were measured (:func:`_check_one_measurement`),
+        naming the dataset, its label bonds, the row and the values found.
+        Nothing is printed then.
     """
     by_group = groups(records)
     for (dataset, bonds), recs in by_group.items():
         _check_one_fingerprint(dataset, recs, bonds)
         _check_one_split(dataset, recs, bonds)
+        _check_one_measurement(dataset, recs, bonds)
     labels_per_dataset: dict[str, int] = {}
     for dataset, _ in by_group:
         labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1
