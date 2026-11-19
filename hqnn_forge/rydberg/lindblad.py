@@ -887,8 +887,9 @@ def step_count(
     features only with a factor that grows with ``N``:
     ``|Tr[n_i Δ]| = |Tr[(n_i − ½) Δ]| ≤ ‖n_i − ½‖₂ ‖Δ‖₂`` with
     ``‖n_i − ½‖₂ = ½ √(2^N)``, 16 at :data:`~hqnn_forge.rydberg.MAX_ATOMS`;
-    the largest entry bounds neither without a factor of order ``2^N``.  The counts for the state are the
-    larger, since ``D`` is at least every feature's error.
+    the largest entry bounds neither without a factor of order ``2^N``.
+    The counts for the state are the larger, since ``D`` is at least every
+    feature's error.
 
     Parameters
     ----------
