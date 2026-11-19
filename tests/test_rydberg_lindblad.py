@@ -1121,8 +1121,14 @@ class TestTheSeededSweep:
     def test_at_one_half_99_percent_are_within_10_percent(
         self, seeded_rows: dict[float, list[SweepRow]]
     ) -> None:
-        """The note: "within 10 % ... in 99 % of the cases whose error was above the floor"."""
-        assert share_within_10_percent(above_the_floor(seeded_rows[1 / 2])) >= 0.99
+        """
+        The note: "within 10 % ... in 99 % of the cases whose error was above
+        the rounding floor ... (1452 of 1463)".  The counts are checked too,
+        since the note quotes them.
+        """
+        above = above_the_floor(seeded_rows[1 / 2])
+        assert share_within_10_percent(above) >= 0.99
+        assert (sum(abs(row.ratio - 1) <= 0.1 for row in above), len(above)) == (1452, 1463)
 
     def test_at_one_half_the_extremes_are_single_atoms_at_0_91_and_1_64(
         self, seeded_rows: dict[float, list[SweepRow]]
