@@ -856,7 +856,10 @@ def step_count(hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float)
       from these does not cover:
       :meth:`hqnn_forge.rydberg.RydbergFeatureMap.step_count` takes the
       count from the map's own chain of segments and registers (#760), and
-      gives this function's result where the map has neither.
+      gives this function's result where the map has neither.  The pulse
+      segments of :class:`~hqnn_forge.encoding.AnalogRydbergLayer` are such
+      a chain too: :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count`
+      (#769).
     * **Accuracy.**  ``tol`` is met to the accuracy of the estimate, which
       is not a bound.  Over the 216 cases of #598 (1, 2 and 4 atoms, ``V/Ω``
       0 to 100, ``γ/Ω`` 0.1 to 100, ``ΩT`` π to 16π, detunings 0 or in

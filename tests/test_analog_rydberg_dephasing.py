@@ -13,7 +13,8 @@ during the pulse, against values obtained another way:
   (no ``rydberg_hamiltonian``, no eigendecomposition, no splitting);
 * gradients match central finite differences;
 * the two-run estimate of a chain of segments with one shared step count
-  (#760) is the error of the layer's chain against that exponential (#769).
+  (#760) is the error of the layer's chain against that exponential, and the
+  count of ``AnalogRydbergLayer.step_count`` meets ``tol`` against it (#769).
 
 Every layer is converted to ``float64`` (``.double()``) before a pulse is set,
 as in ``tests/test_analog_rydberg_embedding.py``.
@@ -910,6 +911,11 @@ class TestTheChainOfSegments:
     holds whatever count the layer ends up with; 126 cases (1 to 3 atoms,
     ``K`` 1, 2, 4, ``V/Ω_max`` 0 to 10, ``γ/Ω_max`` 0.1 to 10, the
     constructor's pulse and random weights) gave 0.993 to 1.007.
+
+    :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count` doubles from
+    that ``n₀`` at the weights the layer holds; its count is checked against
+    the same exponential, and its target, ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of
+    ``density_matrices``, against the alternatives it is not.
     """
 
     OMEGA_MAX = 4.0 * math.pi
@@ -1027,3 +1033,144 @@ class TestTheChainOfSegments:
             dtype=F64,
         )
         assert (exact - noiseless).abs().max().item() > 1e-2
+
+    # -- AnalogRydbergLayer.step_count ------------------------------------
+
+    #: ``⟨n_i⟩`` alone would meet ``tol = 1e-6`` at half the count here, the
+    #: pairs do not (estimates 7.3e-7 and 1.15e-6 at 224 steps).
+    PAIRS_CASE: LayerCase = (
+        2,
+        1.0,
+        1.0,
+        [0.76, 0.84, 0.59],
+        [1.3, -0.7, -1.3],
+        [0.9, -0.2, -1.9],
+    )
+
+    def exact_features(self, layer: AnalogRydbergLayer, x: torch.Tensor) -> torch.Tensor:
+        """The features of the chained exponential of the Liouvillian per segment."""
+        return self.features(
+            torch.stack(
+                [
+                    torch.as_tensor(_reference_density_matrix(layer, row.numpy(), layer.gamma))
+                    for row in x
+                ]
+            )
+        )
+
+    def estimate(self, case: LayerCase, x: torch.Tensor, n: int, part: slice) -> float:
+        """A third of the largest difference of the features ``part`` at ``n/2`` and ``n`` steps."""
+        coarse, fine = (
+            self.features(self.build(case, m).density_matrices(x).detach())[:, part]
+            for m in (n // 2, n)
+        )
+        return (coarse - fine).abs().max().item() / 3
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_the_count_meets_tol_against_the_chained_liouvillian(self, case: LayerCase) -> None:
+        """
+        At the returned count the features of ``density_matrices`` are within
+        ``tol`` of the chained exponential, and the count is ``2^k n₀`` with
+        ``n₀`` from the hand-built ``H_k`` of the pulse that was set, not the
+        constructor's: one doubling sequence for the whole chain.
+        """
+        tol = 1e-6
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        n = layer.step_count(x, tol=tol)
+        doublings = math.log2(n / self.starting_count(layer, x))
+        assert doublings == int(doublings) >= 1
+        fine = self.features(self.build(case, n).density_matrices(x).detach())
+        assert (fine - self.exact_features(layer, x)).abs().max().item() <= tol
+
+    @pytest.mark.parametrize("case", [CASES[0], PAIRS_CASE])
+    def test_it_is_the_smallest_count_tried(self, case: LayerCase) -> None:
+        """
+        The estimate at the returned count, from two runs of the chain at
+        ``n/2`` and ``n``, meets ``tol``, and that at ``n/2`` does not.  In
+        :attr:`PAIRS_CASE` the pairs set the count: ``⟨n_i⟩`` alone would
+        meet ``tol`` at ``n/2``.
+        """
+        tol = 1e-6
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        n = layer.step_count(x, tol=tol)
+        assert n > 2 * self.starting_count(layer, x)  # a count before it was tried
+        every = slice(None)
+        assert self.estimate(case, x, n, every) <= tol < self.estimate(case, x, n // 2, every)
+        if case is self.PAIRS_CASE:
+            assert self.estimate(case, x, n // 2, slice(0, case[0])) <= tol
+
+    def test_the_target_is_the_excitations_not_the_outputs(self) -> None:
+        """
+        ``tol`` bounds ``⟨n_i⟩``, as for ``RydbergFeatureMap.step_count``, not
+        the outputs ``⟨Z_i⟩ = 1 − 2⟨n_i⟩``: here the outputs' estimate at the
+        count is above ``tol``, and their error lies between ``tol`` and
+        ``2 tol``.
+        """
+        tol = 1e-6
+        case = self.CASES[0]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        n = layer.step_count(x, tol=tol)
+        coarse, fine = (self.build(case, m).eval()(x).detach() for m in (n // 2, n))
+        assert (coarse - fine).abs().max().item() / 3 > tol
+        exact = torch.tensor(
+            [_z(_reference_density_matrix(layer, row.numpy(), layer.gamma)) for row in x],
+            dtype=F64,
+        )
+        assert tol < (fine - exact).abs().max().item() <= 2 * tol
+
+    def test_settings_outside_the_state_do_not_change_it(self) -> None:
+        """
+        The layer's own ``n_steps``, ``readout``, ``readout_error`` and
+        training noise do not enter: the target is the state of
+        ``density_matrices``.
+        """
+        case = self.CASES[0]
+        x = self.X_IN[:, : case[0]]
+        n = self.build(case, 1).step_count(x, tol=1e-6)
+        changes: list[dict[str, object]] = [
+            {},
+            {"readout": "first"},
+            {"readout_error": (0.05, 0.1)},
+            {"noise_level": 0.1, "noise_channel": "amplitude_damping"},
+        ]
+        for changed in changes:
+            assert self.build(case, 977, **changed).step_count(x, tol=1e-6) == n
+
+    def test_one_sample_is_a_batch_of_one(self) -> None:
+        case = self.CASES[3]
+        layer = self.build(case, 1)
+        x = self.X_IN[1, : case[0]]
+        assert layer.step_count(x, tol=1e-6) == layer.step_count(x[None], tol=1e-6)
+
+    def test_without_dephasing_one_is_returned(self) -> None:
+        layer = _layer(2, 3)
+        assert layer.step_count(self.X_IN[:, :2], tol=1e-9) == 1
+
+    def test_tol_is_required_and_keyword_only(self) -> None:
+        layer = self.build(self.CASES[0], 1)
+        x = self.X_IN[:, :2]
+        with pytest.raises(TypeError, match="tol"):
+            layer.step_count(x)  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="positional"):
+            layer.step_count(x, 1e-6)  # type: ignore[misc]
+
+    @pytest.mark.parametrize("tol", [0.0, 1e-10, math.nan, "1e-6", True, None])
+    def test_rejects_the_tol_step_count_rejects(self, tol: object) -> None:
+        layer = self.build(self.CASES[0], 1)
+        with pytest.raises(ValueError, match=r"tol must be a finite number >= 1e-09"):
+            layer.step_count(self.X_IN[:, :2], tol=tol)  # type: ignore[arg-type]
+
+    def test_rejects_inputs_forward_rejects(self) -> None:
+        layer = self.build(self.CASES[0], 1)
+        with pytest.raises(ValueError, match="does not match n_qubits=2"):
+            layer.step_count(self.X_IN, tol=1e-6)
+        with pytest.raises(ValueError, match="NaN"):
+            layer.step_count(torch.full((1, 2), math.nan, dtype=F64), tol=1e-6)
+
+    def test_rejects_an_empty_batch(self) -> None:
+        layer = self.build(self.CASES[0], 1)
+        with pytest.raises(ValueError, match="at least one sample"):
+            layer.step_count(torch.zeros(0, 2, dtype=F64), tol=1e-6)

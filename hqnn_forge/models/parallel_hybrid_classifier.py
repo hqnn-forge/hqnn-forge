@@ -331,8 +331,10 @@ class ParallelHybridClassifier(QuantumTrunk, BinaryClassifierBase):
     n_steps:
         With ``encoding_type="analog"`` only: the splitting steps per pulse
         segment, an integer ``>= 1``, required when ``gamma > 0`` and
-        without a default (see :func:`hqnn_forge.rydberg.evolve`).  Default
-        ``None``.
+        without a default (see :func:`hqnn_forge.rydberg.evolve`);
+        ``quantum_layer.step_count`` gives one for a tolerance at the
+        model's weights (:meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count`).
+        Default ``None``.
 
     Attributes
     ----------
