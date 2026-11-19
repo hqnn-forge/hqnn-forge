@@ -883,10 +883,11 @@ def step_count(
       ``D²`` from the positive and ``D²`` from the negative eigenvalues, so
       ``‖Δ‖₂ ≤ √2 D`` and ``‖ρ − ρ′‖₂`` moves by at most ``√2 (D + D′)``.
 
-    The Hilbert–Schmidt norm itself would bound the kernel as well, but not
-    the features: ``|Tr[(n_i − ½) Δ]| ≤ ‖n_i − ½‖₂ ‖Δ‖₂`` with
-    ``‖n_i − ½‖₂ = ½ √(2^N)``, 16 at :data:`~hqnn_forge.rydberg.MAX_ATOMS`,
-    and the largest entry bounds neither.  The counts for the state are the
+    The Hilbert–Schmidt norm itself would bound the kernel as well, but the
+    features only with a factor that grows with ``N``:
+    ``|Tr[n_i Δ]| = |Tr[(n_i − ½) Δ]| ≤ ‖n_i − ½‖₂ ‖Δ‖₂`` with
+    ``‖n_i − ½‖₂ = ½ √(2^N)``, 16 at :data:`~hqnn_forge.rydberg.MAX_ATOMS`;
+    the largest entry bounds neither without a factor of order ``2^N``.  The counts for the state are the
     larger, since ``D`` is at least every feature's error.
 
     Parameters
@@ -1099,8 +1100,9 @@ def _doubling_count(
     the maximum is taken over every entry), or the states, which
     ``distance=_largest_trace_distance`` compares in place of that maximum
     (``target="state"``).  Tries ``2·start, 4·start, …``
-    and returns the first count at which a third of the largest
-    ``|F_(n/2) − F_n|`` is at most ``tol``; ``RuntimeError`` when an estimate
+    and returns the first count at which a third of
+    ``distance(F_(n/2), F_n)`` (by default the largest ``|F_(n/2) − F_n|``)
+    is at most ``tol``; ``RuntimeError`` when an estimate
     above ``tol`` is more than half of the one before (``step_count``,
     Raises).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
     its whole chain of segments and registers as ``features``, and
