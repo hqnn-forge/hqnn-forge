@@ -31,6 +31,7 @@ import math
 import time
 from collections.abc import Callable
 
+import numpy as np
 import pytest
 import torch
 
@@ -2147,6 +2148,25 @@ class TestValidation:
     def test_rejects_a_bad_rate(self, gamma: object) -> None:
         with pytest.raises(ValueError, match="gamma must be a finite number >= 0"):
             evolve(self.H, 1.0, gamma=gamma, n_steps=10)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "values",
+        [torch.tensor([0.5, 0.5], dtype=torch.float64), torch.full((2, 1), 0.5), np.full(2, 0.5)],
+        ids=["tensor (2,)", "tensor (2, 1)", "ndarray (2,)"],
+    )
+    @pytest.mark.parametrize("name", ["t", "gamma"])
+    def test_a_time_or_rate_of_more_than_one_element_is_refused(
+        self, name: str, values: object
+    ) -> None:
+        """
+        ``t`` and ``gamma`` are shared by the batch (#530): one value per
+        sample is not read as such, whatever the batch size, even when every
+        element is the same valid number.
+        """
+        batch = torch.stack([self.H, self.H])
+        args = {"t": 1.0, "gamma": 0.5, name: values}
+        with pytest.raises(ValueError, match=f"^{name} must be"):
+            evolve(batch, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
 
     def test_a_missing_step_count_is_reported_before_the_eigendecomposition(
         self, monkeypatch: pytest.MonkeyPatch
