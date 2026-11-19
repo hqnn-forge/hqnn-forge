@@ -226,7 +226,9 @@ long-distance (the model page does not use it below 4 µm), and no realisation
 is refused for coming closer than that.
 
 The solver runs ``K`` times per chunk, so the cost grows ``K`` times; the
-working memory grows by one tensor of the chunk's states, the sum.
+working memory grows by one tensor of the chunk's states, the sum.  The
+displaced registers have their own couplings, and
+:meth:`RydbergFeatureMap.step_count` takes a step count from all of them.
 
 A device-compatible pulse
 -------------------------
@@ -241,7 +243,8 @@ segments.  The map evolves the segments in time order, each with
 :func:`evolve` from the previous one's state, for every realisation of the
 register; the readout, the detection error and the mixture over positions
 act on the final state as above.  ``n_steps`` is the step count of every
-segment.  :meth:`GlobalDrivePulseEncoding.device_violations` checks the
+segment, and :meth:`RydbergFeatureMap.step_count` chooses one for the whole
+chain.  :meth:`GlobalDrivePulseEncoding.device_violations` checks the
 pulse against :data:`AQUILA_LIMITS`, on request only.
 
 Not an encoding layer
@@ -274,9 +277,14 @@ from hqnn_forge.rydberg.hamiltonian import (
     rydberg_hamiltonian,
 )
 from hqnn_forge.rydberg.lindblad import (
+    _doubling_count,
+    _hermitian,
     _non_negative_number,
     _populations_to_features,
+    _spread,
+    _starting_count,
     _step_count,
+    _tolerance,
     evolve,
     readout,
 )
@@ -952,8 +960,8 @@ class RydbergFeatureMap:
         Number of splitting steps of the solver, an integer ``>= 1``.
         **Required when ``gamma > 0``, without a default** (see
         :func:`~hqnn_forge.rydberg.evolve` on how to choose it, and
-        :func:`~hqnn_forge.rydberg.step_count`, called once on all inputs,
-        for a count that meets a tolerance); not used
+        :meth:`step_count`, called once on all inputs, for a count that
+        meets a tolerance with any encoding and jitter); not used
         when ``gamma = 0``, where the evolution is exact.  It is passed
         unchanged to every solver call, one per segment of the drive (the
         plateau and each ramp segment of a
@@ -1265,10 +1273,20 @@ class RydbergFeatureMap:
             return max(1, _CHUNK_ENTRIES // 4**self._register.n_atoms)
         return _positive_integer(chunk_size, "chunk_size", or_none=True)
 
-    @torch.no_grad()
+    def _registers(self) -> tuple[AtomRegister, ...]:
+        """The registers evolved: the ``K`` displaced ones with jitter and interactions, else one."""
+        if self._interactions and self._jitter_registers:
+            return self._jitter_registers
+        return (self._register,)
+
     def _evolve(self, delta: torch.Tensor) -> torch.Tensor:
+        """:meth:`_evolve_with` at the map's own ``n_steps``."""
+        return self._evolve_with(delta, self._n_steps)
+
+    @torch.no_grad()
+    def _evolve_with(self, delta: torch.Tensor, n_steps: int | None) -> torch.Tensor:
         """
-        ``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``.
+        ``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``, at ``n_steps`` per segment.
 
         With jitter and interactions, the mixture ``ρ̄ = (1/K) Σ_k ρ_k(T)``
         of the displaced registers, summed in the order ``k = 0, …, K − 1``
@@ -1280,13 +1298,9 @@ class RydbergFeatureMap:
         each segment by :func:`evolve` with ``n_steps`` from the state the
         previous one returned; the first starts from ``|g…g⟩``.  A square
         pulse is one segment, the single ``evolve`` call of the map without
-        a ramp.
+        a ramp.  :meth:`step_count` runs it at other counts than the map's.
         """
-        registers = (
-            self._jitter_registers
-            if self._interactions and self._jitter_registers
-            else (self._register,)
-        )
+        registers = self._registers()
         segments = self._segments()
         total: torch.Tensor | None = None
         for register in registers:
@@ -1300,11 +1314,9 @@ class RydbergFeatureMap:
                     interactions=self._interactions,
                 )
                 if rho is None:  # from |g…g⟩: the one call of a square pulse, unchanged
-                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=self._n_steps)
+                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=n_steps)
                 else:
-                    rho = evolve(
-                        hamiltonian, tau, gamma=self._gamma, n_steps=self._n_steps, rho0=rho
-                    )
+                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=n_steps, rho0=rho)
             assert rho is not None
             total = rho if total is None else total + rho
         assert total is not None
@@ -1596,6 +1608,222 @@ class RydbergFeatureMap:
         for start in range(0, n_samples, size):
             states[start : start + size] = self._evolve(delta[start : start + size])
         return states
+
+    @torch.no_grad()
+    def step_count(self, X: Any, *, tol: float, chunk_size: int | None = None) -> int:
+        """
+        A step count for this map whose estimated feature error is at most ``tol``.
+
+        :func:`~hqnn_forge.rydberg.step_count` for the solver runs this map
+        makes: one integer for the inputs ``X``, the smallest count tried at
+        which the estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` is at most
+        ``tol`` for every sample, to pass as ``n_steps`` to a map with this
+        config, ``RydbergFeatureMap(**{**m.get_config(), "n_steps": n})``.
+        The map evolves every register through every segment of its drive
+        with ``n_steps`` steps each (*A device-compatible pulse* and
+        *Position jitter* in the module docstring): a
+        :class:`GlobalDrivePulseEncoding` has ``2n + 1`` segments
+        (``n = n_ramp_segments``) with their own Ω and duration, and position
+        jitter ``K`` registers with their own couplings, so neither one
+        Hamiltonian nor one time describes the run, and the count is taken
+        from the run itself.  With neither, the map makes the one
+        :func:`~hqnn_forge.rydberg.evolve` call of ``step_count``, and the
+        result is ``step_count`` of its Hamiltonians at ``t = encoding.t``.
+        It does not depend on the map's own ``n_steps``: a map built with any
+        count, ``n_steps=1`` for example, gives it.
+
+        **The target** is that of ``step_count``: the largest error, over
+        the samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of the state the map
+        reads, whatever ``correlations`` is.  With jitter that state is the
+        mixture ``ρ̄`` of the ``K`` registers, whose features are those of
+        :meth:`transform` (the mean of the ``K`` registers' features), so
+        ``tol`` bounds the solver's error of the map's features.  It does not
+        cover the Monte Carlo error of ``ρ̄`` as an average over positions,
+        of order ``1/√K``, nor the detection error, which acts after the
+        state (``⟨n̂_i⟩ = p01 + c ⟨n_i⟩``: an error ``e`` of ``⟨n_i⟩`` is
+        ``c e`` there).
+
+        **Why the two-run estimate carries over to the chain.**  Segment
+        ``k`` (``Ω_k`` for ``τ_k`` µs, Liouvillian ``𝓛_k`` of register
+        ``r``) is evolved by ``P_k(n) = S_k(τ_k/n)^n``, the Strang splitting
+        of :func:`~hqnn_forge.rydberg.evolve` with ``dt = τ_k/n``.  Its
+        logarithm has odd powers of ``dt`` only (``step_count``), so::
+
+            P_k(n) = exp(𝓛_k τ_k + τ_k³ C_k / n² + O(n⁻⁴)) = E_k + D_k / n² + O(n⁻⁴)
+
+        with ``E_k = exp(𝓛_k τ_k)`` the exact map of the segment and ``D_k``,
+        the derivative of the exponential at ``𝓛_k τ_k`` in the direction
+        ``τ_k³ C_k``, fixed by the segment and independent of ``n``.  Every
+        segment takes the same ``n``, so all steps halve together, and the
+        chain of the ``m`` segments is, to that order::
+
+            P_m(n) ⋯ P_1(n) = E_m ⋯ E_1 + (1/n²) Σ_k E_m ⋯ E_(k+1) D_k E_(k−1) ⋯ E_1 + O(n⁻⁴)
+
+        the exact chain plus ``1/n²`` times a map that does not depend on
+        ``n``.  The features are linear in ρ, and the mixture is the mean
+        over the registers, so every feature of the map comes out of ``n``
+        steps per segment as::
+
+            F̄_n = F̄ + Ā / n² + O(n⁻⁴),        Ā = (1/K) Σ_r Σ_k a_(r,k)
+
+        ``a_(r,k)`` the part of segment ``k`` of register ``r``, and
+        ``F̄_n − F̄_2n = 3 (F̄_2n − F̄)`` as for one segment: **the finer run
+        is off by a third of their difference**.  This needs one doubling
+        for the whole pulse; a count fixed for the edges and doubled for the
+        plateau would leave the edges' error out of the difference.  What
+        the derivation does not settle is the size of the ``O(n⁻⁴)`` rest
+        where the ``a_(r,k)`` of segments or registers cancel in ``Ā``,
+        hence the measurement below.
+
+        **The starting count.**  Each ``P_k`` needs its own step to resolve
+        its generator, ``dt_k · (W + Nγ/2) <= 1/2`` with ``dt_k = τ_k/n``
+        and ``W`` the spread ``E_max − E_min`` of that segment's Hamiltonian
+        (``step_count``), for every segment, register and sample, so the
+        coarsest run has::
+
+            n₀ = max over k of ceil(2 τ_k · (W_k + Nγ/2)),    at least 1
+
+        steps per segment, ``W_k`` the largest spread of segment ``k`` over
+        the registers and samples (``τ_k`` in µs, rates in rad/µs).  The
+        plateau sets it as a rule, but a long edge with few segments can:
+        for one atom at ``Δ = γ = 0``, one segment of ``Ω/2`` per edge does
+        when ``t_ramp > 2T/3``.  The counts tried are ``2n₀, 4n₀, …``, each
+        a run of the whole map at that count, and the first whose estimate
+        is at most ``tol`` comes back: ``2^k n₀`` with ``k >= 1``.
+
+        **Measured** against the exponential of the full Liouvillian per
+        segment, chained, and averaged over the registers, on the features
+        ``⟨n_i⟩``, ``⟨n_i n_j⟩`` of two random inputs per case: 1 to 4 atoms
+        in a chain, ``V/Ω`` 0, 1, 10, 100, ``γ/Ω`` 0.1, 1, 10, 100, ``ΩT``
+        π and 4π, the square pulse, ramps of ``0.2 T`` with 1 and 4
+        segments per edge and a triangle (``t_ramp = T``) with 2, each
+        without jitter and, with interactions, with ``σ = 0.3`` µm and
+        ``K = 3``: the 446 cases whose ``n₀`` was at most 1000 (800 for 4
+        atoms), 342 of them ramped and 163 jittered.  At ``2n₀`` the error
+        was 0.987 to 1.018 times a third of the difference (in the 445 cases
+        with an error above ``1e-9``).  At the count returned for
+        ``tol = 1e-6`` it was 0.9994 to 1.0077 times the estimate, and every
+        count met ``tol`` (largest error ``0.988 tol``), as close as for the
+        one segment of ``step_count`` (0.987 to 1.084 over #598's sweep);
+        square, ramped and jittered cases do not differ.  Bounding each
+        register's features instead of the mixture's would have doubled the
+        count in 10 of the 163 jittered cases, without changing what the map
+        returns.
+
+        Parameters
+        ----------
+        X:
+            Inputs of shape ``(n_samples, n_features_in)``, as for
+            :meth:`transform`, with at least one sample.  **Pass all inputs
+            at once**: as for ``step_count`` the count is a maximum over the
+            samples, and one value for the whole dataset keeps the features
+            of a sample independent of the chunks it is processed in.
+        tol:
+            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over
+            the samples, a finite number ``>= 1e-9``, without a default, as
+            for ``step_count``.
+        chunk_size:
+            Samples evolved at a time, as for :meth:`transform`.  It bounds
+            the working memory and changes the estimates by rounding only.
+
+        Returns
+        -------
+        int
+            The step count per segment, ``2^k n₀`` with ``k >= 1``; 1 when
+            ``gamma = 0``, where every segment is exact without steps.
+
+        Raises
+        ------
+        TypeError
+            If ``X`` is complex or boolean.
+        ValueError
+            If ``X`` does not have shape ``(n_samples, n_features_in)``,
+            holds a NaN or an infinity, or holds no sample; if ``chunk_size``
+            is not an integer ``>= 1`` or ``None``; if ``tol`` is not a
+            finite number ``>= 1e-9``.
+        RuntimeError
+            If an estimate above ``tol`` is more than half of the one before,
+            as for ``step_count``: the solver's rounding has taken over.
+
+        Notes
+        -----
+        * **Cost.**  One ``eigvalsh`` per segment, register and sample for
+          ``n₀``, then ``k + 1`` runs of the map's solver on ``X``, at
+          ``n₀, 2n₀, …, 2^k n₀`` steps per segment: ``(2 · result − n₀)``
+          steps per segment and register in all, less than twice the cost of
+          one :meth:`transform` at the result, plus one eigendecomposition
+          per segment, register, sample and run.  The memory is that of one
+          chunk of :meth:`transform` plus two matrices of the features,
+          ``n_samples × (N + N(N−1)/2)``.
+
+        Examples
+        --------
+        >>> import math
+        >>> import torch
+        >>> from hqnn_forge.rydberg import (
+        ...     DEFAULT_C6, AtomRegister, GlobalDrivePulseEncoding, RydbergFeatureMap,
+        ... )
+        >>> omega = 4 * math.pi
+        >>> probe = RydbergFeatureMap(
+        ...     AtomRegister.chain(2, AtomRegister.blockade_radius(DEFAULT_C6, omega)),
+        ...     GlobalDrivePulseEncoding(
+        ...         2, omega=omega, levels=None, t_ramp=0.0503, n_ramp_segments=4
+        ...     ),
+        ...     c6=DEFAULT_C6,
+        ...     gamma=omega,
+        ...     n_steps=1,
+        ...     position_jitter=0.2,
+        ...     jitter_samples=4,
+        ...     jitter_seed=0,
+        ... )
+        >>> X = torch.tensor([[-1.0, 2.0], [0.5, 0.5], [3.0, -2.0]])
+        >>> n = probe.step_count(X, tol=1e-6)
+        >>> n  # n₀ = 19, from the plateau
+        304
+        >>> feature_map = RydbergFeatureMap(**{**probe.get_config(), "n_steps": n})
+        >>> feature_map.get_config()["n_steps"] == n
+        True
+        """
+        tol = _tolerance(tol)
+        delta = self._encoding.detunings(X)
+        size = self._chunk_size(chunk_size)
+        n_samples = delta.shape[0]
+        if n_samples == 0:
+            raise ValueError(
+                "X must hold at least one sample: the count is fixed by all inputs at once; "
+                "got an empty batch."
+            )
+        if self._gamma == 0:  # every segment is exact without steps: any count, so the smallest
+            return 1
+        n_atoms = self._register.n_atoms
+        registers = self._registers()
+        # n₀: the largest resolution count over the segments, each with the largest
+        # spread W over the registers and samples.
+        start = 1
+        for omega, tau in self._segments():
+            spread = 0.0
+            for register in registers:
+                for first in range(0, n_samples, size):
+                    hamiltonian = rydberg_hamiltonian(
+                        register,
+                        omega,
+                        delta[first : first + size],
+                        c6=self._c6,
+                        interactions=self._interactions,
+                    )
+                    spread = max(spread, _spread(_hermitian(hamiltonian)))
+            start = max(start, _starting_count(spread, tau, n_atoms, self._gamma))
+
+        def features(n_steps: int) -> torch.Tensor:
+            # ⟨n_i⟩ and ⟨n_i n_j⟩ of the state the map reads, whatever `correlations`
+            width = n_atoms + n_atoms * (n_atoms - 1) // 2
+            out = torch.empty(n_samples, width, dtype=torch.float64, device=delta.device)
+            for first in range(0, n_samples, size):
+                rho = self._evolve_with(delta[first : first + size], n_steps)
+                out[first : first + size] = readout(rho, pairs=True)
+            return out
+
+        return _doubling_count(start, features, tol)
 
     def get_config(self) -> dict[str, Any]:
         """
