@@ -11,7 +11,9 @@ during the pulse, against values obtained another way:
 * two atoms under a piecewise pulse match the exponential of the full
   Lindblad generator of each segment, assembled here from Kronecker products
   (no ``rydberg_hamiltonian``, no eigendecomposition, no splitting);
-* gradients match central finite differences.
+* gradients match central finite differences;
+* the two-run estimate of a chain of segments with one shared step count
+  (#760) is the error of the layer's chain against that exponential (#769).
 
 Every layer is converted to ``float64`` (``.double()``) before a pulse is set,
 as in ``tests/test_analog_rydberg_embedding.py``.
@@ -35,6 +37,7 @@ from hqnn_forge.models import (
 )
 from hqnn_forge.noise import Channel, Position, apply_depolarizing_noise, noise_sweep
 from hqnn_forge.rydberg import AtomRegister
+from hqnn_forge.rydberg import readout as rydberg_readout
 
 F64 = torch.float64
 X = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
@@ -870,3 +873,157 @@ class TestKernelsAndSummary:
         # Every pulse value shapes ρ(T), so none is inert.
         assert (summary.n_trainable_params, summary.n_inert_params) == (12, 0)
         assert summary.device_name == "default.mixed"
+
+
+# ---------------------------------------------------------------------------
+# One step count for the chain of segments (#769)
+# ---------------------------------------------------------------------------
+
+#: A layer case of #769: ``N`` atoms in a chain with ``V/Ω_max`` between
+#: neighbours, ``γ/Ω_max``, and the pulse per segment as ``Ω_k/Ω_max``,
+#: ``Δ_k/Ω_max`` and ``φ_k`` (radians), at the default ``Ω_max = 4π`` rad/µs,
+#: ``τ = π/Ω_max`` and detuning bounds ``√3 Ω_max``.
+LayerCase = tuple[int, float, float, list[float], list[float], list[float]]
+
+
+class TestTheChainOfSegments:
+    """
+    The two-run estimate of :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count`
+    (#760) on the layer's own chain (#769): ``K`` segments of equal τ, each
+    with its own ``Ω_k``, ``Δ_k`` and ``φ_k``, every one evolved by ``evolve``
+    with the same ``n_steps`` and chained through ``rho0``.
+
+    #760 derives it for any chain whose segments share one count: segment
+    ``k`` gives ``E_k + D_k/n² + O(n⁻⁴)``, so the chain is the exact chain
+    plus ``1/n²`` times an ``n``-independent map, every linear feature is
+    ``F_n = F + A/n² + O(n⁻⁴)``, and ``F_n − F_2n = 3 (F_2n − F)``.  A
+    gate-model channel after every segment (``noise_position="all"``) is a
+    fixed linear map between the segments and leaves this unchanged.  With
+    ``n₀ = max_k ceil(2τ (W_k + Nγ/2))`` over the segments and samples
+    (``W_k = E_max − E_min`` of the hand-built ``H_k``, τ in µs, rates in
+    rad/µs), the features at ``2n₀`` steps per segment are off the chained
+    exponential of the Liouvillian per segment (:func:`_reference_density_matrix`,
+    :func:`_reference_with_channel`) by a third of their largest difference
+    from ``n₀`` steps, within 10 %, as for one segment
+    (``TestChoosingTheStepCount``) and the feature map's chain
+    (``TestFeatureMapStepCount``).  This is measured at fixed weights, so it
+    holds whatever count the layer ends up with; 126 cases (1 to 3 atoms,
+    ``K`` 1, 2, 4, ``V/Ω_max`` 0 to 10, ``γ/Ω_max`` 0.1 to 10, the
+    constructor's pulse and random weights) gave 0.993 to 1.007.
+    """
+
+    OMEGA_MAX = 4.0 * math.pi
+    #: Inputs for up to 3 atoms, as the models feed them, in ``(−π, π)``.
+    X_IN = torch.tensor([[-1.2, 0.4, 2.5], [0.3, -2.0, 0.0]], dtype=F64)
+
+    CASES: list[LayerCase] = [
+        # three segments, nothing symmetric, V ≈ Ω_max
+        (2, 1.0, 1.0, [0.3, 0.9, 0.6], [0.5, -1.0, 1.5], [0.0, 1.3, -0.4]),
+        # strong interactions, weak dephasing: W from V, the features need few steps
+        (3, 10.0, 0.1, [0.8, 0.4], [-0.2, 1.2], [0.5, -0.7]),
+        # one atom, strong dephasing, four segments
+        (1, 0.0, 10.0, [0.2, 0.7, 0.95, 0.5], [1.0, -0.5, 0.0, 1.6], [0.0, 2.0, -1.0, 0.3]),
+        # interactions and strong dephasing together
+        (3, 1.0, 4.0, [0.5, 0.9, 0.3], [0.0, -1.5, 0.7], [0.2, -0.9, 1.1]),
+    ]
+
+    def build(self, case: LayerCase, n_steps: int, **kwargs: object) -> AnalogRydbergLayer:
+        """The layer of ``case`` at ``n_steps`` per segment, with its pulse set."""
+        n_atoms, v_over_omega, gamma_over_omega, omega, detuning, phase = case
+        # V = C6/a⁶ between neighbours; with V = 0 the atoms sit 1 mm apart (V ≈ 5e-12)
+        spacing = 1000.0 if v_over_omega == 0 else (6.0 / v_over_omega) ** (1 / 6)
+        layer = _layer(
+            n_atoms,
+            len(omega),
+            register=AtomRegister([[spacing * i, 0.0] for i in range(n_atoms)]),
+            c6=6.0 * self.OMEGA_MAX,
+            gamma=gamma_over_omega * self.OMEGA_MAX,
+            n_steps=n_steps,
+            **kwargs,
+        )
+        layer.set_pulse(
+            omega=[w * self.OMEGA_MAX for w in omega],
+            detuning=[d * self.OMEGA_MAX for d in detuning],
+            phase=phase,
+        )
+        return layer
+
+    def starting_count(self, layer: AnalogRydbergLayer, x: torch.Tensor) -> int:
+        """``n₀ = max ceil(2τ (W_k + Nγ/2))`` over the hand-built ``H_k`` of every sample."""
+        start = 1
+        for row in x:
+            for h in _reference_hamiltonians(layer, row.numpy()):
+                energies = np.linalg.eigvalsh(h)
+                rate = energies.max() - energies.min() + layer.n_qubits * layer.gamma / 2
+                start = max(start, math.ceil(2 * layer.segment_duration * rate))
+        return start
+
+    @staticmethod
+    def features(rho: torch.Tensor) -> torch.Tensor:
+        """``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of a batch of density matrices."""
+        return rydberg_readout(rho, pairs=True)
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_a_third_of_the_difference_is_the_error_of_the_chain(self, case: LayerCase) -> None:
+        x = self.X_IN[:, : case[0]]
+        start = self.starting_count(self.build(case, 1), x)
+        coarse, fine = (
+            self.features(self.build(case, n).density_matrices(x).detach())
+            for n in (start, 2 * start)
+        )
+        reference = self.build(case, 1)
+        exact = self.features(
+            torch.stack(
+                [
+                    torch.as_tensor(
+                        _reference_density_matrix(reference, row.numpy(), reference.gamma)
+                    )
+                    for row in x
+                ]
+            )
+        )
+        error = (fine - exact).abs().max().item()
+        estimate = (coarse - fine).abs().max().item() / 3
+        assert error > 1e-9  # above the rounding floor, so the ratio is not noise
+        assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+    def test_a_channel_after_every_segment_keeps_the_estimate(self) -> None:
+        """
+        ``noise_position="all"``: the amplitude-damping map ``D^{⊗N}`` after
+        every segment (#717), on the layer's outputs ``⟨Z_i⟩`` through
+        ``apply_depolarizing_noise``, against ``e^(𝓛_k τ)`` then ``D^{⊗N}``
+        per segment.
+        """
+        case = self.CASES[0]
+        p = 0.1
+        x = self.X_IN[:, : case[0]]
+        start = self.starting_count(self.build(case, 1), x)
+
+        def outputs(n_steps: int) -> torch.Tensor:
+            layer = self.build(case, n_steps).eval()
+            with apply_depolarizing_noise(layer, p, position="all", channel="amplitude_damping"):
+                return layer(x).detach()
+
+        coarse, fine = outputs(start), outputs(2 * start)
+        reference = self.build(case, 1)
+        exact = torch.tensor(
+            [
+                _z(
+                    _reference_with_channel(
+                        reference, row.numpy(), reference.gamma, "amplitude_damping", p
+                    )
+                )
+                for row in x
+            ],
+            dtype=F64,
+        )
+        error = (fine - exact).abs().max().item()
+        estimate = (coarse - fine).abs().max().item() / 3
+        assert error > 1e-9
+        assert error / estimate == pytest.approx(1.0, rel=0.1)
+        # the channel matters at this accuracy
+        noiseless = torch.tensor(
+            [_z(_reference_density_matrix(reference, row.numpy(), reference.gamma)) for row in x],
+            dtype=F64,
+        )
+        assert (exact - noiseless).abs().max().item() > 1e-2
