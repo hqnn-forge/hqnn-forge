@@ -928,6 +928,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from before #762 (one shot stream for every fold) and one since (a stream per matrix), of the
   same data and folds read together were pooled in one row: the runner took its mean and spread
   over both kinds of line, and the summariser kept the later line of each fold (#763, #767)
+- The "Choosing `n_steps`" note of `evolve` said the two-run estimate was within 10 % in 99 % of
+  the cases of its seeded sweeps without saying which cases: it is 99 % of those whose error is
+  above the rounding floor of about `1e-10` (1452 of 1463; 1470 of all 1500), and the note now
+  says so. It called the point at 0.83 "outside" the sweeps, though it lies within their
+  ranges and they only did not draw it, and it now also gives the sweeps' lower extreme (0.91),
+  the share at `dt · (W + Nγ/2) <= 1` (90 %) and the spread below the floor (0.57 to 11.7
+  times the estimate). The sweep is now in the repository, an opt-in test that checks each
+  figure (`HQNN_FORGE_REPRODUCE=1`, `TestTheSeededSweep` in `tests/test_rydberg_lindblad.py`),
+  and the note names it (#627, #772)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
