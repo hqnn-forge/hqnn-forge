@@ -6925,7 +6925,9 @@ class TestArmBUnderRealism:
         by_hand = np.column_stack(
             [alone.transform(REALISM_X[:, [i]]).numpy()[:, 0] for i in range(4)]
         )
-        np.testing.assert_allclose(b.numpy(), by_hand, rtol=0, atol=1e-13)
+        # Equal up to the rounding of the 16 × 16 and 2 × 2 products over 5 segments of 40
+        # steps: 1.3e-13 on the declared floors (torch 2.3), as across geometries above.
+        np.testing.assert_allclose(b.numpy(), by_hand, rtol=0, atol=1e-12)
 
     @pytest.mark.slow
     def test_a_reused_b_matrix_is_the_one_recomputed_at_another_v(self) -> None:
