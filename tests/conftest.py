@@ -9,8 +9,9 @@ in CI: a missing extra removes tests and the job still goes green (#187).  CI
 sets ``HQNN_FORGE_FAIL_ON_SKIP=1``, which turns every skip into a failure that
 names the skip's reason, including a module skipped at import.  A test whose
 skip is expected in CI, because it needs hardware the runners lack or is
-opt-in (``HQNN_FORGE_REPRODUCE=1`` and a dataset CI does not have), carries
-``@pytest.mark.may_skip``.  Expected failures (``xfail``) are unaffected.
+opt-in (``HQNN_FORGE_REPRODUCE=1``, and for the SHNN reproduction a dataset
+CI does not have), carries ``@pytest.mark.may_skip``.  Expected failures
+(``xfail``) are unaffected.
 
 ``slow``: the fast local suite
 ------------------------------
@@ -45,8 +46,9 @@ SLOW_SECONDS = 1.2
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "reproducibility: checks against the published benchmark configuration "
-        "(deselect with -m 'not reproducibility')",
+        "reproducibility: checks against published figures, those of the benchmark "
+        "configuration and those of the lindblad step-count sweep (deselect with "
+        "-m 'not reproducibility')",
     )
     config.addinivalue_line(
         "markers",

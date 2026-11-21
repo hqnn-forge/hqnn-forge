@@ -5,10 +5,12 @@ tests/test_rydberg_lindblad.py
 ``docs/rydberg-model.md``: the detuned and the damped Rabi oscillation of one
 atom, the product state without interactions, the blockade of two atoms, the
 maximally mixed state under strong dephasing, and the order of the splitting;
-``step_count`` (#598) by the feature error of the count it returns, over a
-subset of #598's sweep, and ``RydbergFeatureMap.step_count`` (#760) by that
-of a ramped drive and of a jittered register, against the chained exponential
-of the Liouvillian per segment.
+the figures that the "Choosing ``n_steps``" note of ``evolve`` quotes, from
+the points they come from and, opt-in, from the seeded sweep behind them
+(#627); ``step_count`` (#598) by the feature error of the count it returns,
+over a subset of #598's sweep, and ``RydbergFeatureMap.step_count`` (#760) by
+that of a ramped drive and of a jittered register, against the chained
+exponential of the Liouvillian per segment.
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -28,9 +30,12 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
+import random
 import re
 import time
 from collections.abc import Callable
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -832,8 +837,8 @@ class TestChoosingTheStepCount:
         the largest ``|F_n − F_2n|`` within 10 % at these five points.  The
         first point is the one that needs the factor 2: with
         ``dt · (W + Nγ/2) <= 1`` its ratio is 1.37, while the other four stay
-        near 1 either way.  The range over the whole parameter domain is the
-        sweep's to check (#627).
+        near 1 either way.  The range over the whole parameter domain is
+        checked by :class:`TestTheSeededSweep` (#627).
         """
         omega = self.OMEGA
         gamma = gamma_over_omega * omega
@@ -858,6 +863,330 @@ class TestChoosingTheStepCount:
         # the smallest error at these points is 1.7e-8
         assert error > 1e-9
         assert error / estimate == pytest.approx(1.0, rel=0.1)
+
+
+#: The reference Ω of the model page, in rad/µs, at which the seeded sweep runs.
+#: Every axis of a case is relative to Ω, so Ω only scales the units.
+SWEEP_OMEGA = 4.0 * math.pi
+#: The seeds of the sweep behind the "Choosing ``n_steps``" note of ``evolve``
+#: (#599, #627), in the order the note's figures were first measured.
+SWEEP_SEEDS = (599, 1, 2, 3, 4)
+#: Cases drawn per seed.
+SWEEP_CASES_PER_SEED = 300
+#: The rounding floor of the note: below a largest feature error of about this,
+#: the error stops falling by 4 per halving of ``dt``, and the share within
+#: 10 % and the extremes of the largest-error ratio count only the cases above it.
+ROUNDING_FLOOR = 1e-10
+#: The per-feature ratios count only the features whose own error is above
+#: this, ten times the floor, as #627's script did.
+FEATURE_FLOOR = 1e-9
+
+
+def seeded_sweep(seed: int) -> list[SweepCase]:
+    """
+    The 300 cases of one seed of the sweep, in the order #627's script drew them.
+
+    Per case, from ``random.Random(seed)`` and in this order: the number of
+    atoms, from {1, 2, 4}, in a chain at unit spacing (so ``V`` is the
+    interaction of neighbours, ``c6 = V``); ``V/Ω``, 0 with probability 0.15
+    and log-uniform on [0.1, 100] otherwise; ``γ/Ω``, log-uniform on
+    [0.1, 100]; ``ΩT``, uniform on [π, 16π]; one detuning ``Δ_i/Ω`` per
+    atom, uniform on [−2, 2].  The order of the draws is part of what the
+    seed means: drawing the same axes in another order gives other cases.
+    """
+    rng = random.Random(seed)
+    cases: list[SweepCase] = []
+    for _ in range(SWEEP_CASES_PER_SEED):
+        n_atoms = rng.choice([1, 2, 4])
+        v_over_omega = 0.0 if rng.random() < 0.15 else 10 ** rng.uniform(-1, 2)
+        gamma_over_omega = 10 ** rng.uniform(-1, 2)
+        omega_t = rng.uniform(math.pi, 16 * math.pi)
+        delta_over_omega = [rng.uniform(-2, 2) for _ in range(n_atoms)]
+        cases.append((n_atoms, v_over_omega, gamma_over_omega, omega_t, delta_over_omega))
+    return cases
+
+
+def sweep_problem(case: SweepCase) -> tuple[torch.Tensor, float, float]:
+    """``(H, t, γ)`` of a case at ``Ω = SWEEP_OMEGA``: ``H`` and γ in rad/µs, ``t`` in µs."""
+    n_atoms, v_over_omega, gamma_over_omega, omega_t, delta_over_omega = case
+    h = rydberg_hamiltonian(
+        AtomRegister.chain(n_atoms, 1.0),
+        SWEEP_OMEGA,
+        [d * SWEEP_OMEGA for d in delta_over_omega],
+        c6=v_over_omega * SWEEP_OMEGA,  # V = c6 / 1⁶ between neighbours
+    )
+    return h, omega_t / SWEEP_OMEGA, gamma_over_omega * SWEEP_OMEGA
+
+
+def resolving_count(case: SweepCase, bound: float) -> int:
+    """
+    The smallest ``n`` with ``dt · (W + Nγ/2) <= bound`` at ``dt = t/n``.
+
+    ``n = ceil(t (W + Nγ/2) / bound)``, ``W = E_max − E_min`` from
+    ``eigvalsh`` of ``H`` and ``N`` the number of atoms; ``W`` and γ in
+    rad/µs, ``t`` in µs, so the product is a number.  ``bound = 1/2`` is the
+    note's condition, ``ceil(2t (W + Nγ/2))`` as in
+    :class:`TestChoosingTheStepCount` (dividing by 1/2 doubles exactly in
+    floating point, so the two give the same count).
+    """
+    h, t, gamma = sweep_problem(case)
+    energies = torch.linalg.eigvalsh(h)
+    spread = (energies.max() - energies.min()).item()
+    return math.ceil(t * (spread + case[0] * gamma / 2) / bound)
+
+
+def two_run_errors(case: SweepCase, n_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    ``(|F_2n − F|, |F_n − F_2n| / 3)`` per feature, at ``n = n_steps``.
+
+    ``F`` are ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (``readout(..., pairs=True)``),
+    exact from :func:`liouvillian_reference`, ``F_n`` from ``evolve`` with
+    ``n`` steps.  The first is the finer run's error, the second the note's
+    estimate of it: with ``F_n = F + a/n² + O(n⁻⁴)``,
+    ``F_n − F_2n = (3/4) a/n² = 3 (F_2n − F)``.  Both are probabilities, with
+    no unit; their ratio is 1 in the second-order regime.
+    """
+    h, t, gamma = sweep_problem(case)
+    exact = exact_features(h, t, gamma)[0]
+    coarse = features_of(h, t, gamma, n_steps)[0]
+    fine = features_of(h, t, gamma, 2 * n_steps)[0]
+    return (fine - exact).abs(), (coarse - fine).abs() / 3
+
+
+class TestTheRecordedPoints:
+    """
+    The four single-atom points behind "an estimate, not a bound" in the
+    "Choosing ``n_steps``" note of ``evolve``: the two extremes of the seeded
+    sweep at ``dt · (W + Nγ/2) <= 1/2`` (seed 2, case 24 and seed 4, case 31,
+    the largest-error ratios furthest above 1), and two points within the
+    sweep's ranges that it did not draw (#627), the one furthest below 1 and
+    one more above it.  The note quotes the lowest and the highest of these,
+    0.83 and 1.64.  The ratio is the finer run's largest feature error over a
+    third of the largest difference of the two runs; at the next halving it
+    moves toward 1 at every point, as the second order says it must.
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "n_steps", "ratio", "next_ratio"),
+        [
+            pytest.param(seeded_sweep(2)[24], 65, 1.587, 1.095, id="seed 2, case 24"),
+            pytest.param(seeded_sweep(4)[31], 128, 1.642, 1.098, id="seed 4, case 31"),
+            pytest.param((1, 0.0, 2.339, 4.49, [-0.312]), 20, 0.830, 0.949, id="not drawn, low"),
+            pytest.param((1, 0.0, 0.222, 11.03, [-1.034]), 35, 1.183, 1.038, id="not drawn, high"),
+        ],
+    )
+    def test_the_ratio_and_the_next_halving(
+        self, case: SweepCase, n_steps: int, ratio: float, next_ratio: float
+    ) -> None:
+        assert case[0] == 1
+        assert resolving_count(case, 1 / 2) == n_steps
+        error, estimate = two_run_errors(case, n_steps)
+        # 100x above the rounding floor (the smallest of the four is 6.6e-8),
+        # so the ratio is the splitting's, not rounding's
+        assert error.max().item() > 1e-8
+        measured = error.max().item() / estimate.max().item()
+        assert measured == pytest.approx(ratio, abs=1e-3)
+        next_error, next_estimate = two_run_errors(case, 2 * n_steps)
+        next_measured = next_error.max().item() / next_estimate.max().item()
+        assert next_measured == pytest.approx(next_ratio, abs=1e-3)
+        assert abs(next_measured - 1) < abs(measured - 1)
+
+
+class SweepRow(NamedTuple):
+    """One case of the seeded sweep at one bound: where it came from and what it gave."""
+
+    seed: int
+    case: int  # its index among the seed's cases
+    n_atoms: int
+    n_steps: int  # of the coarser run
+    error: torch.Tensor  # |F_2n − F| per feature
+    estimate: torch.Tensor  # |F_n − F_2n| / 3 per feature
+
+    @property
+    def largest_error(self) -> float:
+        return self.error.max().item()
+
+    @property
+    def ratio(self) -> float:
+        """The finer run's largest error over a third of the largest difference."""
+        return self.largest_error / self.estimate.max().item()
+
+
+def sweep_rows(bound: float) -> list[SweepRow]:
+    """Every case of every seed, the coarser run at ``dt · (W + Nγ/2) <= bound``."""
+    rows = []
+    for seed in SWEEP_SEEDS:
+        for index, case in enumerate(seeded_sweep(seed)):
+            n_steps = resolving_count(case, bound)
+            error, estimate = two_run_errors(case, n_steps)
+            rows.append(SweepRow(seed, index, case[0], n_steps, error, estimate))
+    return rows
+
+
+def above_the_floor(rows: list[SweepRow]) -> list[SweepRow]:
+    return [row for row in rows if row.largest_error > ROUNDING_FLOOR]
+
+
+def share_within_10_percent(rows: list[SweepRow]) -> float:
+    return sum(abs(row.ratio - 1) <= 0.1 for row in rows) / len(rows)
+
+
+def feature_ratios(rows: list[SweepRow]) -> list[float]:
+    """Each feature's error over a third of its own difference, where above ``FEATURE_FLOOR``."""
+    return [
+        error / estimate
+        for row in rows
+        for error, estimate in zip(row.error.tolist(), row.estimate.tolist(), strict=True)
+        if error > FEATURE_FLOOR
+    ]
+
+
+def sweep_summary(bound: float, rows: list[SweepRow]) -> str:
+    """The figures of one bound, as the note quotes them; printed with ``-s``."""
+    above = above_the_floor(rows)
+    below = [row for row in rows if row.largest_error <= ROUNDING_FLOOR]
+    low, high = min(above, key=lambda r: r.ratio), max(above, key=lambda r: r.ratio)
+    per_feature = feature_ratios(rows)
+    within = sum(abs(row.ratio - 1) <= 0.1 for row in above)
+    largest_n = max(row.n_steps for row in rows)
+    lines = [
+        f"dt (W + N gamma/2) <= {bound:g}: {len(rows)} cases, coarse n up to {largest_n}",
+        f"  error > {ROUNDING_FLOOR:g}: {len(above)} cases, {within} within 10 %",
+        f"  largest-error ratio {low.ratio:.3f} to {high.ratio:.3f}",
+        f"  lowest: seed {low.seed}, case {low.case}, N = {low.n_atoms}",
+        f"  highest: seed {high.seed}, case {high.case}, N = {high.n_atoms}",
+        f"  per feature (error > {FEATURE_FLOOR:g}): {min(per_feature):.3f} to "
+        + f"{max(per_feature):.3f}",
+        f"  error <= {ROUNDING_FLOOR:g}: {len(below)} cases, ratio "
+        + f"{min(row.ratio for row in below):.3f} to {max(row.ratio for row in below):.3f}",
+    ]
+    for seed in SWEEP_SEEDS:
+        ratios = [row.ratio for row in above if row.seed == seed]
+        within = sum(abs(ratio - 1) <= 0.1 for ratio in ratios)
+        lines.append(
+            f"  seed {seed}: {within} of {len(ratios)} within 10 %, "
+            + f"ratio {min(ratios):.3f} to {max(ratios):.3f}"
+        )
+    return "\n".join(lines)
+
+
+@pytest.fixture(scope="module")
+def seeded_rows() -> dict[float, list[SweepRow]]:
+    """:func:`sweep_rows` at both bounds, run once for :class:`TestTheSeededSweep`; printed."""
+    rows = {bound: sweep_rows(bound) for bound in (1 / 2, 1.0)}
+    for bound, bound_rows in rows.items():
+        print(sweep_summary(bound, bound_rows))
+    return rows
+
+
+@pytest.mark.reproducibility
+@pytest.mark.slow
+@pytest.mark.may_skip  # opt-in: skips in CI even under HQNN_FORGE_FAIL_ON_SKIP=1
+@pytest.mark.skipif(
+    os.environ.get("HQNN_FORGE_REPRODUCE") != "1",
+    reason="opt-in: set HQNN_FORGE_REPRODUCE=1 (about 5 minutes; see TestTheSeededSweep)",
+)
+class TestTheSeededSweep:
+    """
+    The sweep behind the figures of the "Choosing ``n_steps``" note of
+    ``evolve`` (#599, #627): five seeds of :func:`seeded_sweep`, 300 cases
+    each, every case at ``dt · (W + Nγ/2) <= 1/2`` (the note's condition) and
+    at ``<= 1``, against :func:`liouvillian_reference`.
+
+    Opt-in, as the reproduction of the published SHNN is: the 3000 pairs of
+    runs reach 60 000 steps and exponentiate the ``256 × 256`` generator of
+    four atoms, 5.4 minutes on a 16-core laptop, so the class skips
+    unless ``HQNN_FORGE_REPRODUCE=1`` and is marked ``reproducibility``,
+    ``slow`` and ``may_skip``.  Run it with::
+
+        HQNN_FORGE_REPRODUCE=1 uv run --frozen --all-extras \\
+            pytest tests/test_rydberg_lindblad.py -k TestTheSeededSweep -s
+
+    ``-s`` prints the figures of both bounds and per seed.  Each test checks
+    one figure of the note to the precision the note quotes it, so a change
+    to ``evolve``, to :func:`liouvillian_reference` or to the sampler that
+    moves a figure fails here, and the note has to follow.  The one
+    exception is the spread below the floor: rounding sets it, so another
+    torch or BLAS can move it, and only its being wide is checked.  Measured on
+    2026-11-19 (torch 2.15.0, CPU): at ``<= 1/2``, 1452 of the 1463 cases above
+    the floor within 10 % (99.2 %), the largest-error ratio 0.906 to 1.642,
+    per feature 0.837 to 5.025, 0.572 to 11.66 below the floor; at ``<= 1``,
+    1329 of 1470 (90.4 %) and 0.715 to 3.481.
+    """
+
+    def test_every_seed_and_case_ran(self, seeded_rows: dict[float, list[SweepRow]]) -> None:
+        for bound_rows in seeded_rows.values():
+            assert [(row.seed, row.case) for row in bound_rows] == [
+                (seed, index) for seed in SWEEP_SEEDS for index in range(SWEEP_CASES_PER_SEED)
+            ]
+
+    def test_at_one_half_99_percent_are_within_10_percent(
+        self, seeded_rows: dict[float, list[SweepRow]]
+    ) -> None:
+        """
+        The note: "within 10 % ... in 99 % of the cases whose error was above
+        the rounding floor ... (1452 of 1463)".  The counts are checked too,
+        since the note quotes them.
+        """
+        above = above_the_floor(seeded_rows[1 / 2])
+        assert share_within_10_percent(above) >= 0.99
+        assert (sum(abs(row.ratio - 1) <= 0.1 for row in above), len(above)) == (1452, 1463)
+
+    def test_at_one_half_the_extremes_are_single_atoms_at_0_91_and_1_64(
+        self, seeded_rows: dict[float, list[SweepRow]]
+    ) -> None:
+        """The note: "the largest error was 0.91 to 1.64 times it, both extremes single atoms"."""
+        above = above_the_floor(seeded_rows[1 / 2])
+        low, high = min(above, key=lambda r: r.ratio), max(above, key=lambda r: r.ratio)
+        assert round(low.ratio, 2) == 0.91
+        assert round(high.ratio, 2) == 1.64
+        assert low.n_atoms == high.n_atoms == 1
+        # the highest is the second point of TestTheRecordedPoints
+        assert (high.seed, high.case) == (4, 31)
+
+    def test_at_one_half_a_single_feature_is_0_84_to_5_0(
+        self, seeded_rows: dict[float, list[SweepRow]]
+    ) -> None:
+        """The note: a single feature's error was 0.84 to 5.0 times a third of its difference."""
+        ratios = feature_ratios(seeded_rows[1 / 2])
+        assert round(min(ratios), 2) == 0.84
+        assert round(max(ratios), 1) == 5.0
+
+    def test_below_the_floor_the_estimate_says_nothing(
+        self, seeded_rows: dict[float, list[SweepRow]]
+    ) -> None:
+        """
+        The note: below about ``1e-10`` "the estimate says nothing".  The
+        cases under the floor leave the range that the cases above it keep, on
+        both sides and not in one outlier only, while the cases above it stay
+        within the note's 0.91 to 1.64 (the test before), so the floor sits
+        where the note puts it.  The note's 0.57 and 11.7 are not pinned:
+        they are ratios of rounding errors near ``1e-13`` (measured: 14 of
+        the 37 cases outside the range above the floor, 7 beyond twice its
+        largest ratio), which another torch or BLAS can move.
+        """
+        below = [row.ratio for row in seeded_rows[1 / 2] if row.largest_error <= ROUNDING_FLOOR]
+        above = [row.ratio for row in above_the_floor(seeded_rows[1 / 2])]
+        assert min(below) < min(above)
+        assert max(below) > 2 * max(above)
+        outside = [ratio for ratio in below if not min(above) <= ratio <= max(above)]
+        assert len(outside) >= len(below) / 5
+
+    def test_at_one_it_is_clearly_worse(self, seeded_rows: dict[float, list[SweepRow]]) -> None:
+        """
+        The condition itself, not only the ratios under it: at
+        ``dt · (W + Nγ/2) <= 1`` the share within 10 % falls to 90 % and the
+        ratios spread to 0.71 and 3.5, the note's figures, clearly worse than
+        at ``<= 1/2``.  Dropping the factor 2 from the note's condition is
+        therefore caught over the whole sweep, not only at the one point of
+        :class:`TestChoosingTheStepCount` that fails without it.
+        """
+        half, one = above_the_floor(seeded_rows[1 / 2]), above_the_floor(seeded_rows[1.0])
+        assert round(share_within_10_percent(one), 2) == 0.90
+        assert round(min(row.ratio for row in one), 2) == 0.71
+        assert round(max(row.ratio for row in one), 1) == 3.5
+        assert share_within_10_percent(one) < share_within_10_percent(half) - 0.05
+        assert max(row.ratio for row in one) > 1.5 * max(row.ratio for row in half)
 
 
 def features_of(h: torch.Tensor, t: float, gamma: float, n_steps: int) -> torch.Tensor:
