@@ -266,7 +266,7 @@ import math
 import numbers
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -277,6 +277,7 @@ from hqnn_forge.rydberg.hamiltonian import (
     rydberg_hamiltonian,
 )
 from hqnn_forge.rydberg.lindblad import (
+    _chunked_doubling_count,
     _doubling_count,
     _hermitian,
     _non_negative_number,
@@ -284,6 +285,7 @@ from hqnn_forge.rydberg.lindblad import (
     _spread,
     _starting_count,
     _step_count,
+    _target,
     _tolerance,
     evolve,
     readout,
@@ -961,7 +963,8 @@ class RydbergFeatureMap:
         **Required when ``gamma > 0``, without a default** (see
         :func:`~hqnn_forge.rydberg.evolve` on how to choose it, and
         :meth:`step_count`, called once on all inputs, for a count that
-        meets a tolerance with any encoding and jitter); not used
+        meets a tolerance with any encoding and jitter, for the features or,
+        with ``target="state"``, for :meth:`states`); not used
         when ``gamma = 0``, where the evolution is exact.  It is passed
         unchanged to every solver call, one per segment of the drive (the
         plateau and each ramp segment of a
@@ -1570,7 +1573,10 @@ class RydbergFeatureMap:
         with ``c = 1 − p01 − p10``, derived under *Detection error* in the
         module docstring.  The states themselves carry no detection error.
         With ``position_jitter`` (and interactions) each state is the mixture
-        ``ρ̄ = (1/K) Σ_k ρ_k(T)`` of the displaced registers.
+        ``ρ̄ = (1/K) Σ_k ρ_k(T)`` of the displaced registers.  A step count
+        for these states, in the trace distance, is
+        ``step_count(X, tol=..., target="state")``; the default target is the
+        features of :meth:`transform`.
 
         Parameters
         ----------
@@ -1610,15 +1616,24 @@ class RydbergFeatureMap:
         return states
 
     @torch.no_grad()
-    def step_count(self, X: Any, *, tol: float, chunk_size: int | None = None) -> int:
+    def step_count(
+        self,
+        X: Any,
+        *,
+        tol: float,
+        chunk_size: int | None = None,
+        target: Literal["features", "state"] = "features",
+    ) -> int:
         """
-        A step count for this map whose estimated feature error is at most ``tol``.
+        A step count for this map whose estimated feature or state error is at most ``tol``.
 
         :func:`~hqnn_forge.rydberg.step_count` for the solver runs this map
         makes: one integer for the inputs ``X``, the smallest count tried at
-        which the estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` is at most
-        ``tol`` for every sample, to pass as ``n_steps`` to a map with this
-        config, ``RydbergFeatureMap(**{**m.get_config(), "n_steps": n})``.
+        which the estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩``
+        (``target="features"``, the default) or the trace distance of the
+        state :meth:`states` returns (``target="state"``, see *The state*)
+        is at most ``tol`` for every sample, to pass as ``n_steps`` to a map
+        with this config, ``RydbergFeatureMap(**{**m.get_config(), "n_steps": n})``.
         The map evolves every register through every segment of its drive
         with ``n_steps`` steps each (*A device-compatible pulse* and
         *Position jitter* in the module docstring): a
@@ -1632,11 +1647,12 @@ class RydbergFeatureMap:
         It does not depend on the map's own ``n_steps``: a map built with any
         count, ``n_steps=1`` for example, gives it.
 
-        **The target** is that of ``step_count``: the largest error, over
-        the samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of the state the map
-        reads, whatever ``correlations`` is.  With jitter that state is the
-        mixture ``ρ̄`` of the ``K`` registers, whose features are those of
-        :meth:`transform` (the mean of the ``K`` registers' features), so
+        **The target** is that of ``step_count``: with ``target="features"``
+        the largest error, over the samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩``
+        of the state the map reads, whatever ``correlations`` is.  With
+        jitter that state is the mixture ``ρ̄`` of the ``K`` registers, whose
+        features are those of :meth:`transform` (the mean of the ``K``
+        registers' features), so
         ``tol`` bounds the solver's error of the map's features.  It does not
         cover the Monte Carlo error of ``ρ̄`` as an average over positions,
         of order ``1/√K``, nor the detection error, which acts after the
@@ -1675,6 +1691,37 @@ class RydbergFeatureMap:
         where the ``a_(r,k)`` of segments or registers cancel in ``Ā``,
         hence the measurement below.
 
+        **The state** (``target="state"``, #774).  The error is that of
+        ``step_count(..., target="state")``: the trace distance
+        ``D(ρ̄_n, ρ̄) = ½ ‖ρ̄_n − ρ̄‖₁`` (no unit) of the state :meth:`states`
+        returns, with jitter the mixture ``ρ̄ = (1/K) Σ_r ρ_r(T)``.  The
+        expansion of the chain above is one of maps on ρ, and ``ρ̄_n`` is the
+        mean over the registers of the chain of register ``r`` applied to
+        ``ρ₀ = |g…g⟩⟨g…g|``, so it holds for the matrix itself, before any
+        readout::
+
+            ρ̄_n = ρ̄ + B̄ / n² + O(n⁻⁴),
+            B̄ = (1/K) Σ_r Σ_k E_(r,m) ⋯ E_(r,k+1) D_(r,k) E_(r,k−1) ⋯ E_(r,1) ρ₀
+
+        with ``E_(r,k)`` and ``D_(r,k)`` the ``E_k`` and ``D_k`` of register
+        ``r``, so ``B̄`` is a matrix independent of ``n``, and
+        ``ρ̄_n − ρ̄_2n = 3 (ρ̄_2n − ρ̄)`` as matrices to that order.  ``D`` is
+        half a norm and scales with its argument, so
+        ``D(ρ̄_2n, ρ̄) ≈ D(ρ̄_n, ρ̄_2n) / 3``: the estimate at ``2n`` steps is
+        the largest ``D(ρ̄_n, ρ̄_2n) / 3`` over the samples, from one
+        ``eigvalsh`` of the Hermitian ``ρ̄_n − ρ̄_2n`` each.  The features
+        are ``F̄ = Tr[n_i ρ̄]`` and ``Tr[n_i n_j ρ̄]``, so ``Ā`` above is this
+        expansion read out, and what ``step_count`` derives from ``D`` holds
+        for ``ρ̄``, a state because it is a mean of states: every feature of
+        :meth:`transform` before the detection error is off by at most
+        ``D``, so the count is at least the features' count up to rounding;
+        every entry of ``ρ̄`` by at most ``D``; and the state kernel
+        ``Tr[ρ̄(x) ρ̄(x′)]`` by at most ``D(x) + D(x′)``.  The target is the
+        mixture, as for the features: by the triangle inequality ``D`` of
+        the mixture is at most the mean of the registers' own, so bounding
+        each register alone would bound more than :meth:`states` returns.  The
+        Monte Carlo error of ``ρ̄`` and the detection error stay outside it.
+
         **The starting count.**  Each ``P_k`` needs its own step to resolve
         its generator, ``dt_k · (W + Nγ/2) <= 1/2`` with ``dt_k = τ_k/n``
         and ``W`` the spread ``E_max − E_min`` of that segment's Hamiltonian
@@ -1708,7 +1755,14 @@ class RydbergFeatureMap:
         square, ramped and jittered cases do not differ.  Bounding each
         register's features instead of the mixture's would have doubled the
         count in 10 of the 163 jittered cases, without changing what the map
-        returns.
+        returns.  For ``target="state"`` the same grid with its inputs drawn
+        again (#774; 443 cases pass the same ``n₀`` limits, 340 ramped and
+        159 jittered) gave, in the trace distance from the chained ``ρ̄``,
+        0.989 to 1.019 times a third of ``D(ρ̄_n₀, ρ̄_2n₀)`` at ``2n₀``, and
+        0.998 to 1.001 times the estimate at the count returned for
+        ``tol = 1e-6``.  Every count met ``tol`` (largest error
+        ``0.9997 tol``); it was the features' count in 281 cases, twice it
+        in 159 and four times it in 3.
 
         Parameters
         ----------
@@ -1719,12 +1773,17 @@ class RydbergFeatureMap:
             samples, and one value for the whole dataset keeps the features
             of a sample independent of the chunks it is processed in.
         tol:
-            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over
-            the samples, a finite number ``>= 1e-9``, without a default, as
-            for ``step_count``.
+            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩``, or
+            of the trace distance of ``ρ̄``, over the samples, a finite number
+            ``>= 1e-9``, without a default, as for ``step_count``.
         chunk_size:
             Samples evolved at a time, as for :meth:`transform`.  It bounds
-            the working memory and changes the estimates by rounding only.
+            the working memory, with either target (see Notes), and changes
+            the estimates by rounding only.
+        target:
+            ``"features"`` (the default) for ``⟨n_i⟩`` and ``⟨n_i n_j⟩``,
+            what :meth:`transform` returns; ``"state"`` for ``ρ̄`` in the
+            trace distance, what :meth:`states` returns (see *The state*).
 
         Returns
         -------
@@ -1740,7 +1799,8 @@ class RydbergFeatureMap:
             If ``X`` does not have shape ``(n_samples, n_features_in)``,
             holds a NaN or an infinity, or holds no sample; if ``chunk_size``
             is not an integer ``>= 1`` or ``None``; if ``tol`` is not a
-            finite number ``>= 1e-9``.
+            finite number ``>= 1e-9``; if ``target`` is neither
+            ``"features"`` nor ``"state"``.
         RuntimeError
             If an estimate above ``tol`` is more than half of the one before,
             as for ``step_count``: the solver's rounding has taken over.
@@ -1755,6 +1815,22 @@ class RydbergFeatureMap:
           per segment, register, sample and run.  The memory is that of one
           chunk of :meth:`transform` plus two matrices of the features,
           ``n_samples × (N + N(N−1)/2)``.
+        * **Memory with** ``target="state"``.  The estimate compares the
+          states of two runs, ``n_samples · 4^N`` ``complex128`` entries
+          each (16 MiB per sample at :data:`~hqnn_forge.rydberg.MAX_ATOMS`).
+          They are compared one chunk at a time, so that ``chunk_size`` keeps
+          bounding the working memory: each chunk is evolved at ``n`` and at
+          ``2n`` steps, its largest ``D`` kept and its states dropped, which
+          holds the states of two runs of one chunk.  When ``X`` spans more
+          than one chunk, the coarser run of every chunk is therefore
+          computed again at each doubling: ``3 · (result − n₀)`` steps per
+          segment and register in all instead of ``2 · result − n₀``: the
+          same at one doubling, up to 1.5 times the cost at many.  When it
+          fits in one chunk (the default chunk
+          holds ``2^20`` entries: 4096 samples at 4 atoms, 1 at 10) the finer
+          run is kept for the next doubling and nothing is computed twice.
+          Either way one ``eigvalsh`` per sample and comparison of two runs
+          is added, and the result is the same up to rounding.
 
         Examples
         --------
@@ -1783,8 +1859,14 @@ class RydbergFeatureMap:
         >>> feature_map = RydbergFeatureMap(**{**probe.get_config(), "n_steps": n})
         >>> feature_map.get_config()["n_steps"] == n
         True
+
+        For :meth:`states`, the same map needs one doubling more here:
+
+        >>> probe.step_count(X, tol=1e-6, target="state")
+        608
         """
         tol = _tolerance(tol)
+        target = _target(target)
         delta = self._encoding.detunings(X)
         size = self._chunk_size(chunk_size)
         n_samples = delta.shape[0]
@@ -1813,6 +1895,13 @@ class RydbergFeatureMap:
                     )
                     spread = max(spread, _spread(_hermitian(hamiltonian)))
             start = max(start, _starting_count(spread, tau, n_atoms, self._gamma))
+
+        if target == "state":
+            # ρ̄ of `states`, one chunk at a time (Notes, *Memory*)
+            chunks = [slice(first, first + size) for first in range(0, n_samples, size)]
+            return _chunked_doubling_count(
+                start, lambda chunk, n_steps: self._evolve_with(delta[chunk], n_steps), chunks, tol
+            )
 
         def features(n_steps: int) -> torch.Tensor:
             # ⟨n_i⟩ and ⟨n_i n_j⟩ of the state the map reads, whatever `correlations`

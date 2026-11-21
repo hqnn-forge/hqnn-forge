@@ -14,7 +14,8 @@ during the pulse, against values obtained another way:
 * gradients match central finite differences;
 * the two-run estimate of a chain of segments with one shared step count
   (#760) is the error of the layer's chain against that exponential, and the
-  count of ``AnalogRydbergLayer.step_count`` meets ``tol`` against it (#769).
+  count of ``AnalogRydbergLayer.step_count`` meets ``tol`` against it (#769),
+  in the trace distance of ``ρ(T)`` with ``target="state"`` (#774).
 
 Every layer is converted to ``float64`` (``.double()``) before a pulse is set,
 as in ``tests/test_analog_rydberg_embedding.py``.
@@ -1224,3 +1225,163 @@ class TestTheChainOfSegments:
         layer = self.build(self.CASES[0], 1)
         with pytest.raises(ValueError, match="at least one sample"):
             layer.step_count(torch.zeros(0, 2, dtype=F64), tol=1e-6)
+
+    # -- AnalogRydbergLayer.step_count(..., target="state") (#774) --------
+
+    #: The feature counts of ``step_count`` for :attr:`CASES` and then
+    #: :attr:`PAIRS_CASE`, at ``tol = 1e-4`` and ``1e-6``, as ``main``
+    #: returned them at c6ce325, before the layer had a state target.
+    FEATURE_COUNTS: list[tuple[int, int]] = [
+        (60, 240),
+        (260, 260),
+        (392, 3136),
+        (144, 1152),
+        (56, 448),
+    ]
+
+    def exact_states(self, layer: AnalogRydbergLayer, x: torch.Tensor) -> np.ndarray:
+        """``ρ(T)`` of the chained exponential of the Liouvillian per segment, per sample."""
+        return np.stack([_reference_density_matrix(layer, row.numpy(), layer.gamma) for row in x])
+
+    @staticmethod
+    def trace_distance(rho: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+        """``½ ‖ρ − σ‖₁`` per sample, from the singular values (``numpy``, ``ord="nuc"``)."""
+        return np.array([0.5 * np.linalg.norm(a - b, ord="nuc") for a, b in zip(rho, sigma)])
+
+    def states_at(self, case: LayerCase, x: torch.Tensor, n_steps: int) -> np.ndarray:
+        return self.build(case, n_steps).density_matrices(x).detach().numpy()
+
+    def state_estimate(self, case: LayerCase, x: torch.Tensor, n_steps: int) -> float:
+        """A third of the largest ``D(ρ_(n/2), ρ_n)`` over the samples."""
+        coarse, fine = (self.states_at(case, x, m) for m in (n_steps // 2, n_steps))
+        return float(self.trace_distance(coarse, fine).max()) / 3
+
+    @pytest.mark.parametrize("index", range(len(CASES)))
+    def test_the_state_count_meets_tol_against_the_chained_liouvillian(self, index: int) -> None:
+        """
+        At the count for the state, ``density_matrices`` is within ``tol`` of
+        the chained exponential in the trace distance; the count is ``2^k n₀``
+        with the hand-built ``n₀`` and at least the features' count.
+        """
+        tol = 1e-6
+        case = self.CASES[index]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        n = layer.step_count(x, tol=tol, target="state")
+        doublings = math.log2(n / self.starting_count(layer, x))
+        assert doublings == int(doublings) >= 1
+        error = self.trace_distance(self.states_at(case, x, n), self.exact_states(layer, x))
+        assert error.max() <= tol
+        assert n >= self.FEATURE_COUNTS[index][1]
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_a_third_of_the_difference_is_the_state_error_of_the_chain(
+        self, case: LayerCase
+    ) -> None:
+        """
+        #760's derivation for ρ as a matrix: at ``2n₀`` steps per segment the
+        trace distance from the chained exponential is a third of
+        ``D(ρ_n₀, ρ_2n₀)``, within 10 %.
+        """
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        start = self.starting_count(layer, x)
+        fine = self.states_at(case, x, 2 * start)
+        error = float(self.trace_distance(fine, self.exact_states(layer, x)).max())
+        assert error > 1e-9
+        assert error / self.state_estimate(case, x, 2 * start) == pytest.approx(1.0, rel=0.1)
+
+    def test_it_is_the_smallest_count_tried_for_the_state(self) -> None:
+        """
+        The state estimate at the returned count meets ``tol`` and that at
+        ``n/2`` does not; here the state needs twice the features' count.
+        """
+        tol = 1e-6
+        case = self.CASES[0]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        n = layer.step_count(x, tol=tol, target="state")
+        assert n == 2 * self.FEATURE_COUNTS[0][1]
+        assert self.state_estimate(case, x, n) <= tol < self.state_estimate(case, x, n // 2)
+
+    def test_the_state_count_is_set_by_the_trace_distance(self) -> None:
+        """
+        One atom (:attr:`CASES` 2): ``Δ = ρ_n − ρ_2n`` is a traceless Hermitian
+        ``[[a, b], [b*, −a]]`` per sample, with eigenvalues ``±√(a² + |b|²)``,
+        so ``D = √(a² + |b|²)``, typed in, while ``‖Δ‖₂ = √2 D`` and
+        ``‖Δ‖₁ = 2D``.  With ``tol`` a factor ``2^(1/4)`` above the estimate
+        ``D/3`` at ``2n₀`` the count is ``2n₀``; the Hilbert–Schmidt norm or
+        the norm without the ``½`` would ask for a doubling more.  With ``tol``
+        that factor below it, the count is ``4n₀``.
+        """
+        case = self.CASES[2]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        start = self.starting_count(layer, x)
+        delta = self.states_at(case, x, start) - self.states_at(case, x, 2 * start)
+        d = np.sqrt(delta[:, 0, 0].real ** 2 + np.abs(delta[:, 0, 1]) ** 2)
+        estimate = float(d.max()) / 3
+        assert estimate > 1e-6  # far above tol's floor and rounding
+        assert layer.step_count(x, tol=2**0.25 * estimate, target="state") == 2 * start
+        assert layer.step_count(x, tol=estimate / 2**0.25, target="state") == 4 * start
+
+    def test_the_state_count_bounds_the_kernel(self) -> None:
+        """
+        ``quantum_kernel_matrix`` of the layer, ``Tr[ρ(x) ρ(x′)]``, at the count
+        for the state is within ``D + D′ <= 2 tol`` of the kernel of the
+        chained exponential, the bound of ``step_count``'s *The state*.
+        """
+        from hqnn_forge.kernels import quantum_kernel_matrix
+
+        tol = 1e-6
+        case = self.CASES[3]
+        x = self.X_IN[:, : case[0]]
+        n = self.build(case, 1).step_count(x, tol=tol, target="state")
+        exact = self.exact_states(self.build(case, 1), x)
+        expected = np.einsum("aij,bji->ab", exact, exact).real
+        kernel = quantum_kernel_matrix(x, self.build(case, n)).numpy()
+        assert np.abs(kernel - expected).max() <= 2 * tol
+
+    @pytest.mark.parametrize("index", range(len(CASES) + 1))
+    def test_the_default_target_keeps_the_feature_counts(self, index: int) -> None:
+        case = [*self.CASES, self.PAIRS_CASE][index]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        assert layer.step_count(x, tol=1e-4) == self.FEATURE_COUNTS[index][0]
+        assert layer.step_count(x, tol=1e-6) == self.FEATURE_COUNTS[index][1]
+        assert layer.step_count(x, tol=1e-6, target="features") == self.FEATURE_COUNTS[index][1]
+
+    def test_settings_outside_the_state_do_not_change_the_state_count(self) -> None:
+        case = self.CASES[0]
+        x = self.X_IN[:, : case[0]]
+        n = self.build(case, 1).step_count(x, tol=1e-6, target="state")
+        changes: list[dict[str, object]] = [
+            {"readout": "first"},
+            {"readout_error": (0.05, 0.1)},
+            {"noise_level": 0.1, "noise_channel": "amplitude_damping"},
+        ]
+        for changed in changes:
+            layer = self.build(case, 977, **changed)
+            assert layer.step_count(x, tol=1e-6, target="state") == n
+
+    def test_one_sample_is_a_batch_of_one_for_the_state(self) -> None:
+        case = self.CASES[3]
+        layer = self.build(case, 1)
+        x = self.X_IN[1, : case[0]]
+        single = layer.step_count(x, tol=1e-6, target="state")
+        assert single == layer.step_count(x[None], tol=1e-6, target="state")
+
+    def test_without_dephasing_one_is_returned_for_the_state(self) -> None:
+        layer = _layer(2, 3)
+        assert layer.step_count(self.X_IN[:, :2], tol=1e-9, target="state") == 1
+
+    @pytest.mark.parametrize("target", ["State", "trace", "", None, 1])
+    def test_rejects_an_unknown_target(self, target: object) -> None:
+        layer = self.build(self.CASES[0], 1)
+        with pytest.raises(ValueError, match="target must be one of 'features', 'state'"):
+            layer.step_count(self.X_IN[:, :2], tol=1e-6, target=target)  # type: ignore[arg-type]
+
+    def test_target_is_keyword_only(self) -> None:
+        layer = self.build(self.CASES[0], 1)
+        with pytest.raises(TypeError, match="positional"):
+            layer.step_count(self.X_IN[:, :2], 1e-6, "state")  # type: ignore[misc]
