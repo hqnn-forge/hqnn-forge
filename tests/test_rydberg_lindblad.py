@@ -2409,6 +2409,36 @@ class TestFeatureMapStepCountForTheState:
         assert n > 2 * self.MAPS.starting_count(case, feature_map, x)  # a count before it
         assert self.estimate(feature_map, x, n) <= tol < self.estimate(feature_map, x, n // 2)
 
+    def test_with_jitter_the_target_is_the_mixture_not_each_register(self) -> None:
+        """
+        The jittered case of :attr:`CASES` at ``tol = 3e-6``: the mixture
+        ``ρ̄`` meets ``tol`` at 264 steps (estimate ``2.7e-6``), while one of
+        the three displaced registers, as a map of its own, is estimated at
+        ``3.3e-6`` there and would need 528.  A count over the registers'
+        own states instead of ``ρ̄`` would return 528.
+        """
+        tol = 3e-6
+        case = self.CASES[3]
+        feature_map, x = self.MAPS.build(case)
+        n = feature_map.step_count(x, tol=tol, target="state")
+        assert n == 264
+        assert self.estimate(feature_map, x, n) <= tol
+        alone = [
+            RydbergFeatureMap(
+                **{
+                    **feature_map.get_config(),
+                    "register": register.positions.tolist(),
+                    "position_jitter": 0.0,
+                    "jitter_samples": None,
+                    "jitter_seed": None,
+                }
+            )
+            for register in displaced_registers(
+                feature_map.register, case[5], case[6], self.MAPS.SEED
+            )
+        ]
+        assert max(self.estimate(m, x, n) for m in alone) > tol
+
     def test_without_ramp_or_jitter_it_is_step_count_on_the_maps_hamiltonians(self) -> None:
         """
         ``step_count(..., target="state")`` of the map's Hamiltonians, bit for
