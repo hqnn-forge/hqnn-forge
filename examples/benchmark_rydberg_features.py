@@ -148,7 +148,9 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   left the features within ``2.8e-6`` of a reference at ``γ = Ω`` and within
   ``1.0e-4`` at ``γ = 10 Ω`` (#507); the error grows about as ``γ²``, so
   raise the count for larger rates.  With ``γ = 0`` the evolution is exact
-  and the count is not used.
+  and the count is not used.  A ramped drive takes the count per segment,
+  and the check of 200 for the ramped and jittered maps is under *Step
+  counts* in "Device realism".
 * **Arms C and D have no grid.**  They are run once per fold, with ``null``
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
   no interaction term): its non-interacting features are computed once per
@@ -312,6 +314,165 @@ in ``(measurement, shots, feature_map["shot_stream"])``
 (:func:`feature_measurement`), such as a shots line from before #523 and
 one since, or an exact line and a shots line, read together.
 
+Device realism
+--------------
+By default every map is the idealised model of ``docs/rydberg-model.md``: a
+square pulse, a free detuning per atom, fixed positions and a readout
+without error.  Each idealisation that its *Hardware realism* table names a
+model for has an option here, every one off by default (#775).  The
+formulas are the model page's and are only referred to:
+
+``--readout-error P01 P10`` (``Settings.readout_error``)
+    Every atom read through the confusion matrix ``[[1 − p01, p01], [p10,
+    1 − p10]]`` (*Readout*): ``p01`` = P(read ``r`` | ``g``), ``p10`` =
+    P(read ``g`` | ``r``), independently per atom, so the exact features
+    become ``⟨n̂_i⟩ = p01 + c ⟨n_i⟩``, ``c = 1 − p01 − p10``, and with
+    ``--shots`` every bit of every shot is flipped after the bitstrings are
+    drawn.
+``--position-jitter σ --jitter-samples K``
+    Each coordinate of each atom displaced by an independent ``N(0, σ²)``
+    (σ in µm) in ``K`` registers drawn once, when the map is built, from
+    :func:`jitter_seed`; the features are read from the mixture
+    ``ρ̄ = (1/K) Σ_k ρ_k(T)``, the detection error after it (*Geometry*).
+    ``K`` has no default, as in the library, and is refused without σ.
+``--encoding global-drive --levels L --t-ramp τ [--n-ramp-segments n]``
+    ``Δ_i = Δ_local · h_i``, ``h_i = round(σ(x_i)(L − 1))/(L − 1)``,
+    ``Δ_local = √3 Ω`` (*Encoding*), under a global trapezoid ``Ω(t)``
+    with edges of ``τ`` µs that keeps the pulse area ``ΩT`` over
+    ``T + τ``, each edge evolved as ``n`` midpoint segments with an error
+    of second order in ``1/n`` (*Pulse*); :func:`pulse_encoding`.
+    ``--levels`` has no default, as in the library: the device's pattern
+    resolution was never verified, so a run states it, ``continuous``
+    (``h_i = σ(x_i)``) included.  ``--t-ramp`` has none either (0 is the
+    square pulse).  ``--levels continuous --t-ramp 0`` gives the square
+    pulse's features bit for bit.
+
+Each option is part of the map's ``get_config()``, so of ``feature_map`` and
+the cache key: realistic and ideal entries never collide.  **A run without
+any of them writes the lines, features and cache keys of a run before
+#775**: the map's config already recorded ``readout_error``,
+``position_jitter``, ``jitter_samples`` and ``jitter_seed`` with their
+defaults, arm D's records ``readout_error`` only with one, and ``seeds``
+records ``jitter_seed`` only with jitter.  ``settings`` gains the new fields,
+at their defaults.  A line's ``evolution_time_us`` is the whole pulse,
+``T + t_ramp`` with a ramp.
+
+**Arm B keeps its definition**: the map of arm A with the same encoding,
+detection error and jitter (the jitter seed included), and
+``interactions=False`` (:func:`feature_map`).  Its reuse across ``V/Ω`` and
+the geometries (*The grid*) rests on each of its features depending on its
+own atom's input alone, which still holds:
+
+* *The drive and the levels act on each atom alone.*  Without interactions
+  each segment of the drive has ``H_k = Σ_i (Ω_k/2 X_i − Δ_i n_i)``, a sum
+  of single-atom terms: ``Ω_k`` is the drive's, the same for every atom and
+  sample, and ``Δ_i = Δ_local h_i(x_i)`` depends on input ``i`` only, since
+  the levels quantise each input on its own.  The dephasing
+  ``Σ_i D[√γ n_i]`` is a sum of single-atom terms too.  So each segment's
+  generator is a sum of commuting single-atom generators and keeps a
+  product state a product: from ``|g…g⟩``, ``ρ(T) = ⊗_i ρ_i(T)`` through
+  the whole chain of segments, and so for the splitting of ``evolve``, both
+  of whose factors are products over the atoms.  ``⟨n_i⟩`` is therefore a
+  function of ``x_i``, the drive and γ only.
+* *Jitter has no effect without interactions.*  The positions enter the
+  Hamiltonian only through ``V_ij n_i n_j``, which arm B does not have:
+  every displaced register gives the same matrix, and the library evolves
+  the register once, bit for bit the map without jitter.
+* *The detection error acts per atom*: ``p01 + c ⟨n_i⟩`` is a function of
+  ``⟨n_i⟩`` alone.
+
+So B's features do not depend on ``V/Ω`` or the geometry, and B is still
+computed once per ``γ/Ω`` and fold; with ``--shots`` a reused line carries
+the draws of its source ("Measurement").
+
+**Arm D reads through the same detection error** (decided here).  Its
+``⟨Z_i⟩`` are read with ``hqnn_forge.noise.apply_readout_error`` and the run's
+``(p01, p10)`` (the frozen circuit runs in eval mode, where the layer's own
+``readout_error`` would not act): ``⟨Z⟩ → c ⟨Z⟩ + (p10 − p01)``, which for
+``n = (1 − Z)/2`` is ``⟨n̂⟩ = p01 + c ⟨n⟩``, the model of A and B, bit 1 the
+excited state in both; with ``--shots`` every shot is flipped, from the
+device's generator, seeded with the matrix's stream.  Why: "Measurement"
+compares A, B and D on one measurement (with ``--shots`` all three are
+sampled), and D is the like-for-like gate-based map; exact D beside A and B
+read through the error would credit D with a cleaner readout, and an A − D
+or D − C difference would mix the maps with the measurement.  D records
+``readout_error`` in its config only with the option.  ``D-hybrid`` stays
+exact, as it does with ``--shots`` (it trains its map end to end), and arm
+C has nothing to measure.
+
+**The jitter seed** is a fourth seed of the run, :func:`jitter_seed`: one
+for every map, so A and B share it at every grid point, also where B is
+reused.  The ``K`` displacement patterns are therefore common to the grid
+points and the folds of a run, and the Monte Carlo error of ``ρ̄`` (of order
+``1/√K``) is common to them as well and not in the fold spread; ``K``, not
+the folds, controls it.  It is recorded in ``seeds["jitter_seed"]`` and in
+``feature_map["config"]["jitter_seed"]``.
+
+**Device limits.**  Every map of a global drive is checked with
+``device_violations(AQUILA_LIMITS)`` (``Ω``, ``max |Δ_i| = Δ_local``,
+``T + t_ramp`` and the slope ``Ω/t_ramp``), and its ``feature_map`` records
+the list as ``device_violations``, empty when compatible.  Without
+``--device`` a run outside the limits is simulated as given.  A square pulse
+has no edges to check (its instantaneous edges would always break the slew
+bound) and records no list, so its config is the one from before.
+
+**The Aquila preset**, ``--device aquila`` (:func:`device_preset`), sets
+every value the model page documents for the device: the detection error
+``(0.01, 0.08)``; ``σ = 0.2`` µm; ``global-drive`` with ``t_ramp`` at the
+slew bound, ``Ω/250`` µs rounded up to ``10⁻⁴`` µs (:func:`ramp_at_slew_bound`;
+``0.0503`` µs at the reference Ω, a slope of 249.83 rad/µs²) and
+:data:`AQUILA_RAMP_SEGMENTS` segments per edge; and ``--shots 100``.  An
+option it sets is refused beside it.  It still requires ``--levels``, as
+above, and ``--jitter-samples``: ``K`` is the number of Monte Carlo
+realisations, a numerical choice like ``levels`` is a resolution nobody
+verified, not a value of the device.  The pulse is the same at every grid
+point (Ω, T and ``t_ramp`` are settings of the run), so a pulse that breaks
+the device's limits is refused before any dataset is loaded, naming each
+bound broken.
+
+**Step counts.**  Both discretisations of a preset map are held to
+``tol = 1e-4``, about a hundredth of the smallest shot standard error of a
+preset feature: with the detection error every feature read lies in
+``[p01, 1 − p10] = [0.01, 0.92]``, so ``√(F(1 − F)/100) >= 0.0099``.
+Measured on the default grid (a chain of 4 atoms, ``V/Ω`` 0.1 to 100),
+with ``levels`` continuous and the preset's ``t_ramp``, on the largest
+difference over ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` and the inputs:
+
+* *Segments per edge.*  At ``γ = 0`` (exact evolution, so the segments are
+  the only error), on 64 random inputs in ``(−π, π)``, with and without
+  ``σ = 0.2`` µm (``K = 4``), and on five inputs at the bounds of the
+  pattern (``h_i`` 0 and 1) without it, ``|F_n − F_2n|`` fell by 4.0 per
+  doubling from ``n = 1`` to 64, the second order of the midpoint rule, so
+  the error of ``n`` segments is ``(4/3) |F_n − F_2n|``: 0.038, 9.5e-3,
+  2.4e-3, 5.9e-4, 1.5e-4 and 3.7e-5 for ``n`` = 1, 2, 4, 8, 16 and 32.
+  32 is the first power of two within ``tol``.
+* *Solver steps.*  The default ``n_steps = 200`` is kept.  On 14 random
+  inputs and two at the bounds, with 32 segments per edge and
+  ``σ = 0.2`` µm (``K = 2``), at ``γ/Ω`` 0.1, 1 and 10,
+  ``RydbergFeatureMap.step_count(X, tol=1e-4)``, which runs the whole
+  chain of 65 segments and the ``K`` registers, returned 64 to 128 at
+  ``γ/Ω`` 0.1 and 1 and ``V/Ω <= 3``, below 200, but 262 to 308 at
+  ``γ = 10 Ω`` and, from ``V/Ω = 10`` on, its doubling from a starting
+  count that resolves the interaction (``dt · W <= 1/2``), 318 to 3256.
+  Its estimate itself, a third of ``|F_100 − F_200|``, gave at 200 steps at
+  most 6.8e-7, 3.5e-6 and 5.1e-5 at ``γ/Ω`` 0.1, 1 and 10, over the whole
+  grid, and from ``V/Ω = 10`` on it agreed within 1 % with the error
+  against a run of 4096 steps.  That is within ``tol`` everywhere and of the
+  size the square pulse has at 200 steps (6.4e-7, 3.2e-6 and 1.0e-4,
+  measured the same way; #507 has 6.7e-7, 2.8e-6 and 1.0e-4 against the
+  Liouvillian), so the preset uses 200, and the two errors together stay
+  below ``1e-4``.  Runs at other Ω, ``ΩT`` or rates are not covered by
+  this check; ``step_count`` gives their count.
+
+**Cost.**  Jitter evolves arm A ``K`` times (not arm B).  The ramp evolves
+each register through ``2n + 1`` segments, each with ``n_steps`` steps when
+``γ > 0``: 65 instead of one for the preset.
+
+**Not pooled.**  :func:`summarise` and ``examples/summarise_rydberg_benchmark.py``
+refuse a row whose lines differ in the detection error, the jitter
+(``σ`` or ``K``) or the encoding (:func:`feature_realism`), as they refuse
+lines measured differently.
+
 Feature cache
 -------------
 A fixed map has nothing to fit, so its features are a function of the input
@@ -443,9 +604,10 @@ What a line records
 ``arm``, ``head``, ``representation``, ``feature_map_trained``; the grid
 point (``geometry``, ``grid_shape`` as ``[rows, cols]`` for a grid and
 ``null`` otherwise, ``v_over_omega``, ``gamma_over_omega``, ``spacing_um``,
-``omega``, ``omega_t``, ``evolution_time_us``, ``n_steps``; all ``null`` for
-arms C, D and ``D-hybrid``) and the map's ``get_config()``
-(``feature_map``); ``reused_from_v_over_omega`` and ``reused_from_geometry``
+``omega``, ``omega_t``, ``evolution_time_us`` (the whole pulse, ``T`` or
+``T + t_ramp``), ``n_steps``; all ``null`` for arms C, D and ``D-hybrid``)
+and the map's ``get_config()`` (``feature_map``, for a global drive with its
+``device_violations``, "Device realism"); ``reused_from_v_over_omega`` and ``reused_from_geometry``
 (identifying the interaction-grid value and the geometry from which an arm B
 record was reused across the grid, both ``null`` if the record was computed
 rather than reused; for reused
@@ -467,7 +629,7 @@ of step 2 (:func:`pca_degeneracy`: the relative eigenvalue gaps among the
 retained components and at the cutoff, the smallest of them, the
 threshold and the flag ``degenerate``; a degenerate fit makes the
 assignment of components to atoms, and with it ``A − B``, arbitrary);
-every seed (``seeds``); ``feature_dim``,
+every seed (``seeds``, with jitter also ``jitter_seed``); ``feature_dim``,
 ``raw_constant_columns`` (raw column indices only centred in step 2 despite
 nonzero computed variance) and ``feature_constant_columns`` (the analogous
 indices for step 4, empty when that standardisation is off);
@@ -544,8 +706,10 @@ one small grid point) on the positive control, explicitly selecting
 ``positive-control`` and ignoring conflicting grid, model, dataset-selection,
 and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
 ``--seed``, ``--standardise``/``--no-standardise``, ``--max-separation-rows``,
-``--separation-seed``, ``--geometry`` and ``--grid-cols`` still apply.  With
-several geometries it runs the control once per geometry, as above.
+``--separation-seed``, ``--geometry``, ``--grid-cols`` and the device options
+of "Device realism" still apply.  With several geometries it runs the control
+once per geometry, as above.  ``--quick --device aquila --levels L
+--jitter-samples K`` is one fold of the preset, to time a run under it.
 """
 
 from __future__ import annotations
@@ -595,12 +759,16 @@ from hqnn_forge.models import (
     HybridBinaryClassifier,
     LinearClassifier,
 )
+from hqnn_forge.noise import apply_readout_error, validate_readout_error
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
 from hqnn_forge.preprocessing.pca_normalizer import EIGENVALUE_GAP_WARN
 from hqnn_forge.rydberg import (
+    AQUILA_LIMITS,
     DEFAULT_C6,
     MAX_ATOMS,
     AtomRegister,
+    DeviceLimits,
+    GlobalDrivePulseEncoding,
     PulseEncoding,
     RydbergFeatureMap,
 )
@@ -672,6 +840,91 @@ _RUN_STREAM = 1 << 16
 #: How a sampled matrix's stream is seeded, recorded as ``"shot_stream"`` in the config of
 #: every map with shots: :func:`shot_stream_seed` ("Measurement" in the module docstring, #523).
 SHOT_STREAM: Final = "per-matrix"
+#: Pulse encodings that ``--encoding`` can select ("Device realism" in the module docstring).
+ENCODINGS: tuple[str, ...] = ("square", "global-drive")
+#: The ``levels`` of a continuous pattern, ``h_i = σ(x_i)``: the library's ``levels=None``.
+#: Spelled out because ``levels`` has no default, so ``None`` in :class:`Settings` means
+#: "not stated", which the global drive refuses.
+CONTINUOUS: Final = "continuous"
+#: Devices that ``--device`` can select, with the limits of their preset (:func:`device_preset`).
+DEVICES: dict[str, DeviceLimits] = {"aquila": AQUILA_LIMITS}
+#: Aquila's detection error ``(p01, p10)``: *Hardware realism* in ``docs/rydberg-model.md``.
+AQUILA_READOUT_ERROR: Final = (0.01, 0.08)
+#: Aquila's shot-to-shot position spread in µm: *Hardware realism* in ``docs/rydberg-model.md``.
+AQUILA_POSITION_JITTER: Final = 0.2
+#: Shots per sample of the Aquila preset: "about 100 shots are typical" (*Hardware realism*).
+AQUILA_SHOTS: Final = 100
+#: Segments per edge of the Aquila preset's ramp ("Device realism", *Step counts*): the
+#: smallest power of two whose segmentation error was at most ``1e-4`` on the default grid.
+AQUILA_RAMP_SEGMENTS: Final = 32
+#: A preset's edge is a whole number of ``1/10⁴`` µs: the 0.0503 µs that ``docs/rydberg-model.md``
+#: gives for the slew bound at the reference Ω (:func:`ramp_at_slew_bound`).
+RAMP_STEPS_PER_US: Final = 10_000
+
+
+def ramp_at_slew_bound(omega: float, slew: float) -> float:
+    """
+    The shortest edge, in µs, whose slope ``Ω / t_ramp`` is at most ``slew``.
+
+    ``t_ramp = k / 10⁴`` with the smallest integer ``k`` such that
+    ``Ω / t_ramp <= slew``: ``k = ceil(10⁴ Ω / slew)``, raised by one where
+    the division, rounded in ``float64``, would still put ``Ω / t_ramp``
+    above ``slew``.  Rounding up, never to the nearest, so that the edge
+    does not break the bound it is set to.  At the reference
+    ``Ω = 4π`` rad/µs and Aquila's ``250`` rad/µs² this is ``0.0503`` µs
+    (``Ω/250 = 0.050265`` µs), a slope of ``249.83`` rad/µs².
+
+    Parameters
+    ----------
+    omega:
+        Peak Rabi frequency Ω in rad/µs, finite and ``> 0``.
+    slew:
+        Largest ``|dΩ/dt|`` in rad/µs², finite and ``> 0``.
+    """
+    k = math.ceil(RAMP_STEPS_PER_US * omega / slew)
+    while omega / (k / RAMP_STEPS_PER_US) > slew:
+        k += 1
+    return k / RAMP_STEPS_PER_US
+
+
+def device_preset(device: str, omega: float) -> dict[str, Any]:
+    """
+    The :class:`Settings` fields ``--device`` sets, for a run at Rabi frequency ``omega``.
+
+    ``"aquila"``, from *Hardware realism* in ``docs/rydberg-model.md``:
+
+    * ``readout_error``: ``(0.01, 0.08)``, ground read as excited and
+      excited read as ground;
+    * ``position_jitter``: ``0.2`` µm;
+    * ``encoding``: ``"global-drive"`` with ``t_ramp`` at the slew bound,
+      :func:`ramp_at_slew_bound` of Ω and ``250`` rad/µs² (``0.0503`` µs at
+      the reference Ω), and :data:`AQUILA_RAMP_SEGMENTS` (32) segments per
+      edge;
+    * ``shots``: ``100``.
+
+    It does not set ``levels`` or ``jitter_samples``: the resolution of the
+    device's pattern was never verified, and the number of displaced
+    registers is a Monte Carlo choice, not a device value, so a run states
+    both, as without the preset ("Device realism" in the module docstring).
+    Nor does it set ``n_steps``, whose default it was checked against
+    (*Step counts* there).
+
+    Raises
+    ------
+    ValueError
+        For a ``device`` not in :data:`DEVICES`.
+    """
+    if device not in DEVICES:
+        raise ValueError(f"device must be one of {list(DEVICES)}; got {device!r}.")
+    limits = DEVICES[device]
+    return {
+        "readout_error": AQUILA_READOUT_ERROR,
+        "position_jitter": AQUILA_POSITION_JITTER,
+        "encoding": "global-drive",
+        "t_ramp": ramp_at_slew_bound(omega, limits.omega_slew_max),
+        "n_ramp_segments": AQUILA_RAMP_SEGMENTS,
+        "shots": AQUILA_SHOTS,
+    }
 
 
 @dataclass(frozen=True)
@@ -713,11 +966,45 @@ class Settings:
         Columns of the grid geometry, ``None`` for the default shape of
         :func:`grid_shape`; only with ``"grid"`` in ``geometries``.
     n_steps:
-        Solver steps of every map with ``γ > 0``.
+        Solver steps of every map with ``γ > 0``, per segment of the drive
+        (*Step counts* in the module docstring).
     shots:
         ``None`` for exact features, or the bitstrings per sample, each
         feature matrix drawn from a stream of its own ("Measurement" in the
         module docstring).
+    readout_error:
+        ``None`` (default) for a readout without error, or the detection
+        error ``(p01, p10)`` of every atom of arms A and B and every qubit of
+        arm D: ``p01`` = P(read 1 | state 0), ``p10`` = P(read 0 | state 1),
+        each a number in ``[0, 1]`` (the rule of
+        :func:`hqnn_forge.noise.validate_readout_error`), stored as a tuple of
+        two floats.  "Device realism" in the module docstring.
+    position_jitter, jitter_samples:
+        ``σ`` in µm, a finite number ``>= 0`` (default ``0.0``: fixed
+        positions), and ``K``, the number of displaced registers, an integer
+        ``>= 1``, required with ``σ > 0`` and refused with ``σ = 0``, as by
+        :class:`~hqnn_forge.rydberg.RydbergFeatureMap`.  The displacements
+        are drawn from :func:`jitter_seed`.
+    encoding:
+        A value of :data:`ENCODINGS`: ``"square"`` (default,
+        :class:`~hqnn_forge.rydberg.PulseEncoding`) or ``"global-drive"``
+        (:class:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding`), built by
+        :func:`pulse_encoding`.
+    levels, t_ramp, n_ramp_segments:
+        The global drive's pattern resolution ``L``, an integer ``>= 2`` or
+        :data:`CONTINUOUS` (``h_i = σ(x_i)``, the library's ``levels=None``);
+        its edge in µs, a finite number in ``[0, T]`` with
+        ``T = omega_t / omega``; and its segments per edge, an integer
+        ``>= 1``, required with ``t_ramp > 0`` and refused with
+        ``t_ramp = 0``.  ``levels`` and ``t_ramp`` have no default and are
+        required with ``"global-drive"``; all three are refused with
+        ``"square"``.  ``None`` means not given.
+    device:
+        ``None`` (default) or a key of :data:`DEVICES`.  The preset's fields
+        (:func:`device_preset`) must hold its values, and the pulse must
+        keep the device's limits: a violation of any of them, named by
+        :meth:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding.device_violations`,
+        is refused.
     arms:
         A subset of :data:`ARMS`.
     hidden:
@@ -771,6 +1058,14 @@ class Settings:
     grid_cols: int | None = None
     n_steps: int = 200
     shots: int | None = None
+    readout_error: tuple[float, float] | None = None
+    position_jitter: float = 0.0
+    jitter_samples: int | None = None
+    encoding: str = "square"
+    levels: int | str | None = None
+    t_ramp: float | None = None
+    n_ramp_segments: int | None = None
+    device: str | None = None
     arms: tuple[str, ...] = ARMS
     hidden: int = 8
     standardise: bool = True
@@ -878,6 +1173,120 @@ class Settings:
                 f"max_separation_rows must be an integer >= {MIN_SEPARATION_ROWS} or None; "
                 f"got {rows!r}."
             )
+        self._check_realism()
+
+    def _check_realism(self) -> None:
+        """
+        The detection error, the jitter, the encoding and the device ("Device realism").
+
+        Each value as :class:`~hqnn_forge.rydberg.RydbergFeatureMap` and its
+        encodings would take it, checked here so that a refused run names
+        the field before any dataset is loaded; then the combinations: ``K``
+        only with jitter, the global drive's settings only with it, and a
+        device's preset values and limits.  ``readout_error`` is stored as a
+        tuple of two floats.
+        """
+        object.__setattr__(self, "readout_error", validate_readout_error(self.readout_error))
+        sigma = self.position_jitter
+        if not (
+            isinstance(sigma, numbers.Real)
+            and not isinstance(sigma, bool)
+            and math.isfinite(sigma)
+            and sigma >= 0
+        ):
+            raise ValueError(f"position_jitter must be a finite number >= 0 (µm); got {sigma!r}.")
+        count = self.jitter_samples
+        if sigma == 0 and count is not None:
+            raise ValueError(
+                f"jitter_samples is the number of displaced registers of the position jitter; "
+                f"got jitter_samples={count!r} with position_jitter={sigma!r}."
+            )
+        if sigma > 0 and count is None:
+            raise ValueError(
+                f"jitter_samples is required with position_jitter > 0: no number of displaced "
+                f"registers is assumed; got position_jitter={sigma!r} without it."
+            )
+        if count is not None and not _positive_integer(count):
+            raise ValueError(f"jitter_samples must be an integer >= 1; got {count!r}.")
+        if self.encoding not in ENCODINGS:
+            raise ValueError(f"encoding must be one of {list(ENCODINGS)}; got {self.encoding!r}.")
+        drive = {
+            "levels": self.levels,
+            "t_ramp": self.t_ramp,
+            "n_ramp_segments": self.n_ramp_segments,
+        }
+        if self.encoding == "square":
+            for name, value in drive.items():
+                if value is not None:
+                    raise ValueError(
+                        f"{name} is a setting of the global-drive encoding; got {name}={value!r} "
+                        f"with encoding='square'."
+                    )
+        else:
+            self._check_global_drive()
+        if self.device is not None:
+            self._check_device()
+
+    def _check_global_drive(self) -> None:
+        """``levels``, ``t_ramp`` and ``n_ramp_segments`` of ``encoding="global-drive"``."""
+        levels = self.levels
+        if levels is None:
+            raise ValueError(
+                "levels is required with encoding='global-drive', without a default: the "
+                "resolution of a device's pattern was never verified (docs/rydberg-model.md), "
+                f"so a run states it, an integer >= 2 or {CONTINUOUS!r}."
+            )
+        if levels != CONTINUOUS and not (_integer(levels) and int(levels) >= 2):
+            raise ValueError(f"levels must be an integer >= 2 or {CONTINUOUS!r}; got {levels!r}.")
+        t_ramp = self.t_ramp
+        if t_ramp is None:
+            raise ValueError(
+                "t_ramp is required with encoding='global-drive', without a default (0 is the "
+                "square pulse)."
+            )
+        T = self.evolution_time
+        if not (
+            isinstance(t_ramp, numbers.Real)
+            and not isinstance(t_ramp, bool)
+            and math.isfinite(t_ramp)
+            and 0 <= t_ramp <= T
+        ):
+            raise ValueError(
+                f"t_ramp must be a finite number in [0, T] µs, T = omega_t / omega = {T!r}, so "
+                f"that the pulse keeps its area; got {t_ramp!r}."
+            )
+        segments = self.n_ramp_segments
+        if t_ramp == 0 and segments is not None:
+            raise ValueError(
+                f"n_ramp_segments is used only with t_ramp > 0; got "
+                f"n_ramp_segments={segments!r} with t_ramp={t_ramp!r}."
+            )
+        if t_ramp > 0 and segments is None:
+            raise ValueError(
+                f"n_ramp_segments is required with t_ramp > 0: each edge is evolved as that many "
+                f"constant segments, and no count is assumed; got t_ramp={t_ramp!r} without it."
+            )
+        if segments is not None and not _positive_integer(segments):
+            raise ValueError(f"n_ramp_segments must be an integer >= 1; got {segments!r}.")
+
+    def _check_device(self) -> None:
+        """A device's preset values (:func:`device_preset`), then its limits on the pulse."""
+        device = self.device
+        if device not in DEVICES:
+            raise ValueError(f"device must be None or one of {list(DEVICES)}; got {device!r}.")
+        for name, value in device_preset(device, self.omega).items():
+            if getattr(self, name) != value:
+                raise ValueError(
+                    f"device={device!r} sets {name}={value!r}; got {name}={getattr(self, name)!r}."
+                )
+        encoding = pulse_encoding(self)
+        assert isinstance(encoding, GlobalDrivePulseEncoding)
+        violations = encoding.device_violations(DEVICES[device])
+        if violations:
+            raise ValueError(
+                f"device={device!r} refuses the pulse of every grid point (Ω, T and t_ramp are "
+                f"settings of the run, the same at each): {'; '.join(violations)}."
+            )
 
     @property
     def grid_shape(self) -> tuple[int, int] | None:
@@ -906,6 +1315,8 @@ class Settings:
         plain: dict[str, Any] = dataclasses.asdict(self)
         plain["search_space"] = {k: list(v) for k, v in self.search_space.items()}
         plain["geometries"] = list(self.geometries)
+        if self.readout_error is not None:
+            plain["readout_error"] = list(self.readout_error)
         return plain
 
 
@@ -1243,6 +1654,31 @@ def run_seeds(random_state: int) -> dict[str, int]:
         np.random.SeedSequence([random_state, _RUN_STREAM]), 3
     )
     return {"data_seed": data_seed, "shot_seed": shot_seed, "circuit_seed": circuit_seed}
+
+
+def jitter_seed(random_state: int) -> int:
+    """
+    The seed of the position jitter's displacements: a fourth seed of the run.
+
+    The fourth child of the seed sequence ``[random_state, 2^16]`` whose first
+    three children are :func:`run_seeds`: ``spawn`` numbers its children
+    ``0, 1, 2, 3`` in order, so spawning a fourth leaves the first three, and
+    every seed a run records without jitter, as they are.  Its first 32-bit
+    word, ``0 <= seed < 2³²``, as for the other seeds.
+
+    One seed per run, not per grid point, geometry or fold: arm B is computed
+    once per ``γ/Ω`` and fold and reused at every ``V/Ω`` and geometry (*The
+    grid*), so a seed that changed with them would give a reused B line
+    another ``jitter_seed`` than the A line it is paired with; and the map
+    must be a function of its config for the feature cache (#731).  Every
+    map of the run therefore displaces its atoms by the same ``K`` patterns
+    ``z_k`` (scaled by σ, at each grid point's own positions), and every fold
+    reads the same ``K`` realisations: the Monte Carlo error of ``ρ̄``, of
+    order ``1/√K``, is common to the folds and the grid points of a run, and
+    the fold spread does not contain it ("Device realism" in the module
+    docstring).
+    """
+    return _draw(np.random.SeedSequence([random_state, _RUN_STREAM]), 4)[3]
 
 
 def inputs_sha256(inputs: npt.ArrayLike) -> str:
@@ -1698,19 +2134,65 @@ def feature_map(
     The map of one grid point: arm A with ``interactions=True``, arm B without.
 
     ``n_atoms`` atoms of ``geometry`` (:func:`atom_register`, by default the
-    open chain) at :func:`spacing`, the pulse ``ΩT = settings.omega_t`` with
-    the default detuning bound ``√3 Ω``, and ``γ = (γ/Ω) · Ω``.  The two
-    arms differ in the ``interactions`` flag and in nothing else.
-    ``n_steps`` is passed only with ``γ > 0``.
+    open chain) at :func:`spacing`, the pulse of :func:`pulse_encoding`
+    (``ΩT = settings.omega_t``, detuning bound ``√3 Ω``), and
+    ``γ = (γ/Ω) · Ω``.  ``n_steps`` is passed only with ``γ > 0``.  With
+    ``settings.readout_error`` the map reads through it, and with
+    ``settings.position_jitter`` it averages ``settings.jitter_samples``
+    displaced registers drawn from :func:`jitter_seed` of the run; without
+    them the map is the one of every run before #775, argument for argument.
+    The two arms differ in the ``interactions`` flag and in nothing else:
+    the same encoding, detection error and jitter, the jitter seed included.
     """
     gamma = gamma_over_omega * settings.omega
+    jitter: dict[str, Any] = (
+        {}
+        if settings.position_jitter == 0
+        else {
+            "position_jitter": settings.position_jitter,
+            "jitter_samples": settings.jitter_samples,
+            "jitter_seed": jitter_seed(settings.random_state),
+        }
+    )
     return RydbergFeatureMap(
         atom_register(settings, geometry, v_over_omega),
-        PulseEncoding(settings.n_atoms, omega=settings.omega, t=settings.evolution_time),
+        pulse_encoding(settings),
         c6=settings.c6,
         gamma=gamma,
         n_steps=settings.n_steps if gamma > 0 else None,
         interactions=interactions,
+        readout_error=settings.readout_error,
+        **jitter,
+    )
+
+
+def pulse_encoding(settings: Settings) -> PulseEncoding | GlobalDrivePulseEncoding:
+    """
+    The encoding of every Rydberg map of a run: the same at each grid point, for A and B.
+
+    ``"square"``: ``PulseEncoding(N, omega=Ω, t=T)`` with ``T = ΩT/Ω`` and the
+    default bound ``Δ_max = √3 Ω``, the encoding of every run before #775.
+    ``"global-drive"``: ``GlobalDrivePulseEncoding(N, omega=Ω,
+    levels=L, t_ramp=…, n_ramp_segments=…, t=T)`` with the default
+    ``Δ_local = √3 Ω``, so ``Δ_i = Δ_local · h_i`` with
+    ``h_i = round(σ(x_i)(L − 1))/(L − 1)`` (``h_i = σ(x_i)`` for
+    ``levels="continuous"``, passed as ``levels=None``), under a trapezoid of
+    edges ``t_ramp`` that keeps the pulse area ``ΩT`` over ``T + t_ramp``
+    (*Encoding* and *Pulse* in ``docs/rydberg-model.md``).  With
+    ``levels="continuous"`` and ``t_ramp = 0`` its features are those of the
+    square pulse bit for bit (the library's guarantee).
+    """
+    if settings.encoding == "square":
+        return PulseEncoding(settings.n_atoms, omega=settings.omega, t=settings.evolution_time)
+    assert settings.t_ramp is not None
+    levels = None if settings.levels == CONTINUOUS else int(settings.levels)  # type: ignore[arg-type]
+    return GlobalDrivePulseEncoding(
+        settings.n_atoms,
+        omega=settings.omega,
+        levels=levels,
+        t_ramp=settings.t_ramp,
+        n_ramp_segments=settings.n_ramp_segments,
+        t=settings.evolution_time,
     )
 
 
@@ -1830,6 +2312,15 @@ def _rydberg_representation(
         else {"geometry": geometry, **({} if shape is None else {"grid_shape": list(shape)})}
     )
 
+    # Every map of a global drive is checked against Aquila's limits and records the list
+    # (empty when compatible); a square pulse has no edges to check, and its config, and so
+    # the cache key of a default run, is the one from before #775.
+    encoding = fmap.encoding
+    violations: dict[str, Any] = (
+        {"device_violations": encoding.device_violations(AQUILA_LIMITS)}
+        if isinstance(encoding, GlobalDrivePulseEncoding)
+        else {}
+    )
     config: dict[str, Any] = {
         "feature_map": "RydbergFeatureMap",
         "config": fmap.get_config(),
@@ -1837,6 +2328,7 @@ def _rydberg_representation(
         "shot_seed": None if shots is None else shot_seed,
         **({} if shots is None else {"shot_stream": SHOT_STREAM}),
         **shape_config,
+        **violations,
     }
 
     def compute(inputs: FloatArray) -> FloatArray:
@@ -1868,7 +2360,11 @@ def _circuit_representation(
 ) -> Representation:
     # Exact: the layer the features are computed with without shots, and the one the
     # config and the frozen parameters are read off with them (it evaluates nothing then).
-    layer = frozen_circuit(dataclasses.replace(settings, shots=None), circuit_seed)
+    # device=None as well: a preset sets the shots, and the circuit reads only n_atoms,
+    # circuit_layers and shots.
+    exact = dataclasses.replace(settings, shots=None, device=None)
+    layer = frozen_circuit(exact, circuit_seed)
+    error = settings.readout_error
     config: dict[str, Any] = {
         "feature_map": "QuantumEncodingLayer",
         "config": {
@@ -1880,6 +2376,8 @@ def _circuit_representation(
             "device_name": "default.qubit",
             "weights": "uniform(-pi, pi)",
             "circuit_seed": circuit_seed,
+            # Only with the option: without it the config is the one from before #775.
+            **({} if error is None else {"readout_error": list(error)}),
         },
         "shots": settings.shots,
         "shot_seed": None if settings.shots is None else shot_seed,
@@ -1898,7 +2396,12 @@ def _circuit_representation(
             else frozen_circuit(settings, circuit_seed, shot_stream_seed(config, inputs))
         )
         x = torch.from_numpy(inputs)
-        with torch.no_grad():
+        # The detection error of arms A and B on every qubit ("Device realism"): exactly
+        # (1 − p01 − p10) ⟨Z⟩ + (p10 − p01) without shots, each shot flipped with them.
+        reading = (
+            contextlib.nullcontext() if error is None else apply_readout_error(circuit, *error)
+        )
+        with torch.no_grad(), reading:
             chunks = [
                 circuit(x[start : start + _CIRCUIT_CHUNK])
                 for start in range(0, x.shape[0], _CIRCUIT_CHUNK)
@@ -2860,6 +3363,9 @@ def _grid_fields(rep: Representation, settings: Settings) -> dict[str, Any]:
                 "n_steps",
             )
         )
+    # The whole pulse: T, or T + t_ramp with the ramped edges of a global drive.
+    encoding = rep.config["config"]["encoding"]
+    duration = settings.evolution_time + encoding.get("t_ramp", 0.0)
     return {
         "geometry": rep.geometry,
         "grid_shape": None if rep.grid_shape is None else list(rep.grid_shape),
@@ -2868,7 +3374,7 @@ def _grid_fields(rep: Representation, settings: Settings) -> dict[str, Any]:
         "spacing_um": spacing(rep.v_over_omega, settings.omega, settings.c6),
         "omega": settings.omega,
         "omega_t": settings.omega_t,
-        "evolution_time_us": settings.evolution_time,
+        "evolution_time_us": duration,
         "n_steps": rep.config["config"]["n_steps"],
     }
 
@@ -2927,6 +3433,8 @@ def run_dataset(
     }
     env = cache.environment
     run = run_seeds(settings.random_state)
+    if settings.position_jitter > 0:  # recorded only with jitter: other runs keep their seeds
+        run["jitter_seed"] = jitter_seed(settings.random_state)
     split_seed, per_fold = fold_seeds(settings.random_state, name, settings.n_splits)
     outer = stratified_kfold(y, settings.n_splits, random_state=split_seed)
     reps = representations(settings)
@@ -3232,6 +3740,119 @@ def _check_one_measurement(rows: Mapping[tuple[Any, ...], Sequence[Mapping[str, 
     )
 
 
+def feature_realism(record: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:
+    """
+    The device model of a line's features: ``(readout_error, position_jitter, jitter_samples, encoding)``.
+
+    Read from the map's settings in the line's ``feature_map``
+    (``feature_map["config"]``, the map's ``get_config()`` or arm D's
+    circuit settings), as the line records them since #775:
+
+    * ``readout_error``: ``(p01, p10)``, or ``None`` without detection error;
+    * ``position_jitter``, ``jitter_samples``: ``σ`` in µm and ``K``, or
+      ``0.0`` and ``None`` without jitter;
+    * ``encoding``: ``"square"`` for a :class:`~hqnn_forge.rydberg.PulseEncoding`,
+      ``("global-drive", levels, t_ramp, n_ramp_segments)`` for a
+      :class:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding` (``levels``
+      ``None`` for the continuous pattern), and ``None`` for a line with no
+      pulse (arms C, D and ``D-hybrid``).
+
+    **A key the line does not have is the model without the option**, unlike
+    the ``not recorded`` of :func:`feature_measurement`: a line written
+    before the map had the option (``readout_error`` #730, the jitter #731,
+    the global drive #732) was computed without it, and arm D records
+    ``readout_error`` only with one.  So a line without the keys and a line
+    with their defaults have the same value.  The jitter's seed is left out:
+    another ``--seed`` draws other displacements of the same model, as it
+    draws other folds of the same data.
+    """
+    config = (record.get("feature_map") or {}).get("config") or {}
+    error = config.get("readout_error")
+    encoding = config.get("encoding")
+    pulse: Any = None
+    if encoding is not None:
+        pulse = (
+            (
+                "global-drive",
+                encoding.get("levels"),
+                encoding.get("t_ramp"),
+                encoding.get("n_ramp_segments"),
+            )
+            if "t_ramp" in encoding
+            else "square"
+        )
+    return (
+        None if error is None else tuple(error),
+        config.get("position_jitter", 0.0),
+        config.get("jitter_samples"),
+        pulse,
+    )
+
+
+def realism_text(value: tuple[Any, Any, Any, Any]) -> str:
+    """
+    A :func:`feature_realism` in words, for a refusal.
+
+    ``readout_error [0.01, 0.08], position_jitter 0.2, jitter_samples 8,
+    encoding global-drive levels 4 t_ramp 0.0503 n_ramp_segments 32``;
+    ``none`` for a readout without error, a ``K`` not given or no pulse.
+    """
+    error, sigma, count, pulse = value
+    if isinstance(pulse, tuple):
+        kind, levels, t_ramp, segments = pulse
+        levels_text = CONTINUOUS if levels is None else levels
+        pulse_text = (
+            f"{kind} levels {levels_text} t_ramp {t_ramp:g} n_ramp_segments "
+            f"{'none' if segments is None else segments}"
+        )
+    else:
+        pulse_text = "none" if pulse is None else str(pulse)
+    return (
+        f"readout_error {'none' if error is None else list(error)}, position_jitter "
+        f"{sigma:g}, jitter_samples {'none' if count is None else count}, encoding {pulse_text}"
+    )
+
+
+def _check_one_realism(rows: Mapping[tuple[Any, ...], Sequence[Mapping[str, Any]]]) -> None:
+    """
+    Refuse ``rows`` unless the lines of each were computed under one device model.
+
+    As :func:`_check_one_measurement`, for :func:`feature_realism`: every
+    line of a row of :func:`summarise` must have the same detection error,
+    jitter and encoding; otherwise the ``ValueError`` names the dataset, its
+    label bonds, the first such row and each value found there
+    (:func:`realism_text`) with its number of lines, in the order first
+    seen, and how many rows have more than one.  Per row, as there: the
+    lines of arms C and ``D-hybrid`` have no device model, and those of one
+    run all have the run's.
+    """
+    per_row: dict[tuple[Any, ...], dict[tuple[Any, Any, Any, Any], int]] = {}
+    for key, lines in rows.items():
+        found = per_row[key] = {}
+        for record in lines:
+            value = feature_realism(record)
+            found[value] = found.get(value, 0) + 1
+    mixed = [key for key, found in per_row.items() if len(found) > 1]
+    if not mixed:
+        return
+    dataset, bonds, geometry, v, gamma, arm, head = mixed[0]
+    first = per_row[mixed[0]]
+    found_text = "; ".join(
+        f"{realism_text(value)} ({count} lines)" for value, count in first.items()
+    )
+    label = "" if bonds is None else f" (label_bonds {[list(pair) for pair in bonds]})"
+    row = f"{arm}/{head}" + ("" if geometry is None else f" {geometry}")
+    row += "" if v is None else f" V/Ω={v:g}"
+    row += "" if gamma is None else f" γ/Ω={gamma:g}"
+    raise ValueError(
+        f"dataset {dataset!r}{label} has lines of {len(first)} device models (readout_error, "
+        f"position_jitter, jitter_samples, encoding) in row {row}: {found_text} (rows with "
+        f"more than one: {len(mixed)} of {len(per_row)}).  Its mean and spread would pool "
+        "lines whose features come from different models; summarise each run's lines on "
+        "their own."
+    )
+
+
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     """
     Mean and fold spread of MCC and PR-AUC per dataset, label, geometry, arm, head and grid point.
@@ -3262,15 +3883,19 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     mean and spread of a row pooling exact lines with shots lines, or shots
     lines of a run from before #523 (one stream for every fold) with those
     of one since (a stream per matrix), would be of neither kind
-    ("Measurement" in the module docstring).
+    ("Measurement" in the module docstring).  Nor may a row pool lines of
+    different device models (#775): another detection error, jitter or
+    encoding gives other features ("Device realism").
 
     Raises
     ------
     ValueError
         If the lines of one row differ in :func:`feature_measurement`,
         ``(measurement, shots, shot_stream)`` (:func:`_check_one_measurement`),
-        naming the dataset, its label bonds, the row and each value found
-        with its number of lines.  Lines of one run never do.
+        or in :func:`feature_realism`, ``(readout_error, position_jitter,
+        jitter_samples, encoding)`` (:func:`_check_one_realism`), naming the
+        dataset, its label bonds, the row and each value found with its
+        number of lines.  Lines of one run never do.
     """
     labels: dict[str, set[Any]] = {}
     for record in records:
@@ -3292,6 +3917,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
         )
         groups.setdefault(key, []).append(record)
     _check_one_measurement(groups)
+    _check_one_realism(groups)
     header = (
         f"{'dataset':22s} {'geometry':10s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
         f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'deg':>4s} {'t-deg':>5s} "
@@ -3515,6 +4141,55 @@ def run(
     return records
 
 
+def _levels_argument(text: str) -> int | str:
+    """``--levels``: :data:`CONTINUOUS`, or an integer (its range is checked by :class:`Settings`)."""
+    if text == CONTINUOUS:
+        return CONTINUOUS
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer >= 2 or {CONTINUOUS!r}; got {text!r}"
+        ) from None
+
+
+def _realism(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, Any]:
+    """
+    The :class:`Settings` fields of the device options, with ``--device``'s preset filled in.
+
+    An option the preset sets is refused beside ``--device``, even with the
+    preset's own value: the run takes the preset whole, and a line's
+    ``device`` then always means its values.
+    """
+    fields: dict[str, Any] = {
+        "readout_error": None if args.readout_error is None else tuple(args.readout_error),
+        "position_jitter": 0.0 if args.position_jitter is None else args.position_jitter,
+        "jitter_samples": args.jitter_samples,
+        "encoding": "square" if args.encoding is None else args.encoding,
+        "levels": args.levels,
+        "t_ramp": args.t_ramp,
+        "n_ramp_segments": args.n_ramp_segments,
+    }
+    if args.device is None:
+        return fields
+    preset = device_preset(args.device, Settings().omega)
+    given = {
+        "readout_error": args.readout_error,
+        "position_jitter": args.position_jitter,
+        "encoding": args.encoding,
+        "t_ramp": args.t_ramp,
+        "n_ramp_segments": args.n_ramp_segments,
+        "shots": args.shots,
+    }
+    for name, value in given.items():
+        if value is not None:
+            parser.error(
+                f"argument --{name.replace('_', '-')}: --device {args.device} sets it to "
+                f"{preset[name]!r}; leave it out"
+            )
+    return {**fields, **preset, "device": args.device}
+
+
 def _parser() -> argparse.ArgumentParser:
     default = Settings()
     paragraphs = (__doc__ or "").split("\n\n")  # no docstring under ``python -OO``
@@ -3538,7 +4213,9 @@ def _parser() -> argparse.ArgumentParser:
             "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
             "ignoring conflicting grid, model, dataset-selection, and training options; "
             "only --out, --cache-dir, --no-cache, --seed, --standardise/--no-standardise, "
-            "--max-separation-rows, --separation-seed, --geometry and --grid-cols still apply"
+            "--max-separation-rows, --separation-seed, --geometry, --grid-cols and the device "
+            "options (--readout-error, --position-jitter, --jitter-samples, --encoding, "
+            "--levels, --t-ramp, --n-ramp-segments, --device) still apply"
         ),
     )
     parser.add_argument(
@@ -3632,6 +4309,82 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "bitstrings per sample for arms A, B and D, each feature matrix drawn from a shot "
             "stream of its own (module docstring, Measurement); omit for exact expectation values"
+        ),
+    )
+    parser.add_argument(
+        "--readout-error",
+        type=float,
+        nargs=2,
+        metavar=("P01", "P10"),
+        default=None,
+        help=(
+            "detection error of every atom of arms A and B and every qubit of arm D: "
+            "P01 = P(read 1 | ground), P10 = P(read 0 | excited), each in [0, 1] (module "
+            "docstring, Device realism); omit for a readout without error"
+        ),
+    )
+    parser.add_argument(
+        "--position-jitter",
+        type=float,
+        default=None,
+        metavar="SIGMA",
+        help=(
+            "standard deviation in µm of each coordinate of each atom, over --jitter-samples "
+            "displaced registers drawn from the run's seed; omit for fixed positions (0)"
+        ),
+    )
+    parser.add_argument(
+        "--jitter-samples",
+        type=int,
+        default=None,
+        metavar="K",
+        help="displaced registers K of --position-jitter, an integer >= 1; only with it",
+    )
+    parser.add_argument(
+        "--encoding",
+        choices=ENCODINGS,
+        default=None,
+        help=(
+            "pulse of arms A and B: square (PulseEncoding, when omitted) or global-drive "
+            "(GlobalDrivePulseEncoding: quantised pattern under a ramped global drive, which "
+            "needs --levels and --t-ramp)"
+        ),
+    )
+    parser.add_argument(
+        "--levels",
+        type=_levels_argument,
+        default=None,
+        help=(
+            f"values of the global drive's detuning pattern, an integer >= 2, or {CONTINUOUS} "
+            "for h = sigmoid(x); no default, as the device's resolution was never verified"
+        ),
+    )
+    parser.add_argument(
+        "--t-ramp",
+        type=float,
+        default=None,
+        help=(
+            "duration in µs of each edge of the global drive, in [0, T]; the pulse lasts "
+            "T + t_ramp and keeps its area; 0 is the square pulse"
+        ),
+    )
+    parser.add_argument(
+        "--n-ramp-segments",
+        type=int,
+        default=None,
+        help="constant segments per edge of the global drive, an integer >= 1; with --t-ramp > 0",
+    )
+    parser.add_argument(
+        "--device",
+        choices=sorted(DEVICES),
+        default=None,
+        help=(
+            "preset of a device's documented values: aquila sets --readout-error 0.01 0.08, "
+            "--position-jitter 0.2, --encoding global-drive with --t-ramp at the slew bound "
+            f"(Omega/250, rounded up to 1e-4 µs) and --n-ramp-segments {AQUILA_RAMP_SEGMENTS}, "
+            f"and --shots {AQUILA_SHOTS}, which may not be given with it; --levels and "
+            "--jitter-samples are still required, and a pulse outside the device's limits is "
+            "refused"
         ),
     )
     parser.add_argument(
@@ -3763,10 +4516,14 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     ``positive-control`` dataset, ignoring conflicting grid, model,
     dataset-selection, and training options; only ``--out``, ``--cache-dir``,
     ``--no-cache``, ``--seed``, ``--standardise``/``--no-standardise``,
-    ``--max-separation-rows``, ``--separation-seed``, ``--geometry`` and
-    ``--grid-cols`` still apply.  With ``positive-control`` among the
-    datasets and several geometries, the control is run once per geometry
-    (:func:`labels_of`).
+    ``--max-separation-rows``, ``--separation-seed``, ``--geometry``,
+    ``--grid-cols`` and the device options of "Device realism" still apply
+    (so ``--quick --device aquila`` times a preset run).  With
+    ``positive-control`` among the datasets and several geometries, the
+    control is run once per geometry (:func:`labels_of`).
+
+    ``--device`` fills in its preset (:func:`device_preset`) and refuses an
+    option the preset sets (``--shots`` among them) given beside it.
 
     ``--prune-cache`` prunes the existing ``--cache-dir`` and exits; every
     other option, ``--quick`` and ``--out`` included, is ignored.
@@ -3828,6 +4585,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
         )
     max_sep = args.max_separation_rows or None
     geometries = tuple(dict.fromkeys(args.geometry))
+    realism = _realism(args, parser)
     if args.quick:
         settings = dataclasses.replace(
             QUICK,
@@ -3837,6 +4595,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             standardise=args.standardise,
             max_separation_rows=max_sep,
             separation_seed=args.separation_seed,
+            **realism,
         )
         names = ["positive-control"]
     else:
@@ -3847,7 +4606,7 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             geometries=geometries,
             grid_cols=args.grid_cols,
             n_steps=args.n_steps,
-            shots=args.shots,
+            **{"shots": args.shots, **realism},
             arms=tuple(args.arms),
             hidden=args.hidden,
             standardise=args.standardise,

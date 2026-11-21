@@ -68,7 +68,14 @@ from hqnn_forge.experiment import (
 )
 from hqnn_forge.models import ClassicalBaseline, HybridBinaryClassifier, LinearClassifier
 from hqnn_forge.preprocessing import PCANormalizer, smote, stratified_kfold
-from hqnn_forge.rydberg import DEFAULT_C6, AtomRegister, PulseEncoding, RydbergFeatureMap
+from hqnn_forge.rydberg import (
+    AQUILA_LIMITS,
+    DEFAULT_C6,
+    AtomRegister,
+    GlobalDrivePulseEncoding,
+    PulseEncoding,
+    RydbergFeatureMap,
+)
 from hqnn_forge.training import train_model
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -6649,3 +6656,817 @@ class TestPcaDegeneracy:
                 assert got["degenerate"] is False
                 np.testing.assert_allclose(got["relative_gaps"], want, rtol=1e-8)
         assert bench.summarise(quick.records).splitlines()[1].split()[-5:-3] == ["0", "0"]
+
+
+# ---------------------------------------------------------------------------
+# Device realism: detection error, position jitter and the global drive (#775)
+# ---------------------------------------------------------------------------
+
+#: Aquila's detection error ``(p01, p10)``, *Hardware realism* of ``docs/rydberg-model.md``.
+AQUILA_ERROR = (0.01, 0.08)
+#: Inputs typed in, with both bounds of the pattern (``h = 0`` and ``h = 1`` at ``±40``).
+REALISM_X = np.array(
+    [
+        [-2.0, -0.5, 0.3, 2.9],
+        [0.1, 1.2, -3.0, 0.0],
+        [1.5, 1.5, -1.5, -1.5],
+        [40.0, -40.0, 0.0, 0.7],
+    ]
+)
+
+
+def _realistic(**changes: Any) -> Any:
+    """``QUICK`` with all three options: the detection error, jitter and a ramped drive."""
+    options: dict[str, Any] = {
+        "readout_error": AQUILA_ERROR,
+        "position_jitter": 0.2,
+        "jitter_samples": 2,
+        "encoding": "global-drive",
+        "levels": 3,
+        "t_ramp": 0.0503,
+        "n_ramp_segments": 2,
+    }
+    return _replace(QUICK, **{**options, **changes})
+
+
+def _rep(settings: Any, arm: str, v: float | None = None) -> Any:
+    """The representation of ``arm`` in ``settings`` (at ``V/Ω = v`` for A and B)."""
+    (found,) = [
+        r
+        for r in bench.representations(settings)
+        if r.arm == arm and (v is None or r.v_over_omega == v)
+    ]
+    return found
+
+
+class TestDetectionError:
+    """A line's exact features are ``p01 + (1 − p01 − p10) F`` of the error-free map."""
+
+    @pytest.mark.parametrize("arm", ["A", "B"])
+    def test_a_rydberg_arm_reads_through_the_confusion_matrix(self, arm: str) -> None:
+        p01, p10 = AQUILA_ERROR
+        noisy = _rep(_replace(QUICK, readout_error=AQUILA_ERROR), arm).compute(REALISM_X)
+        clean = _map_by_hand(4, 1.0, 0.1, 40, interactions=arm == "A").transform(REALISM_X)
+        expected = p01 + (1 - p01 - p10) * clean.numpy()
+        np.testing.assert_allclose(noisy, expected, rtol=0, atol=1e-15)
+        assert np.abs(noisy - clean.numpy()).max() > 0.01
+
+    @pytest.mark.slow
+    def test_the_lines_of_a_run_are_those_of_the_error_free_map_read_through_it(self) -> None:
+        """The recorded separation measures, from the error-free map's features mapped by hand."""
+        p01, p10 = AQUILA_ERROR
+        settings = _replace(QUICK, arms=("A", "B"), n_trials=0, readout_error=AQUILA_ERROR)
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        records = list(
+            bench.run_dataset(
+                "positive-control", X, y, settings, bench.FeatureCache(None), data_seed=data_seed
+            )
+        )
+        fold = _fold_by_hand(X, y, settings, 0)
+        test = fold.inputs[fold.test_idx]
+        assert len(records) == 4
+        for record in records:
+            clean = _map_by_hand(4, 1.0, 0.1, 40, interactions=record["arm"] == "A")
+            read = p01 + (1 - p01 - p10) * clean.transform(test).numpy()
+            expected = separation_measures(read, y[fold.test_idx]).to_dict()
+            assert record["separation"]["test"] == pytest.approx(expected, rel=1e-7, abs=1e-12)
+            assert record["feature_map"]["config"]["readout_error"] == list(AQUILA_ERROR)
+            assert record["measurement"] == "exact"
+
+    def test_arm_d_reads_through_the_same_confusion_matrix(self) -> None:
+        """
+        ``⟨Z⟩ → (1 − p01 − p10) ⟨Z⟩ + (p10 − p01)`` of the circuit written out gate by gate,
+        which is ``⟨n̂⟩ = p01 + (1 − p01 − p10) ⟨n⟩`` for ``n = (1 − Z)/2``: one model for A,
+        B and D.
+        """
+        p01, p10 = AQUILA_ERROR
+        circuit_seed = bench.run_seeds(QUICK.random_state)["circuit_seed"]
+        rep = _rep(_replace(QUICK, readout_error=AQUILA_ERROR), "D")
+        z = _circuit_by_hand(REALISM_X, circuit_seed)
+        read = rep.compute(REALISM_X)
+        np.testing.assert_allclose(read, (1 - p01 - p10) * z + (p10 - p01), atol=1e-6)
+        np.testing.assert_allclose((1 - read) / 2, p01 + (1 - p01 - p10) * (1 - z) / 2, atol=1e-6)
+        assert rep.config["config"]["readout_error"] == list(AQUILA_ERROR)
+        # Without the option arm D's config holds no such key: its cache keys are those of main.
+        assert "readout_error" not in _rep(QUICK, "D").config["config"]
+
+    @pytest.mark.slow
+    def test_with_shots_arm_d_flips_every_shot_and_repeats_from_its_stream(self) -> None:
+        """
+        Each estimate of ``S`` flipped shots has mean ``⟨Z'⟩ = c ⟨Z⟩ + (p10 − p01)`` and
+        variance ``(1 − ⟨Z'⟩²)/S``: over 64 copies of the inputs, the mean is within 5
+        standard errors of the exact error-mapped value; the matrix's stream repeats it.
+        """
+        p01, p10 = AQUILA_ERROR
+        shots = 256
+        settings = _replace(QUICK, readout_error=AQUILA_ERROR, shots=shots)
+        rep = _rep(settings, "D")
+        copies = np.tile(REALISM_X, (64, 1))
+        sampled = rep.compute(copies).reshape(64, *REALISM_X.shape)
+        circuit_seed = bench.run_seeds(QUICK.random_state)["circuit_seed"]
+        exact = (1 - p01 - p10) * _circuit_by_hand(REALISM_X, circuit_seed) + (p10 - p01)
+        error = np.sqrt((1 - exact**2) / (shots * 64))
+        assert np.all(np.abs(sampled.mean(axis=0) - exact) < 5 * error)
+        np.testing.assert_array_equal(rep.compute(copies), sampled.reshape(copies.shape))
+        assert np.abs(sampled - exact).max() > 0.01  # sampled, not exact
+
+
+class TestGlobalDrive:
+    @pytest.mark.parametrize("gamma", [0.0, 0.1])
+    @pytest.mark.parametrize("interactions", [True, False])
+    def test_continuous_levels_without_a_ramp_are_the_square_pulse_bit_for_bit(
+        self, gamma: float, interactions: bool
+    ) -> None:
+        """The library's guarantee, here through the script's builder."""
+        drive = _replace(QUICK, encoding="global-drive", levels="continuous", t_ramp=0.0)
+        X = torch.from_numpy(REALISM_X)
+        ramped = bench.feature_map(drive, 1.0, gamma, interactions=interactions)
+        square = bench.feature_map(QUICK, 1.0, gamma, interactions=interactions)
+        assert isinstance(ramped.encoding, GlobalDrivePulseEncoding)
+        assert ramped.encoding.levels is None
+        assert torch.equal(ramped.transform(X), square.transform(X))
+
+    def test_the_builder_passes_every_setting(self) -> None:
+        fmap = bench.feature_map(_realistic(), 1.0, 0.1, interactions=True)
+        by_hand = GlobalDrivePulseEncoding(
+            4, omega=OMEGA, levels=3, t_ramp=0.0503, n_ramp_segments=2, t=math.pi / OMEGA
+        )
+        assert fmap.encoding.get_config() == by_hand.get_config()
+        assert fmap.readout_error == AQUILA_ERROR
+        assert (fmap.position_jitter, fmap.jitter_samples) == (0.2, 2)
+        assert fmap.n_steps == QUICK.n_steps
+
+    def test_a_line_records_the_whole_pulse_and_its_device_violations(self) -> None:
+        """
+        ``evolution_time_us`` is ``T + t_ramp``; every global-drive map records its
+        violations of ``AQUILA_LIMITS``, also outside the preset (here none), and a square
+        pulse none at all (its config, and the cache key, are those of ``main``).
+        """
+        settings = _realistic(arms=("A", "B"))
+        for rep in bench.representations(settings):
+            fields = bench._grid_fields(rep, settings)
+            assert fields["evolution_time_us"] == pytest.approx(0.25 + 0.0503, abs=1e-15)
+            assert rep.config["device_violations"] == []
+        for rep in bench.representations(_replace(QUICK, arms=("A", "B"))):
+            assert bench._grid_fields(rep, QUICK)["evolution_time_us"] == 0.25
+            assert "device_violations" not in rep.config
+
+    def test_a_drive_outside_the_limits_records_them_without_the_preset(self) -> None:
+        """Without ``--device`` the run is simulated as given and the list says what breaks."""
+        no_ramp = _replace(QUICK, encoding="global-drive", levels=4, t_ramp=0.0)
+        assert _rep(no_ramp, "A").config["device_violations"] == [
+            "omega_slew_max: Ω / t_ramp = inf rad/µs² exceeds 250 rad/µs²"
+        ]
+        short = _replace(QUICK, encoding="global-drive", levels=4, t_ramp=0.05, n_ramp_segments=1)
+        assert _rep(short, "B").config["device_violations"] == [
+            "omega_slew_max: Ω / t_ramp = 251.327 rad/µs² exceeds 250 rad/µs²"
+        ]
+
+
+class TestPositionJitter:
+    #: The run's seed sequence, ``[random_state, 2^16]``, written out (:func:`bench.run_seeds`).
+    RUN_ROOT = (0, 1 << 16)
+
+    def test_the_seed_is_the_fourth_draw_of_the_run_and_a_and_b_share_it(self) -> None:
+        """The three seeds of ``run_seeds`` stay what they were; A and B get the fourth."""
+        children = np.random.SeedSequence(list(self.RUN_ROOT)).spawn(4)
+        seeds = [int(child.generate_state(1)[0]) for child in children]
+        assert list(bench.run_seeds(0).values()) == seeds[:3]
+        assert bench.jitter_seed(0) == seeds[3]
+        settings = _realistic(v_over_omega=(0.5, 2.0), gamma_over_omega=(0.0, 0.1))
+        configs = [r.config["config"] for r in bench.representations(settings) if r.arm in "AB"]
+        assert len(configs) == 8
+        for config in configs:
+            assert (config["position_jitter"], config["jitter_samples"]) == (0.2, 2)
+            assert config["jitter_seed"] == seeds[3]
+
+    def test_arm_a_is_the_mean_of_maps_on_registers_displaced_by_hand(self) -> None:
+        """
+        The displacements of the run's seed, drawn here as ``N(0, σ²)`` per coordinate
+        (one ``randn((K, N, 2))``), and the features of a map on each displaced chain,
+        averaged: the mixture the library reads (*Geometry* of the model page).
+        """
+        settings = _replace(QUICK, position_jitter=0.2, jitter_samples=3)
+        generator = torch.Generator().manual_seed(bench.jitter_seed(QUICK.random_state))
+        z = torch.randn((3, 4, 2), generator=generator, dtype=torch.float64)
+        chain = AtomRegister.chain(4, bench.spacing(1.0, OMEGA, DEFAULT_C6)).positions
+        features = [
+            RydbergFeatureMap(
+                AtomRegister(chain + 0.2 * z[k]),
+                PulseEncoding(4, omega=OMEGA),
+                c6=DEFAULT_C6,
+                gamma=0.1 * OMEGA,
+                n_steps=40,
+            ).transform(REALISM_X)
+            for k in range(3)
+        ]
+        expected = (features[0] + features[1] + features[2]).numpy() / 3
+        jittered = _rep(settings, "A").compute(REALISM_X)
+        np.testing.assert_allclose(jittered, expected, rtol=0, atol=1e-14)
+        fixed = _rep(QUICK, "A").compute(REALISM_X)
+        assert np.abs(jittered - fixed).max() > 1e-4
+
+    def test_a_line_records_the_jitter_seed_only_with_jitter(self) -> None:
+        settings = _replace(
+            QUICK, arms=("A", "C"), n_trials=0, position_jitter=0.2, jitter_samples=2
+        )
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        records = list(
+            bench.run_dataset(
+                "positive-control", X, y, settings, bench.FeatureCache(None), data_seed=data_seed
+            )
+        )
+        assert {r["seeds"]["jitter_seed"] for r in records} == {bench.jitter_seed(0)}
+        default = list(
+            bench.run_dataset(
+                "positive-control",
+                X,
+                y,
+                _replace(settings, position_jitter=0.0, jitter_samples=None),
+                bench.FeatureCache(None),
+                data_seed=data_seed,
+            )
+        )
+        assert all("jitter_seed" not in r["seeds"] for r in default)
+        assert [r["seeds"] for r in default] == [
+            {k: v for k, v in r["seeds"].items() if k != "jitter_seed"} for r in records
+        ]
+
+
+class TestArmBUnderRealism:
+    """Arm B keeps its definition: A's encoding, detection error and jitter, no interactions."""
+
+    def test_b_differs_from_a_in_the_interactions_flag_only(self) -> None:
+        settings = _realistic()
+        a, b = (_rep(settings, arm).config for arm in ("A", "B"))
+        assert a["config"]["interactions"] is True and b["config"]["interactions"] is False
+        assert {**a["config"], "interactions": None} == {**b["config"], "interactions": None}
+        assert {k: v for k, v in a.items() if k != "config"} == {
+            k: v for k, v in b.items() if k != "config"
+        }
+
+    @pytest.mark.parametrize("gamma", [0.0, 0.1])
+    def test_each_feature_of_b_is_a_one_atom_map_of_its_own_input(self, gamma: float) -> None:
+        """
+        The derivation behind the reuse: without interactions the state stays a product and
+        feature ``i`` is a one-atom map of input ``i`` under the same drive, levels and
+        detection error, wherever the atom sits and however it is displaced.
+        """
+        settings = _realistic()
+        b = bench.feature_map(settings, 1.0, gamma, interactions=False).transform(REALISM_X)
+        alone = RydbergFeatureMap(
+            AtomRegister.chain(1, 1.0),
+            GlobalDrivePulseEncoding(1, omega=OMEGA, levels=3, t_ramp=0.0503, n_ramp_segments=2),
+            c6=DEFAULT_C6,
+            gamma=gamma * OMEGA,
+            n_steps=40 if gamma else None,
+            readout_error=AQUILA_ERROR,
+        )
+        by_hand = np.column_stack(
+            [alone.transform(REALISM_X[:, [i]]).numpy()[:, 0] for i in range(4)]
+        )
+        np.testing.assert_allclose(b.numpy(), by_hand, rtol=0, atol=1e-13)
+
+    @pytest.mark.slow
+    def test_a_reused_b_matrix_is_the_one_recomputed_at_another_v(self) -> None:
+        """
+        Under all three options: the B line of the second ``V/Ω``, reused from the first,
+        carries the features of B recomputed at the second ``V/Ω``, while A's differ.
+        """
+        settings = _realistic(
+            arms=("A", "B"), n_trials=0, v_over_omega=(0.5, 2.0), gamma_over_omega=(0.1,)
+        )
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        records = list(
+            bench.run_dataset(
+                "positive-control", X, y, settings, bench.FeatureCache(None), data_seed=data_seed
+            )
+        )
+        (reused,) = [
+            r
+            for r in records
+            if r["arm"] == "B" and r["head"] == "linear" and r["v_over_omega"] == 2.0
+        ]
+        assert reused["reused_from_v_over_omega"] == 0.5
+        fold = _fold_by_hand(X, y, settings, 0)
+        stacked = np.concatenate(
+            [fold.train_inputs, fold.inputs[fold.val_idx], fold.inputs[fold.test_idx]]
+        )
+        first = _rep(settings, "B", 0.5).compute(stacked)
+        again = _rep(settings, "B", 2.0).compute(stacked)
+        np.testing.assert_array_equal(again, first)
+        test = again[-fold.test_idx.size :]
+        expected = separation_measures(test, y[fold.test_idx]).to_dict()
+        assert reused["separation"]["test"] == pytest.approx(expected, rel=1e-9, abs=1e-12)
+        assert reused["feature_map"] == _rep(settings, "B", 2.0).config
+        a_first = _rep(settings, "A", 0.5).compute(stacked)
+        a_again = _rep(settings, "A", 2.0).compute(stacked)
+        assert np.abs(a_again - a_first).max() > 1e-3
+
+
+class TestDevicePreset:
+    def test_the_preset_sets_every_documented_value(self) -> None:
+        preset = bench.device_preset("aquila", OMEGA)
+        assert preset == {
+            "readout_error": (0.01, 0.08),
+            "position_jitter": 0.2,
+            "encoding": "global-drive",
+            "t_ramp": 0.0503,
+            "n_ramp_segments": bench.AQUILA_RAMP_SEGMENTS,
+            "shots": 100,
+        }
+        # The edge at the slew bound, rounded up to 1e-4 µs: Ω/250 = 0.050265 µs.
+        assert OMEGA / 0.0503 <= 250.0 < OMEGA / 0.0502
+        assert AQUILA_LIMITS.omega_slew_max == 250.0
+
+    @pytest.mark.parametrize(
+        ("omega", "t_ramp"), [(4.0 * math.pi, 0.0503), (10.0, 0.04), (15.8, 0.0632), (1.0, 0.004)]
+    )
+    def test_the_edge_is_the_shortest_multiple_of_the_resolution_within_the_slew(
+        self, omega: float, t_ramp: float
+    ) -> None:
+        """``k / 10⁴`` µs with the smallest ``k`` for which ``Ω / t_ramp <= 250``."""
+        found = bench.ramp_at_slew_bound(omega, 250.0)
+        assert found == t_ramp
+        assert omega / found <= 250.0
+        assert omega / (found - 1e-4) > 250.0
+
+    def test_its_maps_report_no_violation(self) -> None:
+        settings = _replace(
+            QUICK,
+            **bench.device_preset("aquila", OMEGA),
+            device="aquila",
+            levels=8,
+            jitter_samples=2,
+        )
+        reps = [r for r in bench.representations(settings) if r.arm in ("A", "B")]
+        assert len(reps) == 2
+        for rep in reps:
+            assert rep.config["device_violations"] == []
+            fmap = bench.feature_map(settings, 1.0, 0.1, interactions=rep.arm == "A")
+            assert fmap.encoding.device_violations(AQUILA_LIMITS) == []
+            assert fmap.encoding.duration == pytest.approx(0.3003, abs=1e-15)
+
+    @pytest.mark.parametrize(
+        ("changes", "named"),
+        [
+            ({"omega": 16.0}, "omega_max: Ω = 16 rad/µs exceeds 15.8 rad/µs"),
+            ({"omega_t": 52.0}, "duration_max: T + t_ramp = 4.18833 µs exceeds 4 µs"),
+        ],
+    )
+    def test_a_pulse_that_violates_is_refused_with_the_bound_named(
+        self, changes: dict[str, float], named: str
+    ) -> None:
+        omega = changes.get("omega", OMEGA)
+        with pytest.raises(ValueError) as caught:
+            _replace(
+                QUICK,
+                **bench.device_preset("aquila", omega),
+                device="aquila",
+                levels=8,
+                jitter_samples=2,
+                **changes,
+            )
+        message = str(caught.value)
+        assert message.startswith("device='aquila' refuses the pulse of every grid point")
+        assert message.endswith(named + ".")
+
+    @pytest.mark.parametrize(
+        ("changes", "match"),
+        [
+            ({"levels": None}, "levels is required with encoding='global-drive'"),
+            ({"jitter_samples": None}, "jitter_samples is required with position_jitter > 0"),
+            ({"shots": 1000}, "device='aquila' sets shots=100; got shots=1000."),
+            (
+                {"t_ramp": 0.06},
+                re.escape("device='aquila' sets t_ramp=0.0503; got t_ramp=0.06."),
+            ),
+            (
+                {"device": "rubidium"},
+                "device must be None or one of \\['aquila'\\]; got 'rubidium'",
+            ),
+        ],
+    )
+    def test_the_preset_still_requires_levels_and_k_and_keeps_its_values(
+        self, changes: dict[str, Any], match: str
+    ) -> None:
+        values = {
+            **bench.device_preset("aquila", OMEGA),
+            "device": "aquila",
+            "levels": 8,
+            "jitter_samples": 2,
+        }
+        with pytest.raises(ValueError, match=match):
+            _replace(QUICK, **{**values, **changes})
+
+    def test_the_command_line_fills_in_the_preset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def mock_run(datasets: Any, settings: Any, out: Any, *, cache_dir: Any = None) -> list:
+            captured["settings"] = settings
+            return []
+
+        monkeypatch.setattr(bench, "run", mock_run)
+        out = str(tmp_path / "o.jsonl")
+        bench.main(["--device", "aquila", "--levels", "8", "--jitter-samples", "4", "--out", out])
+        expected = bench.Settings(
+            device="aquila", levels=8, jitter_samples=4, **bench.device_preset("aquila", OMEGA)
+        )
+        assert captured["settings"] == expected
+        bench.main(
+            ["--quick", "--device", "aquila", "--levels", "continuous", "--jitter-samples", "2"]
+            + ["--out", out]
+        )
+        assert captured["settings"] == _replace(
+            QUICK,
+            device="aquila",
+            levels="continuous",
+            jitter_samples=2,
+            **bench.device_preset("aquila", OMEGA),
+        )
+
+    @pytest.mark.parametrize(
+        "option",
+        [
+            ["--shots", "100"],
+            ["--readout-error", "0.01", "0.08"],
+            ["--position-jitter", "0.2"],
+            ["--encoding", "global-drive"],
+            ["--t-ramp", "0.06"],
+            ["--n-ramp-segments", "8"],
+        ],
+    )
+    def test_an_option_the_preset_sets_is_refused_beside_it(
+        self, option: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = ["--device", "aquila", "--levels", "8", "--jitter-samples", "4", *option]
+        with pytest.raises(SystemExit):
+            bench.main([*argv, "--out", str(tmp_path / "o.jsonl")])
+        error = capsys.readouterr().err
+        assert f"argument {option[0]}: --device aquila sets it to" in error
+        assert not (tmp_path / "o.jsonl").exists()
+
+
+class TestRealismSettings:
+    """Each option is validated as the existing fields are: the field and the value named."""
+
+    DRIVE: ClassVar[dict[str, Any]] = {"encoding": "global-drive", "levels": 4, "t_ramp": 0.0}
+
+    @pytest.mark.parametrize(
+        ("changes", "match"),
+        [
+            ({"readout_error": (0.1,)}, "readout_error must be None or a pair"),
+            ({"readout_error": (0.1, 1.5)}, "readout_error: p10 must be a number in \\[0, 1\\]"),
+            ({"readout_error": (math.nan, 0.1)}, "readout_error: p01 must be a number"),
+            ({"position_jitter": -0.1}, "position_jitter must be a finite number >= 0"),
+            ({"position_jitter": math.inf}, "position_jitter must be a finite number >= 0"),
+            ({"position_jitter": True}, "position_jitter must be a finite number >= 0"),
+            ({"position_jitter": 0.2}, "jitter_samples is required with position_jitter > 0"),
+            ({"jitter_samples": 4}, "jitter_samples is the number of displaced registers"),
+            (
+                {"position_jitter": 0.2, "jitter_samples": 0},
+                "jitter_samples must be an integer >= 1; got 0",
+            ),
+            (
+                {"position_jitter": 0.2, "jitter_samples": 2.0},
+                "jitter_samples must be an integer >= 1; got 2.0",
+            ),
+            ({"encoding": "trapezoid"}, "encoding must be one of \\['square', 'global-drive'\\]"),
+            ({"levels": 4}, "levels is a setting of the global-drive encoding; got levels=4"),
+            ({"t_ramp": 0.05}, "t_ramp is a setting of the global-drive encoding"),
+            ({"n_ramp_segments": 4}, "n_ramp_segments is a setting of the global-drive encoding"),
+            ({**DRIVE, "levels": None}, "levels is required with encoding='global-drive'"),
+            ({**DRIVE, "levels": 1}, "levels must be an integer >= 2 or 'continuous'; got 1"),
+            ({**DRIVE, "levels": "none"}, "levels must be an integer >= 2 or 'continuous'"),
+            ({**DRIVE, "t_ramp": None}, "t_ramp is required with encoding='global-drive'"),
+            ({**DRIVE, "t_ramp": -0.01}, "t_ramp must be a finite number in \\[0, T\\] µs"),
+            ({**DRIVE, "t_ramp": 0.26}, "T = omega_t / omega = 0.25, .*got 0.26"),
+            ({**DRIVE, "t_ramp": 0.05}, "n_ramp_segments is required with t_ramp > 0"),
+            (
+                {**DRIVE, "n_ramp_segments": 4},
+                "n_ramp_segments is used only with t_ramp > 0; got n_ramp_segments=4",
+            ),
+            (
+                {**DRIVE, "t_ramp": 0.05, "n_ramp_segments": 0},
+                "n_ramp_segments must be an integer >= 1; got 0",
+            ),
+        ],
+    )
+    def test_invalid_options(self, changes: dict[str, Any], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            _replace(QUICK, **changes)
+
+    def test_valid_options_and_their_record(self) -> None:
+        settings = _realistic(readout_error=[0.0, 0.0], levels="continuous")
+        assert settings.readout_error == (0.0, 0.0)
+        recorded = json.loads(json.dumps(settings.as_dict()))
+        assert {k: recorded[k] for k in self.REALISM_DEFAULTS} == {
+            "readout_error": [0.0, 0.0],
+            "position_jitter": 0.2,
+            "jitter_samples": 2,
+            "encoding": "global-drive",
+            "levels": "continuous",
+            "t_ramp": 0.0503,
+            "n_ramp_segments": 2,
+            "device": None,
+        }
+
+    #: The fields of #775 and their defaults: a run without the options records these.
+    REALISM_DEFAULTS: ClassVar[dict[str, Any]] = {
+        "readout_error": None,
+        "position_jitter": 0.0,
+        "jitter_samples": None,
+        "encoding": "square",
+        "levels": None,
+        "t_ramp": None,
+        "n_ramp_segments": None,
+        "device": None,
+    }
+
+    def test_the_command_line_passes_every_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def mock_run(datasets: Any, settings: Any, out: Any, *, cache_dir: Any = None) -> list:
+            captured["settings"] = settings
+            return []
+
+        monkeypatch.setattr(bench, "run", mock_run)
+        argv = [
+            "--readout-error", "0.02", "0.05",
+            "--position-jitter", "0.3",
+            "--jitter-samples", "6",
+            "--encoding", "global-drive",
+            "--levels", "5",
+            "--t-ramp", "0.06",
+            "--n-ramp-segments", "8",
+            "--out", str(tmp_path / "o.jsonl"),
+        ]  # fmt: skip
+        bench.main(argv)
+        assert captured["settings"] == bench.Settings(
+            readout_error=(0.02, 0.05),
+            position_jitter=0.3,
+            jitter_samples=6,
+            encoding="global-drive",
+            levels=5,
+            t_ramp=0.06,
+            n_ramp_segments=8,
+        )
+        bench.main(["--quick", *argv])
+        assert captured["settings"] == _replace(
+            QUICK,
+            readout_error=(0.02, 0.05),
+            position_jitter=0.3,
+            jitter_samples=6,
+            encoding="global-drive",
+            levels=5,
+            t_ramp=0.06,
+            n_ramp_segments=8,
+        )
+
+    def test_levels_on_the_command_line_and_every_new_option_has_help(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        options = (
+            "--readout-error",
+            "--position-jitter",
+            "--jitter-samples",
+            "--encoding",
+            "--levels",
+            "--t-ramp",
+            "--n-ramp-segments",
+            "--device",
+        )
+        quick = next(a for a in bench._parser()._actions if "--quick" in a.option_strings)
+        for option in options:
+            assert option in str(quick.help)
+            (action,) = [a for a in bench._parser()._actions if option in a.option_strings]
+            assert action.help
+        parser = bench._parser()
+        assert parser.parse_args(["--levels", "continuous"]).levels == "continuous"
+        assert parser.parse_args(["--levels", "8"]).levels == 8
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--levels", "none"])
+        assert "must be an integer >= 2 or 'continuous'; got 'none'" in capsys.readouterr().err
+
+
+#: The inputs the features of :class:`TestDefaultRunIsUnchanged` were recorded on.
+PIN_X = np.array(
+    [
+        [-2.0, -0.5, 0.3, 2.9],
+        [0.1, 1.2, -3.0, 0.0],
+        [1.5, 1.5, -1.5, -1.5],
+        [0.0, 0.0, 0.0, 0.0],
+        [3.0, -3.0, 2.0, -1.0],
+    ]
+)
+
+
+class TestDefaultRunIsUnchanged:
+    """
+    #775: without any device option a run writes the cache keys, features and lines of the
+    runner before it.  Every value below was recorded on 26ba88f (the head of #779, which #775
+    is built on) with the unmodified script, Python 3.14 and the locked dependencies; the
+    scores of the seeded ``--quick`` run are pinned by :class:`TestSeededRunsAreUnchanged`.
+    """
+
+    #: ``(number, SHA-256)`` of the newline-joined ``cache_key("0" * 64, config, KEY_ENV,
+    #: "c" * 64)`` of every representation with a config, in the order of
+    #: ``representations``: ``--quick``'s A, B and D, the default grid's 56 maps and D, and
+    #: ``--quick`` with ``shots=16``.
+    KEYS: ClassVar[dict[str, tuple[int, str]]] = {
+        "quick": (3, "898aa236823b30621e6a3d81dc6d09eed2c99482983741c9f510696c24d19072"),
+        "default": (57, "2df2ebb873890af1f11b1622845f983034ad6671c04dc773ba0c79816552e8d5"),
+        "quick-shots": (3, "997a81c4bf886e0faa0812b46af46a5931fa6da6f0abc22e585d43b9c38d88de"),
+    }
+    #: ``Representation.compute(PIN_X)`` of ``--quick``'s arms A, B and D, as ``repr``.
+    FEATURES: ClassVar[dict[str, list[list[float]]]] = {
+        "A": [[0.7823144645181488, 0.7126316586422141, 0.735503279092411, 0.2698203916289493], [0.6713341430207072, 0.6530310727032648, 0.6059405649435567, 0.7302477536532479], [0.3366214315097612, 0.5825652620176092, 0.6621254784015489, 0.807948335704195], [0.7360294093617219, 0.7511591130154893, 0.7511591130154889, 0.7360294093617211], [0.3079979422773812, 0.719182013798775, 0.621626873641162, 0.8333868049334938]],
+        "B": [[0.9241697913267485, 0.6318029034189906, 0.34138953871832695, 0.037038639525952294], [0.41150335436299595, 0.12546183076898657, 0.9561161390676821, 0.4482419014409549], [0.09029116224253067, 0.09029116224253031, 0.8749974506439965, 0.8749974506439943], [0.4482419014409601, 0.44824190144096043, 0.448241901440961, 0.4482419014409613], [0.03612885632138398, 0.956116139067614, 0.057389916555876976, 0.7807997942635748]],
+        "D": [[-0.025561936667844065, -0.33979846179866224, 0.23722236056501622, 0.39196538403145287], [-0.08532456230171642, 0.5838278875603452, 0.2631775270714224, 0.6121502776216614], [0.1262263234727608, 0.06057662552962867, -0.1507656484074572, 0.00460068980629913], [-0.17365210205867593, -0.5612156967161119, 0.09041265840228518, -0.5851968409115809], [-0.10055419121184817, 0.02046605633735976, 0.22777767127756682, -0.2215988076815098]],
+    }  # fmt: skip
+    #: ``json.dumps(QUICK.as_dict(), sort_keys=True)``: a ``--quick`` line's ``settings``.
+    QUICK_SETTINGS: ClassVar[dict[str, Any]] = json.loads(
+        '{"arms": ["A", "B", "C", "D"], "batch_size": 32, "c6": 5420441.132650757, '
+        '"circuit_layers": 2, "drop_duplicates": false, "gamma_over_omega": [0.1], '
+        '"geometries": ["chain"], "grid_cols": null, "hidden": 4, "inner_folds": 2, "loss": '
+        '"bce", "lr": 0.01, "max_epochs": 6, "max_folds": 1, "max_separation_rows": 2000, '
+        '"n_atoms": 4, "n_samples": 160, "n_splits": 4, "n_steps": 40, "n_trials": 2, "omega": '
+        '12.566370614359172, "omega_t": 3.141592653589793, "patience": null, "random_state": 0, '
+        '"search_space": {"lr": [0.01, 0.05]}, "separation_seed": 0, "shots": null, '
+        '"standardise": true, "v_over_omega": [1.0], "validation_folds": 4}'
+    )
+
+    @pytest.mark.parametrize("name", ["quick", "default", "quick-shots"])
+    def test_the_cache_keys_are_those_of_main(self, name: str) -> None:
+        settings = {
+            "quick": QUICK,
+            "default": bench.Settings(),
+            "quick-shots": _replace(QUICK, shots=16),
+        }[name]
+        keys = [
+            bench.cache_key("0" * 64, r.config, TestGeometry.KEY_ENV, "c" * 64)
+            for r in bench.representations(settings)
+            if r.config is not None
+        ]
+        assert (len(keys), hashlib.sha256("\n".join(keys).encode()).hexdigest()) == self.KEYS[name]
+
+    @pytest.mark.parametrize(("arm", "atol"), [("A", 1e-13), ("B", 1e-13), ("D", 1e-6)])
+    def test_the_features_are_those_of_main(self, arm: str, atol: float) -> None:
+        """A and B in float64 to rounding; arm D's circuit holds its angles in float32."""
+        np.testing.assert_allclose(
+            _rep(QUICK, arm).compute(PIN_X), self.FEATURES[arm], rtol=0, atol=atol
+        )
+
+    def test_a_line_gains_only_the_new_settings_at_their_defaults(self, quick: Any) -> None:
+        """
+        Every field of a ``--quick`` line is there as before (``FIELDS``), its seeds and
+        configs too (:class:`TestQuick`); ``settings`` gains the fields of #775, at their
+        defaults, and keeps every other value.
+        """
+        defaults = TestRealismSettings.REALISM_DEFAULTS
+        for record in quick.lines:
+            assert set(record) == FIELDS
+            settings = record["settings"]
+            assert {k: v for k, v in settings.items() if k not in defaults} == self.QUICK_SETTINGS
+            assert {k: settings[k] for k in defaults} == defaults
+            assert "jitter_seed" not in record["seeds"]
+            assert "device_violations" not in (record["feature_map"] or {})
+
+
+class TestSummaryRealism:
+    """
+    #775: a row of :func:`summarise` must not pool lines of different device models, as #763
+    refuses lines measured differently.
+    """
+
+    ADVICE = (
+        "Its mean and spread would pool lines whose features come from different models; "
+        "summarise each run's lines on their own."
+    )
+    #: The map config of an ideal line (``get_config()`` keys of #775 at their defaults).
+    IDEAL: ClassVar[dict[str, Any]] = {
+        "readout_error": None,
+        "position_jitter": 0.0,
+        "jitter_samples": None,
+        "jitter_seed": None,
+        "encoding": {"n_features": 4, "omega": OMEGA, "t": 0.25, "delta_max": 21.77},
+    }
+
+    def _run(self, **config: Any) -> list[dict[str, Any]]:
+        """Two folds of A and B at ``V/Ω = 1`` whose map config is ``IDEAL`` with ``config``."""
+        feature_map = {"feature_map": "RydbergFeatureMap", "config": {**self.IDEAL, **config}}
+        lines = [
+            TestSummary._line(v, arm, 1.0, 1.0, feature_map=feature_map)
+            for arm, v in (("A", 1.0), ("B", 1.0))
+            for _ in range(2)
+        ]
+        return lines + [TestSummary._line(None, "C", 0.0, 1.0, feature_map=None)] * 2
+
+    def _refusal(self, records: list[dict[str, Any]]) -> str:
+        with pytest.raises(ValueError) as caught:
+            bench.summarise(records)
+        return str(caught.value)
+
+    def test_a_detection_error_is_refused_beside_lines_without_it(self) -> None:
+        ideal, noisy = self._run(), self._run(readout_error=[0.01, 0.08])
+        assert self._refusal(ideal + noisy) == (
+            "dataset 'positive-control' has lines of 2 device models (readout_error, "
+            "position_jitter, jitter_samples, encoding) in row A/linear chain V/Ω=1 γ/Ω=0.1: "
+            "readout_error none, position_jitter 0, jitter_samples none, encoding square (2 "
+            "lines); readout_error [0.01, 0.08], position_jitter 0, jitter_samples none, "
+            "encoding square (2 lines) (rows with more than one: 2 of 3).  " + self.ADVICE
+        )
+        assert "readout_error [0.01, 0.08], position_jitter 0" in self._refusal(
+            noisy + self._run(readout_error=[0.02, 0.08])
+        )
+
+    def test_jitter_is_refused_and_so_is_another_number_of_registers(self) -> None:
+        jittered = self._run(position_jitter=0.2, jitter_samples=8, jitter_seed=5)
+        assert (
+            "readout_error none, position_jitter 0, jitter_samples none, encoding square (2 "
+            "lines); readout_error none, position_jitter 0.2, jitter_samples 8, encoding "
+            "square (2 lines) (rows with more than one: 2 of 3)."
+        ) in self._refusal(self._run() + jittered)
+        assert "position_jitter 0.2, jitter_samples 16, encoding square (2 lines)" in (
+            self._refusal(jittered + self._run(position_jitter=0.2, jitter_samples=16))
+        )
+        # Another seed of one model (another --seed) is the same model, as for the data.
+        reseeded = self._run(position_jitter=0.2, jitter_samples=8, jitter_seed=6)
+        assert len(bench.summarise(jittered + reseeded).splitlines()) == 4
+
+    def test_another_encoding_is_refused(self) -> None:
+        drive = {"n_features": 4, "omega": OMEGA, "t": 0.25, "delta_local": 21.77}
+        ramped = self._run(
+            encoding={**drive, "levels": 8, "t_ramp": 0.0503, "n_ramp_segments": 32}
+        )
+        assert (
+            "encoding square (2 lines); readout_error none, position_jitter 0, jitter_samples "
+            "none, encoding global-drive levels 8 t_ramp 0.0503 n_ramp_segments 32 (2 lines)"
+        ) in self._refusal(self._run() + ramped)
+        continuous = self._run(
+            encoding={**drive, "levels": None, "t_ramp": 0.0, "n_ramp_segments": None}
+        )
+        assert (
+            "encoding global-drive levels 8 t_ramp 0.0503 n_ramp_segments 32 (2 lines); "
+            "readout_error none, position_jitter 0, jitter_samples none, encoding global-drive "
+            "levels continuous t_ramp 0 n_ramp_segments none (2 lines)"
+        ) in self._refusal(ramped + continuous)
+
+    def test_lines_from_before_the_options_are_the_ideal_model(self) -> None:
+        """
+        A line without the keys was computed without the options (they did not exist), so it
+        joins an ideal line of today and prints what the lines print without any config;
+        beside a line with the detection error it is refused as the ideal one would be.
+        """
+        old = [
+            {**r, "feature_map": {"config": {"encoding": self.IDEAL["encoding"]}}}
+            if r["feature_map"] is not None
+            else r
+            for r in self._run()
+        ]
+        bare = [{k: v for k, v in r.items() if k != "feature_map"} for r in self._run()]
+        assert bench.summarise(old + self._run()) == bench.summarise(bare + bare)
+        assert "readout_error none, position_jitter 0, jitter_samples none, encoding square" in (
+            self._refusal(old + self._run(readout_error=[0.01, 0.08]))
+        )
+        assert bench.feature_realism(bare[0]) == (None, 0.0, None, None)
+
+    def test_arm_d_records_its_detection_error(self) -> None:
+        circuit = {"feature_map": "QuantumEncodingLayer", "config": {"n_qubits": 4}}
+        noisy = {**circuit, "config": {"n_qubits": 4, "readout_error": [0.01, 0.08]}}
+        lines = [TestSummary._line(None, "D", 1.0, 1.0, feature_map=circuit)] * 2
+        read = [TestSummary._line(None, "D", 1.0, 1.0, feature_map=noisy)] * 2
+        assert (
+            "in row D/linear: readout_error none, position_jitter 0, jitter_samples none, "
+            "encoding none (2 lines); readout_error [0.01, 0.08], position_jitter 0, "
+            "jitter_samples none, encoding none (2 lines) (rows with more than one: 1 of 1)."
+        ) in self._refusal(lines + read)
+
+    def test_one_run_of_the_preset_with_every_arm_summarises(self) -> None:
+        """
+        The representations of a preset run give every A, B and D line one model, and C none:
+        the check is per row, and one run never fails it.
+        """
+        settings = _replace(
+            QUICK,
+            **bench.device_preset("aquila", OMEGA),
+            device="aquila",
+            levels=8,
+            jitter_samples=2,
+        )
+        models = {
+            r.arm: bench.feature_realism({"feature_map": r.config})
+            for r in bench.representations(settings)
+        }
+        ramp = ("global-drive", 8, 0.0503, bench.AQUILA_RAMP_SEGMENTS)
+        assert models == {
+            "A": ((0.01, 0.08), 0.2, 2, ramp),
+            "B": ((0.01, 0.08), 0.2, 2, ramp),
+            "C": (None, 0.0, None, None),
+            "D": ((0.01, 0.08), 0.0, None, None),
+            "D-hybrid": (None, 0.0, None, None),
+        }
