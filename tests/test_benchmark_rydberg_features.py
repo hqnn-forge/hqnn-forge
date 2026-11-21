@@ -6982,7 +6982,20 @@ class TestDevicePreset:
         assert AQUILA_LIMITS.omega_slew_max == 250.0
 
     @pytest.mark.parametrize(
-        ("omega", "t_ramp"), [(4.0 * math.pi, 0.0503), (10.0, 0.04), (15.8, 0.0632), (1.0, 0.004)]
+        ("omega", "t_ramp"),
+        [
+            (4.0 * math.pi, 0.0503),
+            (10.0, 0.04),
+            (15.8, 0.0632),
+            (1.0, 0.004),
+            # Ω/250 = 0.050030 µs, below the middle of its step: the nearest would be 0.0500,
+            # a slope of 250.15 rad/µs².
+            (12.5075, 0.0501),
+            # 10⁴ Ω / 250 = 173 exactly, but Ω / 0.0173 rounds to 250.00000000000003.
+            (4.325, 0.0174),
+            # 10⁴ Ω / 250 rounds to 122.00000000000001, and Ω / 0.0122 to 250 exactly.
+            (math.nextafter(3.05, 4.0), 0.0122),
+        ],
     )
     def test_the_edge_is_the_shortest_multiple_of_the_resolution_within_the_slew(
         self, omega: float, t_ramp: float
@@ -6990,8 +7003,13 @@ class TestDevicePreset:
         """``k / 10⁴`` µs with the smallest ``k`` for which ``Ω / t_ramp <= 250``."""
         found = bench.ramp_at_slew_bound(omega, 250.0)
         assert found == t_ramp
-        assert omega / found <= 250.0
-        assert omega / (found - 1e-4) > 250.0
+        k = round(found * 1e4)
+        assert omega / (k / 1e4) <= 250.0
+        assert omega / ((k - 1) / 1e4) > 250.0
+        encoding = GlobalDrivePulseEncoding(
+            1, omega=omega, levels=None, t_ramp=found, n_ramp_segments=1
+        )
+        assert "omega_slew_max" not in " ".join(encoding.device_violations(AQUILA_LIMITS))
 
     def test_its_maps_report_no_violation(self) -> None:
         settings = _replace(

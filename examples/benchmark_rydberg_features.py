@@ -869,7 +869,11 @@ def ramp_at_slew_bound(omega: float, slew: float) -> float:
     ``t_ramp = k / 10⁴`` with the smallest integer ``k`` such that
     ``Ω / t_ramp <= slew``: ``k = ceil(10⁴ Ω / slew)``, raised by one where
     the division, rounded in ``float64``, would still put ``Ω / t_ramp``
-    above ``slew``.  Rounding up, never to the nearest, so that the edge
+    above ``slew`` (``Ω = 4.325``: ``Ω / 0.0173`` rounds to just above 250),
+    and lowered by one where the product rounded up past a whole ``k``
+    (``Ω = 3.05 + 1 ulp``: ``10⁴ Ω / 250`` rounds to ``122.00000000000001``,
+    and ``Ω / 0.0122`` is ``250``), with the comparison ``device_violations``
+    makes.  Rounding up, never to the nearest, so that the edge
     does not break the bound it is set to.  At the reference
     ``Ω = 4π`` rad/µs and Aquila's ``250`` rad/µs² this is ``0.0503`` µs
     (``Ω/250 = 0.050265`` µs), a slope of ``249.83`` rad/µs².
@@ -884,6 +888,8 @@ def ramp_at_slew_bound(omega: float, slew: float) -> float:
     k = math.ceil(RAMP_STEPS_PER_US * omega / slew)
     while omega / (k / RAMP_STEPS_PER_US) > slew:
         k += 1
+    while k > 1 and omega / ((k - 1) / RAMP_STEPS_PER_US) <= slew:
+        k -= 1
     return k / RAMP_STEPS_PER_US
 
 
