@@ -115,6 +115,7 @@ __all__: list[str] = [
     "MODELS",
     "TUNABLE",
     "BenchmarkResult",
+    "FitPrediction",
     "FitScore",
     "FoldResult",
     "HybridBuilder",
@@ -122,7 +123,9 @@ __all__: list[str] = [
     "Tuning",
     "default_hybrid",
     "fingerprint",
+    "fit_and_predict",
     "run_benchmark",
+    "sample_configs",
     "write_csv",
 ]
 
@@ -377,7 +380,37 @@ class FitScore(NamedTuple):
     ece: float
 
 
-def _fit_and_score(
+class FitPrediction(NamedTuple):
+    """
+    One trained model's probabilities for its test rows, labelled at its
+    validation threshold: what :func:`fit_and_predict` returns.
+
+    Attributes
+    ----------
+    mcc:
+        Matthews correlation coefficient of the test rows at ``threshold``.
+    threshold:
+        The decision threshold, a probability in ``[0, 1]``.
+    seconds:
+        Wall-clock seconds of the training, the float32 cast of its
+        training and validation rows included.
+    epochs:
+        Epochs trained (``TrainingHistory.n_epochs``).
+    probability:
+        ``P(y = 1)`` of each test row, float32, in the order of the rows.
+    finite:
+        Whether every entry of ``probability`` is finite.
+    """
+
+    mcc: float
+    threshold: float
+    seconds: float
+    epochs: int
+    probability: torch.Tensor
+    finite: bool
+
+
+def fit_and_predict(
     model: BinaryClassifierBase,
     loss: LossBuilder,
     X_train: npt.NDArray[np.float64],
@@ -392,8 +425,74 @@ def _fit_and_score(
     batch_size: int,
     patience: int | None,
     batch_seed: int,
-) -> FitScore:
-    """Train, then score the test rows at the validation threshold."""
+) -> FitPrediction:
+    """
+    Train ``model``, then label its test rows at the validation threshold.
+
+    The training and threshold rule of :func:`run_benchmark`, shared by
+    every model it trains (tuning trials included) and by
+    ``examples/benchmark_rydberg_features.py``, so that both score a model
+    the same way.  Labels are 0/1, 1 the positive (rare) class; row ``r``
+    of ``X_*`` is the sample of label ``y_*[r]``.
+
+    Training
+    --------
+    :func:`train_model` with a fresh ``loss()``, Adam at learning rate
+    ``lr`` over every parameter of ``model``, ``max_epochs``,
+    ``batch_size`` and ``patience`` as given, MCC on ``(X_val, y_val)`` as
+    the monitored score, and the batch order of a
+    ``torch.Generator().manual_seed(batch_seed)``.  The features and labels
+    are cast to float32, the dtype of the models.  ``seconds`` is the
+    wall-clock time of that cast and of the call, in seconds; the test
+    rows are predicted outside it.
+
+    Threshold and labels
+    --------------------
+    The threshold ``t`` is ``TrainingHistory.best_threshold``: the one that
+    maximises MCC on the validation rows at the best epoch.  It is 0.5 if
+    the history records none, which happens when no epoch has a finite
+    validation MCC (validation probabilities that are not finite).  With
+    ``p_r = P(y = 1 | x_r)`` the model's
+    probability for test row ``r`` (``predict_proba``), the predicted label
+    is
+
+    ::
+
+        ŷ_r = 1  if p_r ≥ t,  else 0
+
+    so a probability equal to the threshold counts as positive, and ``mcc``
+    is :func:`~hqnn_forge.evaluation.matthews_corrcoef` of ``y_test`` and
+    ``ŷ``: ``(TP·TN − FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN))``.
+
+    Non-finite probabilities
+    ------------------------
+    A diverged model returns NaN probabilities.  A comparison with NaN is
+    false, so every such row is labelled 0 and the MCC is still defined (0
+    when all rows are labelled 0); the run goes on.  ``finite`` is false
+    then, and a metric of the probabilities themselves (a Brier score, an
+    ECE, a PR-AUC) is to be reported as NaN rather than computed.
+
+    Parameters
+    ----------
+    model:
+        A fresh, untrained binary classifier.  It is trained in place.
+    loss:
+        Called once for the loss, e.g. :class:`FocalLoss`.
+    X_train, y_train:
+        The rows the model is trained on (synthetic ones included).
+    X_val, y_val:
+        The rows of early stopping and of the threshold.
+    X_test, y_test:
+        The rows that are scored.
+    lr, max_epochs, batch_size, patience:
+        Adam's learning rate and the :func:`train_model` settings.
+    batch_seed:
+        Seed of the batch order.
+
+    Returns
+    -------
+    FitPrediction
+    """
     as_tensor = torch.from_numpy
     start = time.perf_counter()
     history = train_model(
@@ -414,17 +513,64 @@ def _fit_and_score(
     threshold = history.best_threshold if history.best_threshold is not None else 0.5
     prob = model.predict_proba(as_tensor(X_test.astype(np.float32)))
     mcc = matthews_corrcoef(y_test, (prob >= threshold).long())
-    # A diverged model's NaN probabilities still score an MCC (every comparison
-    # is False, so all negative); they have no calibration, and must not end
-    # the run.
-    finite = bool(torch.isfinite(prob).all())
-    return FitScore(
+    return FitPrediction(
         mcc=float(mcc),
         threshold=float(threshold),
         seconds=seconds,
         epochs=history.n_epochs,
-        brier=brier_score(y_test, prob) if finite else math.nan,
-        ece=expected_calibration_error(y_test, prob, ECE_BINS, "quantile") if finite else math.nan,
+        probability=prob,
+        finite=bool(torch.isfinite(prob).all()),
+    )
+
+
+def _fit_and_score(
+    model: BinaryClassifierBase,
+    loss: LossBuilder,
+    X_train: npt.NDArray[np.float64],
+    y_train: npt.NDArray[np.int64],
+    X_val: npt.NDArray[np.float64],
+    y_val: npt.NDArray[np.int64],
+    X_test: npt.NDArray[np.float64],
+    y_test: npt.NDArray[np.int64],
+    *,
+    lr: float,
+    max_epochs: int,
+    batch_size: int,
+    patience: int | None,
+    batch_seed: int,
+) -> FitScore:
+    """
+    :func:`fit_and_predict`, with the calibration of the test probabilities.
+
+    Brier score and the ECE over :data:`ECE_BINS` quantile bins; both NaN
+    for probabilities that are not finite, which have no calibration and
+    must not end the run.
+    """
+    fit = fit_and_predict(
+        model,
+        loss,
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        X_test,
+        y_test,
+        lr=lr,
+        max_epochs=max_epochs,
+        batch_size=batch_size,
+        patience=patience,
+        batch_seed=batch_seed,
+    )
+    prob = fit.probability
+    return FitScore(
+        mcc=fit.mcc,
+        threshold=fit.threshold,
+        seconds=fit.seconds,
+        epochs=fit.epochs,
+        brier=brier_score(y_test, prob) if fit.finite else math.nan,
+        ece=expected_calibration_error(y_test, prob, ECE_BINS, "quantile")
+        if fit.finite
+        else math.nan,
     )
 
 
@@ -492,10 +638,57 @@ class Tuning:
         }
 
 
-def _sample_configs(
+def sample_configs(
     space: Mapping[str, Sequence[Any]], n_trials: int, seed: int
 ) -> list[dict[str, Any]]:
-    """``n_trials`` distinct configurations from the grid of ``space`` (all if fewer)."""
+    """
+    ``n_trials`` distinct configurations from the grid of ``space``, all of it if it has no more.
+
+    The configurations :class:`Tuning` tries for one model in one outer
+    fold, and those every arm of a fold of
+    ``examples/benchmark_rydberg_features.py`` tries.
+
+    Order
+    -----
+    The grid is the Cartesian product of the values of ``space``, keys in
+    sorted order, the last key varying fastest (:func:`itertools.product`),
+    each value list in its given order; entry ``g`` of it is the dict of
+    those keys and values.  With ``G`` entries:
+
+    * ``G <= n_trials``: the whole grid, in that order;
+    * otherwise the entries at the indices
+      ``np.random.default_rng(seed).choice(G, size=n_trials, replace=False)``,
+      a draw without replacement, returned in increasing index order, so in
+      grid order as well.
+
+    The same ``space``, ``n_trials`` and ``seed`` give the same list; the
+    order in which ``space`` lists its keys does not matter.
+
+    Parameters
+    ----------
+    space:
+        Setting name → the values to draw from, each sequence non-empty.
+    n_trials:
+        Configurations to draw, at least 1.
+    seed:
+        Seed of the draw.
+
+    Returns
+    -------
+    list of dict
+        ``min(n_trials, G)`` distinct configurations, each with every key of
+        ``space``.
+
+    Raises
+    ------
+    ValueError
+        If ``n_trials < 1`` or a setting has no values.
+    """
+    if n_trials < 1:
+        raise ValueError(f"n_trials must be >= 1; got {n_trials}.")
+    empty = sorted(name for name, values in space.items() if len(values) == 0)
+    if empty:
+        raise ValueError(f"no values to draw from for {empty}.")
     keys = sorted(space)
     grid = [dict(zip(keys, values)) for values in itertools.product(*(space[k] for k in keys))]
     if len(grid) <= n_trials:
@@ -575,7 +768,7 @@ def _tune(
     """The configuration with the best mean inner-fold MCC (the first, on ties)."""
     inner = stratified_kfold(y[train_part], tuning.inner_folds, random_state=seed)
     best: tuple[float, dict[str, Any]] | None = None
-    for config in _sample_configs(tuning.search_spaces[model_name], tuning.n_trials, seed):
+    for config in sample_configs(tuning.search_spaces[model_name], tuning.n_trials, seed):
         settings = {**defaults, **config}
         score = float(
             np.mean(
