@@ -69,7 +69,10 @@ The runner compares exactly two models. For three or more models, use
 :func:`~hqnn_forge.evaluation.friedman_test` (including Iman--Davenport),
 followed by :func:`~hqnn_forge.evaluation.nemenyi_critical_difference` for
 all pairs or :func:`~hqnn_forge.evaluation.compare_to_control` with
-Holm-adjusted p-values against one control (Demšar 2006).
+Holm-adjusted p-values against one control (Demšar 2006).  To tune and
+score those models as the runner does, draw each fold's configurations with
+:func:`sample_configs` and train and score every fit with
+:func:`fit_and_predict`, as ``examples/benchmark_rydberg_features.py`` does.
 
 References
 ----------
