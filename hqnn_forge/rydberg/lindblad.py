@@ -189,7 +189,7 @@ from __future__ import annotations
 import math
 import numbers
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -797,7 +797,12 @@ _TARGETS = ("features", "state")
 
 
 def step_count(
-    hamiltonian: torch.Tensor, t: float, *, gamma: float, tol: float, target: str = "features"
+    hamiltonian: torch.Tensor,
+    t: float,
+    *,
+    gamma: float,
+    tol: float,
+    target: Literal["features", "state"] = "features",
 ) -> int:
     """
     A step count for :func:`evolve` whose estimated feature or state error is at most ``tol``.
@@ -993,9 +998,10 @@ def step_count(
       memory is that of one ``evolve`` on the batch.  The counts can be
       large: one atom at ``γ = 100 Ω``, ``ΩT = 16π`` needs 328 192 steps for
       ``tol = 1e-6``.  ``target="state"`` adds one ``eigvalsh`` of a
-      ``2^N × 2^N`` matrix per sample and run, beside the ``eigh`` that
-      ``evolve`` makes for it, and holds the states of two runs in place of
-      one run and two matrices of features.
+      ``2^N × 2^N`` matrix per sample and comparison of two runs, ``k`` of
+      them for the ``k + 1`` runs, beside the ``eigh`` that ``evolve`` makes
+      per sample and run, and holds the states of two runs in place of one
+      run and two matrices of features.
 
     Examples
     --------
