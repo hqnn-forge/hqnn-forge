@@ -81,7 +81,9 @@ second order in ``dt``; ``evolve`` derives it and the condition under which
 two step counts estimate it (*Choosing* ``n_steps``, per segment with
 ``t = τ``).  ``n_steps`` is therefore required with ``gamma > 0`` and has no
 default, as in ``evolve`` and :class:`~hqnn_forge.rydberg.RydbergFeatureMap`
-(#506, #507).  The readout is the diagonal of ``ρ(T)``::
+(#506, #507).  :meth:`AnalogRydbergLayer.step_count` returns a count whose
+estimated error meets a tolerance for the whole chain, at the weights the
+layer holds (#769).  The readout is the diagonal of ``ρ(T)``::
 
     ⟨Z_i⟩ = 1 − 2 Tr[ρ(T) n_i] = 1 − 2 Σ_k b_i(k) ρ(T)_kk
 
@@ -257,7 +259,17 @@ from hqnn_forge.noise import (
     _kraus_map_on_every_wire,
 )
 from hqnn_forge.rydberg.hamiltonian import DEFAULT_C6, MAX_ATOMS, rydberg_hamiltonian
-from hqnn_forge.rydberg.lindblad import _non_negative_number, _propagator, _step_count, evolve
+from hqnn_forge.rydberg.lindblad import (
+    _doubling_count,
+    _non_negative_number,
+    _propagator,
+    _spread,
+    _starting_count,
+    _step_count,
+    _tolerance,
+    evolve,
+    readout,
+)
 from hqnn_forge.rydberg.register import AtomRegister, _finite_number
 
 __all__ = ["AnalogRydbergLayer", "build_analog_rydberg_qnode"]
@@ -613,7 +625,9 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         Splitting steps of :func:`~hqnn_forge.rydberg.evolve` per segment, an
         integer ``>= 1``.  Required when ``gamma > 0``, without a default:
         the step that is small enough depends on γ and on the spread of the
-        energies of every ``H_k``.  Not used when ``gamma = 0``.
+        energies of every ``H_k``, so on the weights.  :meth:`step_count`
+        gives a count for a tolerance at the weights the layer holds.  Not
+        used when ``gamma = 0``.
 
     Attributes
     ----------
@@ -902,6 +916,173 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         noise options.  Basis ordering as in the module docstring.
         """
         return _final_density_matrix(self._pulse, self.prepare_inputs(x), self.qlayer.weights)
+
+    @torch.no_grad()
+    def step_count(self, x: torch.Tensor, *, tol: float) -> int:
+        """
+        A step count for this layer whose estimated feature error is at most ``tol``.
+
+        :meth:`hqnn_forge.rydberg.RydbergFeatureMap.step_count` for the
+        layer's chain of segments: one integer for the inputs ``x`` **at the
+        weights the layer holds now**, the smallest count tried at which the
+        estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of ``ρ(T)`` is at most
+        ``tol`` for every sample, to pass as ``n_steps`` to a layer with the
+        same settings (see Notes).  It does not depend on the layer's own
+        ``n_steps``.  The layer evolves its ``K`` segments with ``n_steps``
+        steps each, chained through ``rho0`` (*Dephasing during the pulse* in
+        the module docstring), and their Hamiltonians ``H_k(x)`` differ in
+        ``Ω_k``, ``Δ_k`` and ``φ_k``, so the count is taken from the chain
+        itself, as for the feature map's ramped drive (#760, #769).
+
+        **The target** is that of :func:`~hqnn_forge.rydberg.step_count` and
+        ``RydbergFeatureMap.step_count``: the largest error, over the
+        samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (no unit) of the state
+        :meth:`density_matrices` returns.  The layer's outputs are
+        ``⟨Z_i⟩ = 1 − 2⟨n_i⟩``, so an error ``e`` of ``⟨n_i⟩`` is an error
+        ``2e`` of ``⟨Z_i⟩``, and the outputs are within about ``2 · tol``.  A
+        readout error, ``⟨Z⟩ ↦ (1 − p01 − p10) ⟨Z⟩ + (p10 − p01)`` after the
+        state, scales that by ``|1 − p01 − p10| <= 1``.  The gate-model
+        channels of ``noise_level`` and
+        :func:`~hqnn_forge.noise.apply_depolarizing_noise` are left out: the
+        count is for the state without them.
+
+        **Why the two-run estimate holds for the chain.**  Segment ``k``
+        (Liouvillian ``𝓛_k`` of ``H_k(x)`` and γ, for ``τ`` µs) is evolved by
+        ``P_k(n) = S_k(τ/n)^n``, the Strang splitting of
+        :func:`~hqnn_forge.rydberg.evolve`, whose logarithm has odd powers of
+        ``dt = τ/n`` only, so::
+
+            P_k(n) = exp(𝓛_k τ + τ³ C_k / n² + O(n⁻⁴)) = E_k + D_k / n² + O(n⁻⁴)
+
+        with ``E_k = exp(𝓛_k τ)`` the exact map of the segment and ``D_k``
+        fixed by ``H_k`` and γ, independent of ``n``.  Every segment takes the
+        same ``n``, so the chain is::
+
+            P_(K−1)(n) ⋯ P_0(n) = E_(K−1) ⋯ E_0 + (1/n²) Σ_k E_(K−1) ⋯ E_(k+1) D_k E_(k−1) ⋯ E_0 + O(n⁻⁴)
+
+        the exact chain plus ``1/n²`` times a map that does not depend on
+        ``n``.  Every feature is linear in ρ, so ``F_n = F + A/n² + O(n⁻⁴)``
+        and ``F_n − F_2n = (3/4) A/n² = 3 (F_2n − F)``: **the finer run is
+        off by a third of their difference**.  This needs one doubling for
+        all segments.  The largest count of
+        :func:`~hqnn_forge.rydberg.step_count` on each ``H_k`` alone, from
+        ``|g…g⟩``, is not one: at 40 random raw weights ``2 · N(0, 1)`` (1 to
+        3 atoms, ``K`` 2 and 4, ``V/Ω_max`` 0 to 10, ``γ/Ω_max`` 0.1 to 10,
+        ``tol = 1e-6``) it left the chain off by up to ``1.45 tol``, and
+        elsewhere asked for up to 3.4 times this method's count, whose error
+        was at most ``0.998 tol`` in all 40.
+
+        **The starting count.**  Every segment needs its step to resolve its
+        generator, ``(τ/n) · (W_k + Nγ/2) <= 1/2``, ``W_k = E_max − E_min``
+        the spread of the energies of ``H_k(x)``, the largest over the
+        samples (rad/µs; ``Nγ/2`` the largest rate of the dissipator, ``τ``
+        in µs), so the coarsest run has::
+
+            n₀ = max over k of ceil(2τ · (W_k + Nγ/2)),    at least 1
+
+        steps per segment, and the counts tried are ``2n₀, 4n₀, …``, each a
+        run of the whole chain, :meth:`density_matrices` at that count.  The
+        first whose estimate is at most ``tol`` comes back: ``2^k n₀`` with
+        ``k >= 1``.
+
+        **Measured** against the exponential of the full Liouvillian per
+        segment, chained, on the features of two random inputs per case: 1
+        to 3 atoms, ``K`` 1, 2, 4, ``V/Ω_max`` 0, 1, 10, ``γ/Ω_max`` 0.1, 1,
+        10, the constructor's pulse and random raw weights (126 cases).  At
+        ``2n₀`` the error was 0.993 to 1.007 times a third of the difference,
+        as for the feature map's chain (0.987 to 1.018, #760) and one segment
+        (0.987 to 1.084, #598).
+
+        Parameters
+        ----------
+        x:
+            The inputs the layer receives, shape ``(n_qubits,)`` or
+            ``(batch, n_qubits)``, finite, with at least one sample.  **Pass
+            all inputs at once**: the count is a maximum over the samples.  In
+            a model with ``encoding_type="analog"`` the layer is
+            ``model.quantum_layer`` and its inputs are
+            ``model.classical_encoder(X) * π``, or ``X`` itself with
+            ``use_classical_encoder=False``.
+        tol:
+            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over
+            the samples, a finite number ``>= 1e-9``, without a default, as
+            for :func:`~hqnn_forge.rydberg.step_count`.
+
+        Returns
+        -------
+        int
+            The step count per segment, ``2^k n₀`` with ``k >= 1``; 1 when
+            ``gamma = 0``, where the layer does not use ``n_steps``.
+
+        Raises
+        ------
+        ValueError
+            If ``x`` is refused by :meth:`prepare_inputs` or holds no sample,
+            or if ``tol`` is not a finite number ``>= 1e-9``.
+        RuntimeError
+            If an estimate above ``tol`` is more than half of the one before,
+            as for :func:`~hqnn_forge.rydberg.step_count`: the solver's
+            rounding has taken over.
+
+        Notes
+        -----
+        * **The weights.**  ``H_k`` depends on the trainable pulse, so the
+          count holds for the weights the layer holds when it is called, and
+          training changes it: for 3 atoms, ``K = 2``, ``γ = 10 Ω_max``,
+          ``tol = 1e-6`` and 8 inputs ``π · tanh(N(0, 1))``, the count was
+          1696 at the constructor's pulse and 446 to 3792 at 12 random raw
+          weights ``2 · N(0, 1)`` (#769).  The
+          layer's ``n_steps`` is fixed at construction, so the count does not
+          follow the weights during training, which would change the
+          function being trained and the ``n_steps`` a checkpoint records.
+          Take a count at the initial weights to train with, and call this
+          again on the trained layer: a larger count means the trained
+          layer's outputs are off by more than the estimate allows.
+        * **Using it.**  ``n_steps`` is a constructor argument: build the
+          layer (for a model, the model) again with ``n_steps=n`` and the
+          same settings, and load the old one's ``state_dict``.
+        * **Cost.**  One ``eigvalsh`` per segment and sample for ``n₀``, then
+          ``k + 1`` runs of :meth:`density_matrices` on ``x``, at ``n₀, 2n₀,
+          …, 2^k n₀`` steps per segment: ``2 · result − n₀`` steps per
+          segment in all, without gradients.
+
+        Examples
+        --------
+        >>> import math
+        >>> import torch
+        >>> from hqnn_forge.encoding import AnalogRydbergLayer
+        >>> probe = AnalogRydbergLayer(n_qubits=2, n_segments=2, gamma=4 * math.pi, n_steps=1)
+        >>> x = torch.tensor([[-1.0, 2.0], [0.5, 0.5], [3.0, -2.0]])
+        >>> n = probe.step_count(x, tol=1e-6)
+        >>> n  # n₀ = ceil(2τ (W + γ)) = 64, W ≈ 114 rad/µs (V of the chain at 6 µm)
+        256
+        >>> layer = AnalogRydbergLayer(n_qubits=2, n_segments=2, gamma=4 * math.pi, n_steps=n)
+        >>> layer.load_state_dict(probe.state_dict())
+        <All keys matched successfully>
+        """
+        tol = _tolerance(tol)
+        x = self.prepare_inputs(x)
+        if x.shape[:-1].numel() == 0:
+            raise ValueError(
+                "x must hold at least one sample: the count is fixed by all inputs at once; "
+                "got an empty batch."
+            )
+        if self.gamma == 0:  # the unitary circuit is exact without steps: any count, so 1
+            return 1
+        weights = self.qlayer.weights.detach()
+        # n₀: the largest resolution count over the segments, each with the
+        # largest spread W_k over the samples; every segment lasts τ.
+        start = max(
+            _starting_count(_spread(h), self.segment_duration, self.n_qubits, self.gamma)
+            for h in _segment_hamiltonians(self._pulse, x, weights)
+        )
+
+        def features(n_steps: int) -> torch.Tensor:
+            # ⟨n_i⟩ and ⟨n_i n_j⟩ of ρ(T), the state density_matrices returns
+            rho = _final_density_matrix(self._pulse._replace(n_steps=n_steps), x, weights)
+            return readout(rho, pairs=True)
+
+        return _doubling_count(start, features, tol)
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """

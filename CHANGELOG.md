@@ -523,6 +523,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs stays the error of the chain and of the mixture. Without ramp and jitter it is
   `step_count` of the map's Hamiltonians. Over 446 cases, 342 ramped and 163 jittered, every
   count met `tol = 1e-6` against the chained exponential of the Liouvillian (#760, #768)
+- `AnalogRydbergLayer.step_count(x, *, tol)`: the same count for the layer's chain of pulse
+  segments under dephasing (and so for `encoding_type="analog"`, through
+  `model.quantum_layer`), at the weights the layer holds when it is called. It starts at the
+  largest resolution count over the segments and samples and doubles all segments together;
+  `tol` bounds `⟨n_i⟩`, `⟨n_i n_j⟩` of `density_matrices`, so the outputs `⟨Z_i⟩ = 1 − 2⟨n_i⟩`
+  are within about `2 · tol`. The weights are trainable and the count changes with them (1696
+  at the constructor's pulse, 446 to 3792 at random weights, for 3 atoms at `γ = 10 Ω_max`), so
+  it is taken once to build the layer with and checked again on the trained layer, never
+  recomputed during training. At 40 random weights every count met `tol = 1e-6` against the
+  chained exponential of the Liouvillian, where the largest `step_count` of the segments taken
+  alone missed it by up to 1.45 times (#769, #771)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
