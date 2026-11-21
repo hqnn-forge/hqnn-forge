@@ -539,8 +539,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RydbergFeatureMap.states` and other uses of ρ itself. That distance bounds every feature,
   every entry of ρ and the state kernel `Tr[ρ ρ′]` (to `D + D′`), so the count is never below
   the features'. The default, `target="features"`, returns today's counts. Over #598's 216 cases
-  every count met `tol = 1e-6` against the exponential of the Liouvillian; the feature map's
-  own `step_count` has no state target yet (#774) (#759, #773)
+  every count met `tol = 1e-6` against the exponential of the Liouvillian (#759, #773)
+- `RydbergFeatureMap.step_count(..., target="state")` and
+  `AnalogRydbergLayer.step_count(..., target="state")`: the same state target for the chained
+  counts, the trace distance of what `states` (with position jitter, the mixture `ρ̄` of the
+  registers) and `density_matrices` return; the default `"features"` keeps today's counts. The
+  map compares the two runs one chunk at a time, so `chunk_size` still bounds the memory, and
+  recomputes the coarser run only when `X` spans more than one chunk (#774, #777)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented

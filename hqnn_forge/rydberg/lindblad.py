@@ -188,7 +188,7 @@ from __future__ import annotations
 
 import math
 import numbers
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import numpy as np
@@ -796,6 +796,13 @@ def _tolerance(value: Any) -> float:
 _TARGETS = ("features", "state")
 
 
+def _target(value: Any) -> Literal["features", "state"]:
+    """``value`` if it is one of :data:`_TARGETS`, or a ``ValueError`` naming ``target``."""
+    if isinstance(value, str) and value in _TARGETS:
+        return "state" if value == "state" else "features"
+    raise ValueError(f"target must be one of {', '.join(map(repr, _TARGETS))}; got {value!r}.")
+
+
 def step_count(
     hamiltonian: torch.Tensor,
     t: float,
@@ -989,8 +996,10 @@ def step_count(
       ``2n₀`` in the 161 cases with ``n₀ <= 3000`` and an error above
       ``1e-9``), and the count was that of the features
       in 126 cases, twice it in 78 and four times it in 12.
-      :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` has no state
-      target yet (#774).
+      :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` and
+      :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count` take the
+      same ``target`` for their chains of segments and, with position
+      jitter, the mixture of the registers (#774).
     * **Cost.**  One ``eigvalsh`` per sample for ``W``, then ``k + 1`` runs
       of :func:`evolve` on the batch, at ``n₀, 2n₀, …, 2^k n₀`` steps:
       ``2 · result − n₀`` steps in all, less than twice the cost of one run
@@ -1033,10 +1042,7 @@ def step_count(
     t = _non_negative_number(t, "t")
     gamma = _non_negative_number(gamma, "gamma")
     tol = _tolerance(tol)
-    if target not in _TARGETS:
-        raise ValueError(
-            f"target must be one of {', '.join(map(repr, _TARGETS))}; got {target!r}."
-        )
+    target = _target(target)
     if hamiltonian.ndim == 3 and hamiltonian.shape[0] == 0:
         raise ValueError(
             "hamiltonian must hold at least one sample: the count is fixed by all inputs "
@@ -1114,26 +1120,82 @@ def _doubling_count(
     Raises).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
     its whole chain of segments and registers as ``features``, and
     :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count` the layer's
-    chain of pulse segments (#769).
+    chain of pulse segments (#769), or its states with ``target="state"``
+    (#774).  The finer run of one comparison is held as the coarser run of
+    the next, so ``features`` is called once per count, at ``start, 2·start,
+    …`` in that order, and two of its results are held at a time.
     """
-    steps = start
-    coarse = features(steps)
-    previous = math.inf
-    while True:
+    held: list[torch.Tensor] = []  # the finer run of the last comparison
+
+    def estimate(steps: int) -> float:
+        coarse = held.pop() if held else features(steps)
         fine = features(2 * steps)
+        held.append(fine)
         # |F_2n − F| ≈ |F_n − F_2n| / 3, largest over samples and features;
         # D(ρ_2n, ρ) ≈ D(ρ_n, ρ_2n) / 3 for the states
-        estimate = distance(coarse, fine) / 3
-        if estimate <= tol:
+        return distance(coarse, fine) / 3
+
+    return _doubling(start, estimate, tol)
+
+
+def _chunked_doubling_count(
+    start: int,
+    states: Callable[[slice, int], torch.Tensor],
+    chunks: Sequence[slice],
+    tol: float,
+) -> int:
+    """
+    The doubling of ``target="state"`` with the states of one chunk held at a time.
+
+    ``states(chunk, n)`` returns the states of the samples ``chunk`` at ``n``
+    steps; ``chunks`` cover every sample once.  The estimate at ``2n`` is a
+    third of the largest ``D(ρ_n, ρ_2n)`` over the chunks, each from its own
+    two runs, so the coarser run of a chunk is computed again at every
+    doubling instead of held for all samples
+    (:meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count`, *Memory* in
+    its Notes).  With one chunk nothing is computed twice: it is
+    :func:`_doubling_count` with the trace distance.
+    The maximum over chunks of each chunk's largest ``D`` is the largest over
+    the samples, so the result does not depend on the chunks beyond rounding.
+    """
+    if len(chunks) == 1:
+        only = chunks[0]
+        return _doubling_count(
+            start, lambda steps: states(only, steps), tol, distance=_largest_trace_distance
+        )
+
+    def estimate(steps: int) -> float:
+        largest = 0.0
+        for chunk in chunks:
+            coarse = states(chunk, steps)
+            largest = max(largest, _largest_trace_distance(coarse, states(chunk, 2 * steps)))
+        return largest / 3
+
+    return _doubling(start, estimate, tol)
+
+
+def _doubling(start: int, estimate: Callable[[int], float], tol: float) -> int:
+    """
+    The loop of :func:`_doubling_count`: ``estimate(n)`` is the estimated error at ``2n`` steps.
+
+    Returns ``2n`` for the first ``n`` of ``start, 2·start, …`` whose
+    estimate is at most ``tol``; ``RuntimeError`` when an estimate above
+    ``tol`` is more than half of the one before (:func:`step_count`, Raises).
+    """
+    steps = start
+    previous = math.inf
+    while True:
+        current = estimate(steps)
+        if current <= tol:
             return 2 * steps
-        if estimate > previous / _SMALLEST_FALL:
+        if current > previous / _SMALLEST_FALL:
             raise RuntimeError(
                 f"the two-run estimate stopped falling at {2 * steps} steps "
-                f"({previous:.3g}, then {estimate:.3g}) above tol={tol:g}: the solver's "
+                f"({previous:.3g}, then {current:.3g}) above tol={tol:g}: the solver's "
                 "rounding, which grows with the step count, has taken over, and no "
                 "count reaches this tol for these Hamiltonians."
             )
-        steps, coarse, previous = 2 * steps, fine, estimate
+        steps, previous = 2 * steps, current
 
 
 def _propagator(h: torch.Tensor, tau: float) -> torch.Tensor:
