@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -1159,6 +1160,27 @@ class TestValidation:
         with pytest.raises(ValueError, match="gamma must be a finite number >= 0"):
             RydbergFeatureMap(
                 chain(2), PulseEncoding(2, omega=OMEGA), c6=DEFAULT_C6, gamma=gamma, n_steps=5
+            )
+
+    @pytest.mark.parametrize("name", ["gamma", "t"])
+    def test_a_tensor_gamma_or_t_is_refused_as_evolve_refuses_it(self, name: str) -> None:
+        """
+        ``gamma``, and ``t`` through the encoding, are numbers as ``evolve``'s
+        are (#530): a 0-d tensor gets the message naming ``.item()``.
+        """
+        value = torch.tensor(0.5, dtype=torch.float64)
+        message = (
+            f"{name} must be a finite number >= 0, not a tensor; got {value!r}. "
+            f"Pass {name}.item() to use its value: no derivative with respect to "
+            f"{name} is taken."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            RydbergFeatureMap(
+                chain(2),
+                {"n_features": 2, "omega": OMEGA, "t": value if name == "t" else 0.5},
+                c6=DEFAULT_C6,
+                gamma=value if name == "gamma" else 0.5,  # type: ignore[arg-type]
+                n_steps=5,
             )
 
     @pytest.mark.parametrize("c6", [math.nan, math.inf, None, "1"])

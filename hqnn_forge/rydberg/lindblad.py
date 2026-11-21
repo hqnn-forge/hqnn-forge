@@ -191,6 +191,7 @@ import numbers
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import torch
 
 from hqnn_forge.rydberg.hamiltonian import MAX_ATOMS, _bits
@@ -230,7 +231,33 @@ _SMALLEST_FALL = 2.0
 
 
 def _non_negative_number(value: Any, name: str) -> float:
-    """``value`` as a float ``>= 0``, or a ``ValueError`` naming the argument."""
+    """
+    ``value`` as a float ``>= 0``, or a ``ValueError`` naming the argument.
+
+    Numbers only (#530): a Python or NumPy scalar, never a tensor or an array.
+    ``float()`` would read a one-element tensor and drop its graph without a
+    word, so a tensor or array is refused whatever its shape, with a message
+    naming the shape for more than one element.  For one element it names
+    ``.item()`` only when the value ``.item()`` returns would be accepted, so
+    a ``tensor(nan)`` or ``tensor(-1.)`` is not sent to a second refusal.
+    """
+    if isinstance(value, (torch.Tensor, np.ndarray)):
+        kind = "tensor" if isinstance(value, torch.Tensor) else "NumPy array"
+        if math.prod(value.shape) == 1:
+            message = f"{name} must be a finite number >= 0, not a {kind}; got {value!r}."
+            try:
+                _non_negative_number(value.item(), name)
+            except (ValueError, RuntimeError):  # RuntimeError: a meta tensor has no value
+                raise ValueError(message) from None
+            raise ValueError(
+                f"{message} Pass {name}.item() to use its value: no derivative with "
+                f"respect to {name} is taken."
+            )
+        # ValueError, as for any other value that is not a finite number >= 0
+        raise ValueError(  # noqa: TRY004
+            f"{name} must be a single finite number >= 0, not a {kind} of shape "
+            f"{tuple(value.shape)}."
+        )
     number = math.nan
     if isinstance(value, numbers.Real) and not isinstance(value, bool):
         try:
@@ -558,12 +585,18 @@ def evolve(
         real or complex.  Its basis ordering defines that of the result:
         index 0 is the initial state.
     t:
-        Evolution time in µs, ``>= 0``, the same for every sample.
+        Evolution time in µs, ``>= 0``, the same for every sample.  A Python
+        or NumPy number; **a tensor is not accepted**, nor an array, whatever
+        its shape (#530): ``t`` is not differentiable, so pass ``t.item()``
+        for the value of a one-element tensor.  One time per sample is not
+        supported (#506).
     gamma:
         Dephasing rate γ in rad/µs, ``>= 0``, the same for every atom and
         sample.  It is the rate of the collapse operators ``√γ n_i``: **a
         single-atom coherence decays at ``γ/2``** (``T₂ = 2/γ``), and
-        ``ρ_ab`` at ``γ/2 · d_H(a, b)``.
+        ``ρ_ab`` at ``γ/2 · d_H(a, b)``.  A number, as for ``t``: **a tensor
+        is not accepted**, nor an array, and ``gamma`` is not
+        differentiable.
     n_steps:
         Number of splitting steps, an integer ``>= 1``.  Required when
         ``gamma > 0`` and without a default: the step that is accurate enough
@@ -604,8 +637,9 @@ def evolve(
         :data:`~hqnn_forge.rydberg.MAX_ATOMS` atoms, holds a NaN or an
         infinity, or is not Hermitian; if ``rho0`` has a shape other than
         the two above or is not finite; if ``t`` or ``gamma`` is not a finite
-        number ``>= 0``; if ``n_steps`` is not an integer ``>= 1``, or is
-        missing with ``gamma > 0``.
+        number ``>= 0``, or is a tensor or an array of any shape; if
+        ``n_steps`` is not an integer ``>= 1``, or is missing with
+        ``gamma > 0``.
 
     Notes
     -----
