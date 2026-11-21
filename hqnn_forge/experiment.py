@@ -60,6 +60,7 @@ __all__: list[str] = [
     "compare_environment",
     "environment",
     "load_record",
+    "plain_data",
     "rerun_benchmark",
     "save_record",
     "to_record",
@@ -103,8 +104,32 @@ def environment() -> dict[str, Any]:
     }
 
 
-def _plain(value: Any) -> Any:
-    """``value`` as JSON-compatible data: NaN → None, NumPy → Python, tuples → lists."""
+def plain_data(value: Any) -> Any:
+    """
+    ``value`` as the plain data a strict JSON record holds.
+
+    How :func:`to_record` turns a result into its record, and how
+    ``examples/benchmark_rydberg_features.py`` writes its lines and cache keys.
+    Applied recursively:
+
+    * a Python or NumPy float → ``float``, except NaN → ``None`` (strict
+      JSON has no NaN; ``json.loads`` reads the ``null`` back as ``None``).
+      ``±inf`` stays a ``float``, which ``json.dumps(..., allow_nan=False)``
+      refuses;
+    * a Python or NumPy bool → ``bool`` (tested before the integers, of
+      which ``bool`` is a subclass);
+    * a Python or NumPy integer → ``int``;
+    * a NumPy array → nested lists of its elements, row-major (``tolist``);
+    * a mapping → a ``dict`` with every key as ``str(key)``, in its order;
+    * a list or tuple → a ``list``, in its order;
+    * ``None`` and ``str`` unchanged.
+
+    Raises
+    ------
+    TypeError
+        For any other value, e.g. a custom module in a model config: a
+        record holds plain data only.
+    """
     if isinstance(value, float | np.floating):
         return None if math.isnan(value) else float(value)
     if isinstance(value, bool | np.bool_):
@@ -112,11 +137,11 @@ def _plain(value: Any) -> Any:
     if isinstance(value, int | np.integer):
         return int(value)
     if isinstance(value, np.ndarray):
-        return [_plain(v) for v in value.tolist()]
+        return [plain_data(v) for v in value.tolist()]
     if isinstance(value, Mapping):
-        return {str(k): _plain(v) for k, v in value.items()}
+        return {str(k): plain_data(v) for k, v in value.items()}
     if isinstance(value, list | tuple):
-        return [_plain(v) for v in value]
+        return [plain_data(v) for v in value]
     if value is None or isinstance(value, str):
         return value
     raise TypeError(
@@ -154,7 +179,7 @@ def to_record(result: BenchmarkResult) -> dict[str, Any]:
         }
         for f in result.folds
     ]
-    return _plain(
+    return plain_data(
         {
             "format_version": RECORD_FORMAT_VERSION,
             "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
@@ -346,7 +371,7 @@ def rerun_benchmark(
         noise_position=settings.get("noise_position", "all"),
         alpha=settings.get("alpha", 0.05),
     )
-    rebuilt = _plain(result.models)
+    rebuilt = plain_data(result.models)
     if rebuilt != recorded_models:
         raise ValueError(
             "the rebuilt models' configs differ from the recorded ones; the hybrid "

@@ -546,6 +546,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registers) and `density_matrices` return; the default `"features"` keeps today's counts. The
   map compares the two runs one chunk at a time, so `chunk_size` still bounds the memory, and
   recomputes the coarser run only when `X` spans more than one chunk (#774, #777)
+- `hqnn_forge.benchmark.sample_configs` (the configurations `Tuning` draws),
+  `fit_and_predict` with its `FitPrediction` (the training, validation threshold and test MCC
+  of every model `run_benchmark` trains) and `hqnn_forge.experiment.plain_data` (the mapping
+  of a record to strict-JSON data) are public. `examples/benchmark_rydberg_features.py` uses
+  them in place of its own copies and of the private `_plain`; no number of `run_benchmark` or
+  of the script changes, pinned on a seeded run of each (#524, #779)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented

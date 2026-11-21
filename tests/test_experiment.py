@@ -27,6 +27,7 @@ from hqnn_forge.experiment import (
     compare_environment,
     environment,
     load_record,
+    plain_data,
     rerun_benchmark,
     save_record,
 )
@@ -291,6 +292,57 @@ class TestWriting:
         with pytest.raises(TypeError, match="cannot record a Linear"):
             save_record(broken, path)
         assert not path.exists()
+
+
+class TestPlainData:
+    """Each rule of ``plain_data``'s docstring, on a value written out by hand (#524)."""
+
+    def test_every_rule(self) -> None:
+        value = {
+            "half": np.float32(0.5),
+            "nan": float("nan"),
+            "numpy-nan": np.float64("nan"),
+            "inf": float("inf"),
+            "flag": np.bool_(True),
+            "count": np.int64(3),
+            7: (np.int32(-2), [False, None]),
+            "matrix": np.array([[1, 2], [3, 4]], dtype=np.int16),
+            "text": "x",
+        }
+        plain = plain_data(value)
+        assert plain == {
+            "half": 0.5,
+            "nan": None,
+            "numpy-nan": None,
+            "inf": float("inf"),
+            "flag": True,
+            "count": 3,
+            "7": [-2, [False, None]],
+            "matrix": [[1, 2], [3, 4]],
+            "text": "x",
+        }
+        assert list(plain) == [
+            "half",
+            "nan",
+            "numpy-nan",
+            "inf",
+            "flag",
+            "count",
+            "7",
+            "matrix",
+            "text",
+        ]
+        # The types themselves, which == does not tell apart (True == 1, 3 == 3.0).
+        assert type(plain["half"]) is float and type(plain["count"]) is int
+        assert plain["flag"] is True and plain["7"][1][0] is False
+        assert all(type(v) is int for row in plain["matrix"] for v in row)
+        # Strict JSON refuses the infinity that plain_data leaves as a float.
+        with pytest.raises(ValueError, match="Out of range float values"):
+            json.dumps(plain, allow_nan=False)
+
+    def test_anything_else_is_refused(self) -> None:
+        with pytest.raises(TypeError, match=r"cannot record a set \(\{1\}\) as JSON"):
+            plain_data({"a": [{1}]})
 
 
 class TestSeveralSeedsInTheRecord:
