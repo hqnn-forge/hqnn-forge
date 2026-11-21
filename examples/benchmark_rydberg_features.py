@@ -328,7 +328,14 @@ formulas are the model page's and are only referred to:
     P(read ``g`` | ``r``), independently per atom, so the exact features
     become ``⟨n̂_i⟩ = p01 + c ⟨n_i⟩``, ``c = 1 − p01 − p10``, and with
     ``--shots`` every bit of every shot is flipped after the bitstrings are
-    drawn.
+    drawn.  The error acts before the standardisation of step 4, as on a
+    device.  With exact features it maps each column to ``a + c F[·, j]``
+    with ``c > 0``, which that step removes (*Why (#518)*): with
+    ``--standardise``, the default, the heads of A, B and D get the same
+    input with and without the error, to rounding.  Their scores then
+    show the error only with ``--shots``, whose spread
+    ``√(F̂(1 − F̂)/S)`` it changes against the contrast ``c``; without
+    shots it shows only in the ``separation`` distances.
 ``--position-jitter σ --jitter-samples K``
     Each coordinate of each atom displaced by an independent ``N(0, σ²)``
     (σ in µm) in ``K`` registers drawn once, when the map is built, from
