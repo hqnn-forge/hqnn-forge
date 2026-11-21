@@ -545,7 +545,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, the trace distance of what `states` (with position jitter, the mixture `ρ̄` of the
   registers) and `density_matrices` return; the default `"features"` keeps today's counts. The
   map compares the two runs one chunk at a time, so `chunk_size` still bounds the memory, and
-  recomputes the coarser run only when `X` spans more than one chunk (#774)
+  recomputes the coarser run only when `X` spans more than one chunk (#774, #777)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
