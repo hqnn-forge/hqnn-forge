@@ -534,6 +534,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recomputed during training. At 40 random weights every count met `tol = 1e-6` against the
   chained exponential of the Liouvillian, where the largest `step_count` of the segments taken
   alone missed it by up to 1.45 times (#769, #771)
+- `step_count(..., target="state")`: a step count whose estimated error of the state ρ, in the
+  trace distance `½ ‖ρ_2n − ρ‖₁`, is at most `tol` for every sample, for
+  `RydbergFeatureMap.states` and other uses of ρ itself. That distance bounds every feature,
+  every entry of ρ and the state kernel `Tr[ρ ρ′]` (to `D + D′`), so the count is never below
+  the features'. The default, `target="features"`, returns today's counts. Over #598's 216 cases
+  every count met `tol = 1e-6` against the exponential of the Liouvillian; the feature map's
+  own `step_count` has no state target yet (#774) (#759, #773)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
