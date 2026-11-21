@@ -2208,6 +2208,35 @@ class TestValidation:
         rho = evolve(self.H, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
         assert torch.equal(rho, evolve(self.H, 0.5, gamma=0.5, n_steps=10))
 
+    @pytest.mark.parametrize(
+        ("make", "kind"),
+        [
+            (lambda: torch.tensor(math.nan, dtype=torch.float64), "tensor"),
+            (lambda: torch.tensor(-1.0, dtype=torch.float64), "tensor"),
+            (lambda: torch.tensor([math.inf], dtype=torch.float64), "tensor"),
+            (lambda: torch.tensor(0.5 + 0j, dtype=torch.complex128), "tensor"),
+            (lambda: torch.tensor(True), "tensor"),
+            (lambda: torch.tensor(0.5, dtype=torch.float64, device="meta"), "tensor"),
+            (lambda: np.array(math.nan), "NumPy array"),
+        ],
+        ids=["nan", "-1", "inf (1,)", "complex", "bool", "meta", "ndarray nan"],
+    )
+    @pytest.mark.parametrize("name", ["t", "gamma"])
+    def test_a_one_element_tensor_or_array_of_a_bad_value_is_refused_without_item(
+        self, name: str, make: Callable[[], object], kind: str
+    ) -> None:
+        """
+        ``.item()`` is named only when its value would be accepted (#530):
+        for a NaN, a negative, an infinite, a complex or a boolean element,
+        or a meta tensor without a value, following the hint would only be
+        refused again, so the message stops after the value.
+        """
+        value = make()
+        args: dict[str, object] = {"t": 0.5, "gamma": 0.5, name: value}
+        message = f"{name} must be a finite number >= 0, not a {kind}; got {value!r}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            evolve(self.H, args["t"], gamma=args["gamma"], n_steps=10)  # type: ignore[arg-type]
+
     @pytest.mark.parametrize("scalar", [np.float64, np.float32, np.int64])
     def test_numpy_scalars_are_numbers(self, scalar: Callable[[float], object]) -> None:
         """

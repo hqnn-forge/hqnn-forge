@@ -237,15 +237,21 @@ def _non_negative_number(value: Any, name: str) -> float:
     Numbers only (#530): a Python or NumPy scalar, never a tensor or an array.
     ``float()`` would read a one-element tensor and drop its graph without a
     word, so a tensor or array is refused whatever its shape, with a message
-    naming ``.item()`` for one element and the shape for more.
+    naming the shape for more than one element.  For one element it names
+    ``.item()`` only when the value ``.item()`` returns would be accepted, so
+    a ``tensor(nan)`` or ``tensor(-1.)`` is not sent to a second refusal.
     """
     if isinstance(value, (torch.Tensor, np.ndarray)):
         kind = "tensor" if isinstance(value, torch.Tensor) else "NumPy array"
         if math.prod(value.shape) == 1:
+            message = f"{name} must be a finite number >= 0, not a {kind}; got {value!r}."
+            try:
+                _non_negative_number(value.item(), name)
+            except (ValueError, RuntimeError):  # RuntimeError: a meta tensor has no value
+                raise ValueError(message) from None
             raise ValueError(
-                f"{name} must be a finite number >= 0, not a {kind}; got {value!r}. "
-                f"Pass {name}.item() to use its value: no derivative with respect to "
-                f"{name} is taken."
+                f"{message} Pass {name}.item() to use its value: no derivative with "
+                f"respect to {name} is taken."
             )
         # ValueError, as for any other value that is not a finite number >= 0
         raise ValueError(  # noqa: TRY004
