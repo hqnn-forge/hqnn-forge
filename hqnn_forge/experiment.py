@@ -119,7 +119,9 @@ def plain_data(value: Any) -> Any:
     * a Python or NumPy bool → ``bool`` (tested before the integers, of
       which ``bool`` is a subclass);
     * a Python or NumPy integer → ``int``;
-    * a NumPy array → nested lists of its elements, row-major (``tolist``);
+    * a NumPy array of at least one dimension → nested lists of its
+      elements, row-major (``tolist``); a 0-d array raises ``TypeError``,
+      as ``tolist`` returns its element rather than a list;
     * a mapping → a ``dict`` with every key as ``str(key)``, in its order;
     * a list or tuple → a ``list``, in its order;
     * ``None`` and ``str`` unchanged.
