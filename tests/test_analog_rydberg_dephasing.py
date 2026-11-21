@@ -733,7 +733,12 @@ class TestClassifiers:
         ``AnalogRydbergLayer.step_count`` names a model's layer inputs as
         ``model.classical_encoder(X) * π``, or ``X`` without the encoder
         (#769): what ``quantum_layer`` receives in ``forward``.  Its count
-        then builds the model again from the config and the state dict.
+        then builds the model again from the config and the state dict, whose
+        layer gives the same count (it holds the same weights) and whose
+        outputs ``⟨Z_i⟩`` are within ``2 · tol`` of a run at 16 times the count.
+        At ``γ = Ω_max`` the doubling sets the count (``4 n₀``; at ``γ = 1.5``
+        ``2 n₀`` met even ``tol = 1e-4``), so half of it misses that bound:
+        1.07 and 1.19 ``tol`` at the count, 4.2 and 4.6 ``tol`` at half.
         """
         torch.manual_seed(0)
         model = HybridBinaryClassifier(
@@ -741,7 +746,7 @@ class TestClassifiers:
             n_qubits=2,
             n_layers=2,
             encoding_type="analog",
-            gamma=1.5,
+            gamma=4 * math.pi,
             n_steps=3,
             use_classical_encoder=use_classical_encoder,
         ).eval()
@@ -754,11 +759,21 @@ class TestClassifiers:
         with torch.no_grad():
             inputs = model.classical_encoder(x) * math.pi if use_classical_encoder else x
         torch.testing.assert_close(inputs, seen[0], rtol=0, atol=0)
-        n = layer.step_count(inputs, tol=1e-6)
+        tol = 1e-6
+        n = layer.step_count(inputs, tol=tol)
         config = {**model.get_config(), "n_steps": n}
         rebuilt = HybridBinaryClassifier(**config)
         rebuilt.load_state_dict(model.state_dict())
-        assert rebuilt.quantum_layer.n_steps == n > 3
+        reference = HybridBinaryClassifier(**{**config, "n_steps": 16 * n})
+        reference.load_state_dict(model.state_dict())
+        rebuilt_layer, reference_layer = rebuilt.quantum_layer, reference.quantum_layer
+        assert isinstance(rebuilt_layer, AnalogRydbergLayer)
+        assert isinstance(reference_layer, AnalogRydbergLayer)
+        assert rebuilt_layer.n_steps == n
+        assert rebuilt_layer.step_count(inputs, tol=tol) == n
+        with torch.no_grad():
+            error = (rebuilt_layer(inputs).double() - reference_layer(inputs).double()).abs().max()
+        assert 0 < error <= 2 * tol
 
     @pytest.mark.parametrize("encoding_type", ["angle", "iqp", "amplitude", "reuploading"])
     def test_gamma_applies_to_the_analog_encoding_only(self, encoding_type: str) -> None:
