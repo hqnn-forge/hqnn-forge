@@ -114,6 +114,11 @@ For a dataset ``(X, y)`` and one outer fold of :func:`stratified_kfold`
    validation rows at the best epoch, applied unchanged to the test rows
    for ``mcc``; ``pr_auc`` is threshold-free.
 
+Steps 5 and 6 are those of ``run_benchmark``: :func:`fit_and_score` trains
+and scores every trial and every final fit through
+:func:`hqnn_forge.benchmark.fit_and_predict`, the function behind every
+model ``run_benchmark`` trains.
+
 The outer folds, the validation split, the SMOTE draw, the initialisation
 seed, the batch order and the tuning seed belong to the fold, not to the
 arm: every line of a fold records the same row indices and seeds.
@@ -386,7 +391,9 @@ Tuning
 ------
 Every arm and head gets the same random-search budget: the same
 ``--trials`` configurations, drawn once per fold from one search space of
-training settings (``lr``, ``batch_size``), each scored by the mean MCC
+training settings (``lr``, ``batch_size``) by
+:func:`hqnn_forge.benchmark.sample_configs`, the draw of ``run_benchmark``'s
+``Tuning``, with the fold's ``tune_seed``, each scored by the mean MCC
 over the same ``--inner-folds`` stratified folds of the fold's training
 part.  Inside an inner fold everything is refitted on its fitting rows
 (standardisation, PCA, SMOTE, and the feature standardisation of step 4 on
@@ -572,7 +579,7 @@ import torch
 import torch.nn as nn
 
 import hqnn_forge
-from hqnn_forge.benchmark import fingerprint
+from hqnn_forge.benchmark import fingerprint, fit_and_predict, sample_configs
 from hqnn_forge.data import (
     load_cervical_cancer_risk,
     load_iranian_churn,
@@ -580,8 +587,8 @@ from hqnn_forge.data import (
 )
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.encoding import AUTO_BACKPROP_MAX_QUBITS, QuantumEncodingLayer
-from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
-from hqnn_forge.experiment import COMPARED_VERSIONS, _plain, environment
+from hqnn_forge.evaluation import pr_auc
+from hqnn_forge.experiment import COMPARED_VERSIONS, environment, plain_data
 from hqnn_forge.models import (
     BinaryClassifierBase,
     ClassicalBaseline,
@@ -597,7 +604,6 @@ from hqnn_forge.rydberg import (
     PulseEncoding,
     RydbergFeatureMap,
 )
-from hqnn_forge.training import train_model
 from hqnn_forge.utils import FocalLoss
 
 FloatArray = npt.NDArray[np.float64]
@@ -1287,7 +1293,7 @@ def shot_stream_seed(config: Mapping[str, Any], inputs: npt.ArrayLike) -> int:
             f"shots={config.get('shots')!r}, shot_seed={config.get('shot_seed')!r}."
         )
     text = json.dumps(
-        {"config": _plain(config), "inputs": inputs_sha256(inputs)},
+        {"config": plain_data(config), "inputs": inputs_sha256(inputs)},
         sort_keys=True,
         allow_nan=False,
     )
@@ -2087,8 +2093,8 @@ def cache_key(
     text = json.dumps(
         {
             "data": data_sha256,
-            "config": _plain(config),
-            "environment": _plain(key_environment(env)),
+            "config": plain_data(config),
+            "environment": plain_data(key_environment(env)),
             "code": code_sha256,
         },
         sort_keys=True,
@@ -2215,7 +2221,7 @@ class FeatureCache:
         code_sha256: str | None = None,
     ) -> None:
         self.directory = None if directory is None else Path(directory)
-        self.environment: dict[str, Any] = _plain(environment() if env is None else env)
+        self.environment: dict[str, Any] = plain_data(environment() if env is None else env)
         self.code_sha256 = code_sha256
         if self.directory is not None:
             if self.code_sha256 is None:
@@ -2651,58 +2657,49 @@ def fit_and_score(
     Train on the training block, stop and choose the threshold on the
     validation block, score the test block.
 
-    ``features`` has one row per row of ``split.inputs``.  The threshold is
-    the one that maximises MCC on the validation rows at the best epoch
-    (0.5 if none was recorded) and is applied unchanged to the scored rows.
-    ``pr_auc`` is NaN if the model's probabilities are not finite.
+    :func:`hqnn_forge.benchmark.fit_and_predict`, the training, threshold
+    and labelling of every model ``run_benchmark`` trains, on the blocks of
+    ``split``: ``features[split.train]`` with ``split.labels[split.train]``
+    (the synthetic rows included), ``split.val`` and ``split.test`` likewise.
+    ``features`` has one row per row of ``split.inputs``.  The settings are
+    those of ``config`` (``lr``, ``max_epochs``, ``batch_size``,
+    ``patience``), the loss is ``LOSSES[loss]``, and the batch order is
+    seeded with ``batch_seed``.  The threshold is the one that maximises MCC
+    on the validation rows at the best epoch (0.5 if none was recorded) and
+    is applied unchanged to the scored rows.  ``seconds`` is that of
+    ``fit_and_predict``: the float32 cast of the training and validation
+    blocks and the training itself.
+
+    What this adds: the call runs inside :func:`torch.random.fork_rng`
+    with the global seed set to ``batch_seed``, so it neither reads nor
+    moves the caller's RNG, and ``pr_auc`` of the scored rows, NaN if the
+    model's probabilities are not finite (``FitPrediction.finite``).
     """
-    x = torch.from_numpy(features.astype(np.float32))
-    y = torch.from_numpy(split.labels.astype(np.float32))
+    labels = split.labels
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(batch_seed)
-        start = time.perf_counter()
-        history = train_model(
+        fit = fit_and_predict(
             model,
-            LOSSES[loss](),
-            torch.optim.Adam(model.parameters(), lr=config["lr"]),
-            x[split.train],
-            y[split.train],
-            x[split.val],
-            y[split.val],
+            LOSSES[loss],
+            features[split.train],
+            labels[split.train],
+            features[split.val],
+            labels[split.val],
+            features[split.test],
+            labels[split.test],
+            lr=config["lr"],
             max_epochs=config["max_epochs"],
             batch_size=config["batch_size"],
-            monitor="mcc",
             patience=config["patience"],
-            generator=torch.Generator().manual_seed(batch_seed),
+            batch_seed=batch_seed,
         )
-        seconds = time.perf_counter() - start
-        probability = model.predict_proba(x[split.test])
-    threshold = history.best_threshold if history.best_threshold is not None else 0.5
-    truth = split.labels[split.test]
-    finite = bool(torch.isfinite(probability).all())
     return Fit(
-        mcc=float(matthews_corrcoef(truth, (probability >= threshold).long())),
-        pr_auc=pr_auc(truth, probability) if finite else math.nan,
-        threshold=float(threshold),
-        seconds=seconds,
-        epochs=history.n_epochs,
+        mcc=fit.mcc,
+        pr_auc=pr_auc(labels[split.test], fit.probability) if fit.finite else math.nan,
+        threshold=fit.threshold,
+        seconds=fit.seconds,
+        epochs=fit.epochs,
     )
-
-
-def sample_configs(
-    space: Mapping[str, Sequence[Any]], n_trials: int, seed: int
-) -> list[dict[str, Any]]:
-    """
-    ``n_trials`` distinct configurations from the grid of ``space`` (all of
-    it if it has no more), in grid order, as ``run_benchmark``'s tuning
-    draws them.  Every arm of a fold gets this same list.
-    """
-    keys = sorted(space)
-    full = [dict(zip(keys, values)) for values in itertools.product(*(space[k] for k in keys))]
-    if len(full) <= n_trials:
-        return full
-    chosen = np.random.default_rng(seed).choice(len(full), size=n_trials, replace=False)
-    return [full[int(i)] for i in sorted(chosen)]
 
 
 def inner_splits(
@@ -2790,11 +2787,12 @@ def to_json_line(record: Mapping[str, Any]) -> str:
     """
     One record as a line of strict JSON.
 
-    NumPy values become Python ones and NaN becomes ``null``, as in
-    :mod:`hqnn_forge.experiment`; ``+inf`` and ``−inf``, which that module
-    refuses, become the strings ``"inf"`` and ``"-inf"``.
+    NumPy values become Python ones and NaN becomes ``null`` through
+    :func:`hqnn_forge.experiment.plain_data`, as in that module's records;
+    ``+inf`` and ``−inf``, which strict JSON refuses, become the strings
+    ``"inf"`` and ``"-inf"`` first.
     """
-    return json.dumps(_plain(_strict(record)), allow_nan=False)
+    return json.dumps(plain_data(_strict(record)), allow_nan=False)
 
 
 def _restore(value: Any) -> float:

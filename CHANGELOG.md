@@ -541,6 +541,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the features'. The default, `target="features"`, returns today's counts. Over #598's 216 cases
   every count met `tol = 1e-6` against the exponential of the Liouvillian; the feature map's
   own `step_count` has no state target yet (#774) (#759, #773)
+- `hqnn_forge.benchmark.sample_configs` (the configurations `Tuning` draws),
+  `fit_and_predict` with its `FitPrediction` (the training, validation threshold and test MCC
+  of every model `run_benchmark` trains) and `hqnn_forge.experiment.plain_data` (the mapping
+  of a record to strict-JSON data) are public. `examples/benchmark_rydberg_features.py` uses
+  them in place of its own copies and of the private `_plain`; no number of `run_benchmark` or
+  of the script changes, pinned on a seeded run of each (#524, #779)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
