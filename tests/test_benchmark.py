@@ -880,3 +880,91 @@ class TestNoiseSweep:
     def test_rejected(self, kwargs: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             _run({"a": _data()}, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# A seeded run, against numbers recorded before the helpers were shared (#524)
+# ---------------------------------------------------------------------------
+
+#: The tuning of the pinned run: the control's grid (6) is larger than the
+#: budget (2), so its configurations are a random draw, not the whole grid.
+PINNED_TUNING = benchmark.Tuning(
+    n_trials=2,
+    search_spaces={
+        "hybrid": {"lr": [0.01, 0.03, 0.1]},
+        "control": {"lr": [0.01, 0.03, 0.1], "batch_size": [16, 32]},
+    },
+    inner_folds=2,
+)
+
+#: ``(model, fold, seed_index, mcc, threshold, epochs, brier, ece, hyperparameters)`` of
+#: every ``FoldResult`` of :func:`_pinned_run`, in order.  Recorded on c6ce325 (``main``
+#: before #524, whose private ``_fit_and_score`` and ``_sample_configs`` the run went
+#: through) with Python 3.13 and the locked dependencies, as the ``repr`` of each value of
+#: ``result.folds``.  On the declared floors (Python 3.11, torch 2.3.0, PennyLane 0.45) the
+#: same run differs only in the hybrid's thresholds, Brier scores and ECEs, by at most
+#: 1.5e-7 relative (float32 rounding in its circuit); with the newest dependencies on
+#: Python 3.14 it is equal.  Hence ``rel=1e-6`` for those three and equality for the rest.
+PINNED_FOLDS: list[tuple[str, int, int, float, float, int, float, float, dict[str, Any]]] = [
+    ("hybrid", 0, 0, -0.3085304536722668, 0.33060216903686523, 3, 0.19878986617741598, 0.28849848014552415, {"lr": 0.1}),
+    ("hybrid", 0, 1, -0.11857936244317066, 0.34217381477355957, 2, 0.19914991209511404, 0.29862508541200217, {"lr": 0.1}),
+    ("control", 0, 0, 0.6742083750340275, 0.44874751567840576, 3, 0.10843546668829955, 0.17749110264022178, {"batch_size": 32, "lr": 0.1}),
+    ("control", 0, 1, 0.318529494648516, 0.5052579641342163, 2, 0.12754034626783278, 0.2198960395847879, {"batch_size": 32, "lr": 0.1}),
+    ("hybrid", 1, 0, 0.3476767476825577, 0.4864552915096283, 4, 0.18672603273616012, 0.3403041407465935, {"lr": 0.1}),
+    ("hybrid", 1, 1, 0.03863074974250641, 0.4010036587715149, 4, 0.20237398087120417, 0.2510642617940903, {"lr": 0.1}),
+    ("control", 1, 0, 0.5396503655414019, 0.5002725124359131, 2, 0.12052263035634396, 0.2512470234185457, {"batch_size": 32, "lr": 0.1}),
+    ("control", 1, 1, 0.4981167541368988, 0.5889585018157959, 2, 0.11831982242168466, 0.1546763960272074, {"batch_size": 32, "lr": 0.1}),
+    ("hybrid", 2, 0, 0.36845506613308465, 0.5895894765853882, 2, 0.18216980798345916, 0.2622399963438511, {"lr": 0.03}),
+    ("hybrid", 2, 1, -0.20001902768532515, 0.41008269786834717, 3, 0.2161856047336422, 0.26115107350051403, {"lr": 0.03}),
+    ("control", 2, 0, 0.6972125160644389, 0.5285782814025879, 4, 0.1360627490425037, 0.24769549760967494, {"batch_size": 16, "lr": 0.01}),
+    ("control", 2, 1, -0.15209125683114622, 0.5040912628173828, 2, 0.2952428189054187, 0.3653160039335489, {"batch_size": 16, "lr": 0.01}),
+    ("hybrid", 3, 0, 0.346843987809648, 0.5772862434387207, 2, 0.2505165352896215, 0.3259222094829266, {"lr": 0.01}),
+    ("hybrid", 3, 1, -0.29315098498896436, 0.5283404588699341, 3, 0.2641799290861653, 0.3680146947885171, {"lr": 0.01}),
+    ("control", 3, 0, 0.7462025072446365, 0.4997085630893707, 3, 0.14300499909765288, 0.23638867300290328, {"batch_size": 32, "lr": 0.1}),
+    ("control", 3, 1, 0.6953288019758299, 0.5140228271484375, 3, 0.07935083937519145, 0.1606803910854535, {"batch_size": 32, "lr": 0.1}),
+]  # fmt: skip
+
+#: ``(model, mcc_mean, mcc_std, mcc_seed_std, brier_mean, ece_mean, wilcoxon_p,
+#: rank_biserial)`` of the run's records, recorded with :data:`PINNED_FOLDS`.
+PINNED_RECORDS: list[tuple[str, float, float, float, float, float, float, float]] = [
+    ("hybrid", 0.022665840322258726, 0.1719229648487537, 0.3018402243507316, 0.21251145862159782, 0.2994774927767524, 0.125, -1.0),
+    ("control", 0.5021446947268254, 0.1833189534303184, 0.22934831139954298, 0.14105995901936597, 0.2266738909127929, 0.125, -1.0),
+]  # fmt: skip
+
+
+def _pinned_run() -> BenchmarkResult:
+    """Tuning drawn from a grid larger than the budget, two seeds, early stopping, SMOTE."""
+    return _run({"a": _data()}, max_epochs=4, patience=1, n_seeds=2, tuning=PINNED_TUNING)
+
+
+class TestSeededRunIsUnchanged:
+    """
+    ``run_benchmark``'s numbers are those of ``main`` before its tuning draw and its
+    fit-and-score were shared with ``examples/benchmark_rydberg_features.py`` (#524).
+
+    The run goes through every part that moved: the configurations drawn for tuning, the
+    training and validation threshold of each trial and of each final fit, the test MCC at
+    that threshold and the calibration of the test probabilities.
+    """
+
+    def test_every_fold_and_record_is_as_recorded(self) -> None:
+        result = _pinned_run()
+        assert len(result.folds) == len(PINNED_FOLDS)
+        for fold, pinned in zip(result.folds, PINNED_FOLDS, strict=True):
+            model, k, seed_index, mcc, threshold, epochs, brier, ece, chosen = pinned
+            assert (fold.model, fold.fold, fold.seed_index) == (model, k, seed_index)
+            assert (fold.mcc, fold.epochs, fold.hyperparameters) == (mcc, epochs, chosen)
+            assert fold.threshold == pytest.approx(threshold, rel=1e-6)
+            assert fold.brier == pytest.approx(brier, rel=1e-6)
+            assert fold.ece == pytest.approx(ece, rel=1e-6)
+        for record, pinned in zip(result.records, PINNED_RECORDS, strict=True):
+            name, mcc_mean, mcc_std, mcc_seed_std, brier_mean, ece_mean, p, effect = pinned
+            assert record["model"] == name
+            assert (record["mcc_mean"], record["mcc_std"], record["mcc_seed_std"]) == (
+                mcc_mean,
+                mcc_std,
+                mcc_seed_std,
+            )
+            assert record["brier_mean"] == pytest.approx(brier_mean, rel=1e-6)
+            assert record["ece_mean"] == pytest.approx(ece_mean, rel=1e-6)
+            assert (record["wilcoxon_p"], record["rank_biserial"]) == (p, effect)

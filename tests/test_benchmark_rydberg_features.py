@@ -4591,6 +4591,99 @@ class TestQuick:
         assert len(table.splitlines()) == 1 + len(ROWS)
 
 
+# ---------------------------------------------------------------------------
+# Seeded runs, against numbers recorded before the helpers were shared (#524)
+# ---------------------------------------------------------------------------
+
+_QUICK_CHOSEN = {"lr": 0.05, "max_epochs": 6, "batch_size": 32, "patience": None}
+_QUICK_CANDIDATES = [{"lr": 0.01}, {"lr": 0.05}]
+
+#: ``(arm, head, mcc, pr_auc, threshold, epochs, hyperparameters, tuning candidates,
+#: tuning scores)`` of every line of the ``--quick`` run (the ``quick`` fixture), in
+#: order, as read back from the file.  Recorded on c6ce325 (``main`` before #524, whose
+#: own ``fit_and_score`` and ``sample_configs`` the run went through) with Python 3.13 and
+#: the locked dependencies, as the ``repr`` of each value of ``read_records`` of a
+#: ``main(["--quick", ...])`` file.  On the declared floors (Python 3.11, torch 2.3.0,
+#: PennyLane 0.45) the same run differs only in the threshold of ``D-hybrid``, by 1.1e-7
+#: relative (float32 rounding in its trained circuit); with the newest dependencies on
+#: Python 3.14 it is equal.  Hence ``rel=1e-6`` for thresholds and PR-AUCs and equality for
+#: the rest.
+PINNED_QUICK: list[tuple[Any, ...]] = [
+    ("A", "linear", -0.20558916985752212, 0.5329118467546871, 0.3602352738380432, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.2990380270712763, 0.3766888457297747]),
+    ("A", "mlp", 0.4002254054659389, 0.820174388605423, 0.7212197780609131, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.4635477431867409, 0.5250485620506561]),
+    ("B", "linear", 0.14815570653432425, 0.5465996863888339, 0.6279727220535278, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.3431302575779871, 0.3730147033864202]),
+    ("B", "mlp", 0.4552444556393538, 0.7846675347791451, 0.4923308491706848, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.3323368410689924, 0.4683972478385392]),
+    ("C", "linear", 0.23018043421059298, 0.6799227754498263, 0.6437177062034607, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.4321224662491732, 0.458441142352223]),
+    ("C", "mlp", 0.5683600322805923, 0.7793636709763081, 0.5460516214370728, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.38242515233508956, 0.3964050669890513]),
+    ("D", "linear", 0.3651561712358987, 0.6299677873719636, 0.5444587469100952, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.20787000637835967, 0.22999276535327426]),
+    ("D", "mlp", 0.17996712863233494, 0.6731643962297735, 0.5894492864608765, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.2642957782445727, 0.3462264656229034]),
+    ("D-hybrid", "hybrid", 0.223367231551576, 0.6580915539517214, 0.556437075138092, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.25875104190884707, 0.3656388625821353]),
+]  # fmt: skip
+
+_DRAWN_CANDIDATES = [
+    {"batch_size": 16, "lr": 0.03},
+    {"batch_size": 32, "lr": 0.01},
+    {"batch_size": 32, "lr": 0.03},
+]
+
+#: The same fields for the lines of :func:`_drawn_run`, recorded with :data:`PINNED_QUICK`
+#: (``run_dataset`` of that run's settings, without a cache).  The linear head's first and
+#: third candidates tie, and the first is chosen.
+PINNED_DRAWN: list[tuple[Any, ...]] = [
+    ("C", "linear", 0.23018043421059298, 0.6780477754498262, 0.6350880861282349, 3, {"lr": 0.03, "max_epochs": 6, "batch_size": 16, "patience": 2}, _DRAWN_CANDIDATES, [0.4453757000449171, 0.41655436046835304, 0.4453757000449171]),
+    ("C", "mlp", 0.42516542614512887, 0.7093699492764305, 0.5214287042617798, 4, {"lr": 0.03, "max_epochs": 6, "batch_size": 32, "patience": 2}, _DRAWN_CANDIDATES, [0.38049407261126644, 0.38242515233508956, 0.39746943174633065]),
+]  # fmt: skip
+
+
+def _drawn_run() -> list[dict[str, Any]]:
+    """
+    Arm C with a search space of six configurations and a budget of three, so tuning
+    draws them (``--quick``'s two candidates are its whole grid), and early stopping.
+    """
+    settings = _replace(
+        QUICK,
+        arms=("C",),
+        search_space={"lr": (0.01, 0.03, 0.05), "batch_size": (16, 32)},
+        n_trials=3,
+        patience=2,
+    )
+    X, y, _ = bench.load_dataset("positive-control", settings)
+    return list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+
+
+def _assert_pinned(records: list[dict[str, Any]], pinned: list[tuple[Any, ...]]) -> None:
+    assert len(records) == len(pinned)
+    for record, row in zip(records, pinned, strict=True):
+        arm, head, mcc, pr, threshold, epochs, chosen, candidates, scores = row
+        assert (record["arm"], record["head"]) == (arm, head)
+        assert (record["mcc"], record["epochs"], record["hyperparameters"]) == (
+            mcc,
+            epochs,
+            chosen,
+        )
+        assert record["tuning"]["candidates"] == candidates
+        assert record["tuning"]["scores"] == scores
+        assert record["threshold"] == pytest.approx(threshold, rel=1e-6)
+        assert record["pr_auc"] == pytest.approx(pr, rel=1e-6)
+
+
+class TestSeededRunsAreUnchanged:
+    """
+    The script's numbers are those of ``main`` before its tuning draw and its
+    fit-and-score were shared with ``hqnn_forge.benchmark`` (#524).
+
+    Every line goes through the parts that moved: the candidates of tuning, each trial's
+    training and validation threshold, and the final fit's MCC at that threshold, PR-AUC
+    and epochs.
+    """
+
+    def test_the_quick_run_is_as_recorded(self, quick: Any) -> None:
+        _assert_pinned(quick.lines, PINNED_QUICK)
+
+    def test_a_run_whose_tuning_draws_from_the_grid_is_as_recorded(self) -> None:
+        _assert_pinned(_drawn_run(), PINNED_DRAWN)
+
+
 class TestShotsRun:
     def test_the_measurement_assumption_is_recorded_per_line(self, tmp_path: Path) -> None:
         settings = _replace(QUICK, arms=("A", "C"), shots=32, n_trials=0)
