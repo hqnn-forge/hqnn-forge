@@ -420,8 +420,16 @@ the folds, controls it.  It is recorded in ``seeds["jitter_seed"]`` and in
 ``T + t_ramp`` and the slope ``Ω/t_ramp``), and its ``feature_map`` records
 the list as ``device_violations``, empty when compatible.  Without
 ``--device`` a run outside the limits is simulated as given.  A square pulse
-has no edges to check (its instantaneous edges would always break the slew
-bound) and records no list, so its config is the one from before.
+records no list (decided in #781), so its config, and with it a default
+run's cache keys and shot streams, is the one from before: the list would be
+the same at every Ω and never empty.  The square pulse is the global drive
+with ``levels`` continuous and ``t_ramp = 0`` (their features agree bit for
+bit), and that drive's slope ``Ω/t_ramp`` is infinite, so its list always
+holds ``omega_slew_max``; its other entries follow from the line's ``omega``
+and ``omega_t`` (``Δ_max = √3 Ω``, ``T = ΩT/Ω``).  A run that wants the
+list recorded for the ideal pulse runs ``--encoding global-drive --levels
+continuous --t-ramp 0``, which has the same features under cache entries of
+its own.
 
 **The Aquila preset**, ``--device aquila`` (:func:`device_preset`), sets
 every value the model page documents for the device: the detection error
@@ -2326,8 +2334,9 @@ def _rydberg_representation(
     )
 
     # Every map of a global drive is checked against Aquila's limits and records the list
-    # (empty when compatible); a square pulse has no edges to check, and its config, and so
-    # the cache key of a default run, is the one from before #775.
+    # (empty when compatible); a square pulse records none ("Device realism": as the drive
+    # with continuous levels and t_ramp = 0 it always breaks the slew bound), so its config,
+    # and with it a default run's cache keys and shot streams, is the one from before #775.
     encoding = fmap.encoding
     violations: dict[str, Any] = (
         {"device_violations": encoding.device_violations(AQUILA_LIMITS)}

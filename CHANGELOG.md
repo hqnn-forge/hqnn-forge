@@ -558,7 +558,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `--levels` (no default), `--t-ramp` and `--n-ramp-segments`, and `--device aquila`,
   which sets the model page's values (`(0.01, 0.08)`, 0.2 µm, `t_ramp` at the slew bound
   rounded up, 32 segments per edge, `--shots 100`) and refuses a pulse outside the device's
-  limits. Every global-drive line records its `device_violations`, arm B keeps its reuse
+  limits. Every global-drive line records its `device_violations` (a square pulse none: it
+  always breaks the slew bound, and its config stays that of before), arm B keeps its reuse
   across `V/Ω` and geometries, and both summarisers refuse a row that mixes device models.
   Without the options a run writes the lines, features and cache keys of before, pinned on
   values recorded there (#775, #781)

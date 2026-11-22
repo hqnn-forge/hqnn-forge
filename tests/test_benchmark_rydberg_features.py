@@ -7356,6 +7356,53 @@ class TestDefaultRunIsUnchanged:
             assert "jitter_seed" not in record["seeds"]
             assert "device_violations" not in (record["feature_map"] or {})
 
+    #: ``(number, SHA-256)`` of the newline-joined ``shot_stream_seed(config, PIN_X)`` of
+    #: every representation with a config, recorded on 26ba88f with the unmodified script:
+    #: ``--quick`` with ``shots=16`` and the default grid with ``shots=100``.
+    STREAMS: ClassVar[dict[str, tuple[int, str]]] = {
+        "quick-shots": (3, "f9bfd9fc051a3a0bb10b7179a63151bd3ddd44e39266762bcc04fa2964c29177"),
+        "default-shots": (57, "2396f15ebde8bdd1462abda0084d3914bb14f9dbf8a9e46c088f861bf152a7ae"),
+    }
+
+    @pytest.mark.parametrize("name", ["quick-shots", "default-shots"])
+    def test_a_square_pulse_records_no_device_violations_and_keeps_its_streams(
+        self, name: str
+    ) -> None:
+        """
+        #781's decision: a square pulse records no ``device_violations``, so the shot stream of
+        every matrix of a default run with shots is the one of ``main``, seed for seed.
+        """
+        settings = {"quick-shots": _replace(QUICK, shots=16), "default-shots": bench.Settings(shots=100)}[name]  # fmt: skip
+        reps = [r for r in bench.representations(settings) if r.config is not None]
+        assert all("device_violations" not in r.config for r in reps)
+        seeds = [str(bench.shot_stream_seed(r.config, PIN_X)) for r in reps]
+        digest = hashlib.sha256("\n".join(seeds).encode()).hexdigest()
+        assert (len(seeds), digest) == self.STREAMS[name]
+
+    @pytest.mark.parametrize("omega", [1.0, OMEGA, 15.8])
+    def test_the_square_pulse_as_a_global_drive_never_passes_the_slew_bound(
+        self, omega: float
+    ) -> None:
+        """
+        Why a square pulse records no list: it is the global drive with continuous levels and
+        ``t_ramp = 0`` (the same detunings, and the same features bit for bit,
+        :class:`TestGlobalDrive`), whose slope ``Ω/t_ramp`` is infinite, so at every Ω within
+        the other bounds its list is this one entry and never the empty one.  The equivalent
+        run, ``--encoding global-drive --levels continuous --t-ramp 0``, records it.
+        """
+        square = PulseEncoding(4, omega=omega, t=math.pi / omega)
+        drive = GlobalDrivePulseEncoding(4, omega=omega, levels=None, t_ramp=0.0, t=square.t)
+        X = torch.from_numpy(PIN_X)
+        assert torch.equal(drive.detunings(X), square.detunings(X))
+        slew = ["omega_slew_max: Ω / t_ramp = inf rad/µs² exceeds 250 rad/µs²"]
+        assert drive.device_violations(AQUILA_LIMITS) == slew
+        # dataclasses.replace runs Settings' validation, as the command line does.
+        equivalent = _replace(
+            QUICK, omega=omega, encoding="global-drive", levels="continuous", t_ramp=0.0
+        )
+        assert _rep(equivalent, "A").config["device_violations"] == slew
+        assert "device_violations" not in _rep(QUICK, "A").config
+
 
 class TestSummaryRealism:
     """
