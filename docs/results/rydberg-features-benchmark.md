@@ -704,7 +704,8 @@ pipeline to detect anything.
 - **Exact against sampled readout.** Every feature is an exact expectation value. Because the
   heads see standardised features, a collapse of the features under strong dephasing is a
   change of scale they undo; with a finite number of shots it would not be. No `--shots` run
-  is in this note.
+  is in this note. The run under Aquila's device settings, shots and detection error included,
+  is [a companion note](rydberg-aquila-benchmark.md) (#776).
 - **Datasets.** One synthetic positive control and one UCI dataset, `iranian-churn`, loaded
   with its 300 exact duplicate rows, which can put the same record in a training and a test
   fold (the same for every arm, so paired differences are less affected than absolute
