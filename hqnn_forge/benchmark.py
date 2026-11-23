@@ -454,10 +454,11 @@ def fit_and_predict(
     The threshold ``t`` is ``TrainingHistory.best_threshold``: the one that
     maximises MCC on the validation rows at the best epoch.  It is 0.5 if
     the history records none, which happens when no epoch has a finite
-    validation MCC (validation probabilities that are not finite).  With
-    ``p_r = P(y = 1 | x_r)`` the model's
-    probability for test row ``r`` (``predict_proba``), the predicted label
-    is
+    validation MCC: :func:`train_model` scores an epoch NaN when one of its
+    validation probabilities is NaN.  Infinite logits are no such case,
+    since their probabilities 0 and 1 are finite and get a threshold.  With
+    ``p_r = P(y = 1 | x_r)`` the model's probability for test row ``r``
+    (``predict_proba``), the predicted label is
 
     ::
 
