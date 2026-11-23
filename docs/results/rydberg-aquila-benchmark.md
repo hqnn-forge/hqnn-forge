@@ -9,9 +9,9 @@ is to report what is left of the published A − B differences under those setti
 setting removes a difference where one goes.
 
 **Status: no results yet.** The full run is not started. The timing below puts it at about
-320 hours of this machine, far above a budget of about 10 hours, and `levels` has no source to
-be set from. Both wait for a decision on #776's pull request. This page records the timing,
-the planned runs and their exact commands, and the limits any result of them will have.
+310 to 335 hours of this machine, far above a budget of about 10 hours, and `levels` has no
+source to be set from. Both wait for a decision on #776's pull request. This page records the
+timing, the planned runs and their exact commands, and the limits any result of them will have.
 
 ## Planned setup
 
@@ -60,8 +60,10 @@ Measured on the machine of #502 (one AMD Ryzen 7 250 laptop CPU, 16 threads), at
 - **What `--quick` leaves out.** A full run takes 200 steps per segment instead of 40, which
   is about 5 times the solver cost per map (the audit on #781), and 600 or 3,150 samples instead
   of 160. A line's `feature_seconds` covers the fold's own matrix only. The matrices of its 3
-  tuning folds are simulated too and are recorded in no field (#785), so a fold costs about 4
-  times its `feature_seconds`.
+  tuning folds are simulated too and are recorded in no field (#785), so a fold costs several
+  times its `feature_seconds`: about 4 times on the positive control (844 s against 203 s
+  below) and about 2.3 times on Iranian Churn (3,600 s against 1,554 s). The estimate uses
+  each dataset's own measurement, not one ratio for both.
 - **One fold at full settings**, to replace the extrapolation by a measurement:
   `--folds 13 --max-folds 1 --arms A B --device aquila --levels 8 --jitter-samples 4
   --v-over-omega 1 --no-cache`, the two datasets started side by side:
@@ -104,7 +106,8 @@ Measured on the machine of #502 (one AMD Ryzen 7 250 laptop CPU, 16 threads), at
 
 ## Reproduce
 
-Not run yet. The commands, with `<L>` and `<K>` the values to be decided:
+Not run yet. The commands, with `<L>` and `<K>` the values to be decided and `<L'>` the other
+`levels` value (`8` if `<L>` is `continuous`, as proposed):
 
 ```bash
 # Preset, both datasets (13 folds, the published V/Ω list, γ/Ω 0, 0.03, 0.1)
@@ -120,7 +123,7 @@ for ds in positive-control iranian-churn; do
     uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
         --dataset $ds --data-path data/raw --download --folds 13 --arms A B C \
         --v-over-omega 1 10 --gamma-over-omega 0 0.03 \
-        --device aquila --levels 8 --jitter-samples <K> --out aquila-$ds-levels-8.jsonl
+        --device aquila --levels <L'> --jitter-samples <K> --out aquila-$ds-levels-other.jsonl
     uv run --frozen --all-extras python examples/benchmark_rydberg_features.py \
         --dataset $ds --data-path data/raw --download --folds 13 --arms A B C \
         --v-over-omega 10 100 --gamma-over-omega 0 \
@@ -189,6 +192,12 @@ dephasing model, datasets, fold intervals), and in addition:
   detuning was not verified (*Planned setup*), and the local detuning itself is an experimental
   capability on request (`docs/rydberg-model.md`, *Hardware realism*).
 - **The register is not checked against the device.** The preset checks the pulse, not the 4
-  µm minimum spacing or the 75 µm region (#783). At `V/Ω = 100` the chain's spacing is 4.03 µm.
+  µm minimum spacing or the 75 µm region (#783). The nominal positions of the planned grid
+  meet both: at `V/Ω = 100` the chain's spacing is 4.03 µm, and only a `V/Ω` above about 105
+  would go below 4 µm. The jitter does go below it: at `σ = 0.2` µm in `x` and `y`, about 44 %
+  of the displaced nearest-neighbour distances at 4.03 µm are under 4 µm, and about 92 % of
+  the displaced four-atom chains have at least one such pair (2 × 10⁶ and 5 × 10⁵ draws).
+  That is the device's own shot-to-shot spread of the positions it is given, not a setting
+  outside its limits, which is why #783's check is to apply to the nominal positions only.
 - **The timing above** is of one fold and one grid point per dataset. `--quick` alone would
   have understated a full preset map by about 5 times per map, before the grid size.
