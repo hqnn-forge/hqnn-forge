@@ -230,7 +230,7 @@ from __future__ import annotations
 import math
 import numbers
 from collections.abc import Callable, Sequence
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import pennylane as qml
 import torch
@@ -261,11 +261,13 @@ from hqnn_forge.noise import (
 from hqnn_forge.rydberg.hamiltonian import DEFAULT_C6, MAX_ATOMS, rydberg_hamiltonian
 from hqnn_forge.rydberg.lindblad import (
     _doubling_count,
+    _largest_trace_distance,
     _non_negative_number,
     _propagator,
     _spread,
     _starting_count,
     _step_count,
+    _target,
     _tolerance,
     evolve,
     readout,
@@ -918,14 +920,22 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         return _final_density_matrix(self._pulse, self.prepare_inputs(x), self.qlayer.weights)
 
     @torch.no_grad()
-    def step_count(self, x: torch.Tensor, *, tol: float) -> int:
+    def step_count(
+        self,
+        x: torch.Tensor,
+        *,
+        tol: float,
+        target: Literal["features", "state"] = "features",
+    ) -> int:
         """
-        A step count for this layer whose estimated feature error is at most ``tol``.
+        A step count for this layer whose estimated feature or state error is at most ``tol``.
 
         :meth:`hqnn_forge.rydberg.RydbergFeatureMap.step_count` for the
         layer's chain of segments: one integer for the inputs ``x`` **at the
         weights the layer holds now**, the smallest count tried at which the
-        estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of ``ρ(T)`` is at most
+        estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` of ``ρ(T)``
+        (``target="features"``, the default) or the trace distance of
+        ``ρ(T)`` itself (``target="state"``, see *The state*) is at most
         ``tol`` for every sample, to pass as ``n_steps`` to a layer with the
         same settings (see Notes).  It does not depend on the layer's own
         ``n_steps``.  The layer evolves its ``K`` segments with ``n_steps``
@@ -935,10 +945,10 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         itself, as for the feature map's ramped drive (#760, #769).
 
         **The target** is that of :func:`~hqnn_forge.rydberg.step_count` and
-        ``RydbergFeatureMap.step_count``: the largest error, over the
-        samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (no unit) of the state
-        :meth:`density_matrices` returns.  The layer's outputs are
-        ``⟨Z_i⟩ = 1 − 2⟨n_i⟩``, so an error ``e`` of ``⟨n_i⟩`` is an error
+        ``RydbergFeatureMap.step_count``: with ``target="features"`` the
+        largest error, over the samples, of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` (no
+        unit) of the state :meth:`density_matrices` returns.  The layer's
+        outputs are ``⟨Z_i⟩ = 1 − 2⟨n_i⟩``, so an error ``e`` of ``⟨n_i⟩`` is an error
         ``2e`` of ``⟨Z_i⟩``, and the outputs are within about ``2 · tol``.  A
         readout error, ``⟨Z⟩ ↦ (1 − p01 − p10) ⟨Z⟩ + (p10 − p01)`` after the
         state, scales that by ``|1 − p01 − p10| <= 1``.  The gate-model
@@ -972,6 +982,27 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         elsewhere asked for up to 3.4 times this method's count, whose error
         was at most ``0.998 tol`` in all 40.
 
+        **The state** (``target="state"``, #774).  The error is that of
+        ``step_count(..., target="state")``: the trace distance
+        ``D(ρ_n, ρ) = ½ ‖ρ_n − ρ‖₁`` (no unit) of ``ρ(T)`` as
+        :meth:`density_matrices` returns it.  The expansion of the chain is
+        one of maps on ρ, so it holds for the matrix itself before any
+        readout, ``ρ_n = ρ + B / n² + O(n⁻⁴)`` with
+        ``B = Σ_k E_(K−1) ⋯ E_(k+1) D_k E_(k−1) ⋯ E_0 ρ₀``
+        (``ρ₀ = |g…g⟩⟨g…g|``) independent of ``n``, and
+        ``ρ_n − ρ_2n = 3 (ρ_2n − ρ)`` as matrices to that order.  ``D`` is
+        half a norm and scales with its argument, so the estimate at ``2n``
+        steps is the largest ``D(ρ_n, ρ_2n) / 3`` over the samples, from one
+        ``eigvalsh`` of the Hermitian ``ρ_n − ρ_2n`` each.  What ``step_count``
+        derives from ``D`` holds here: every ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` is
+        off by at most ``D``, so every output ``⟨Z_i⟩`` by at most ``2D``
+        and the count is at least the features' count up to rounding; every
+        entry of ρ by at most ``D``; and the state kernel ``Tr[ρ(x) ρ(x′)]``
+        of :func:`~hqnn_forge.kernels.quantum_kernel_matrix` by at most
+        ``D(x) + D(x′)``.  Both runs are held for the whole of ``x``, as
+        :meth:`density_matrices` holds one, so the memory is that of two
+        calls of it.
+
         **The starting count.**  Every segment needs its step to resolve its
         generator, ``(τ/n) · (W_k + Nγ/2) <= 1/2``, ``W_k = E_max − E_min``
         the spread of the energies of ``H_k(x)``, the largest over the
@@ -1004,9 +1035,15 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             ``model.classical_encoder(X) * π``, or ``X`` itself with
             ``use_classical_encoder=False``.
         tol:
-            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` over
-            the samples, a finite number ``>= 1e-9``, without a default, as
-            for :func:`~hqnn_forge.rydberg.step_count`.
+            The largest estimated error of ``⟨n_i⟩`` and ``⟨n_i n_j⟩``, or of
+            the trace distance of ``ρ(T)``, over the samples, a finite number
+            ``>= 1e-9``, without a default, as for
+            :func:`~hqnn_forge.rydberg.step_count`.
+        target:
+            ``"features"`` (the default) for ``⟨n_i⟩`` and ``⟨n_i n_j⟩``,
+            what the outputs ``⟨Z_i⟩`` are read from; ``"state"`` for ``ρ(T)``
+            in the trace distance, what :meth:`density_matrices` returns and
+            the kernels compare (see *The state*).
 
         Returns
         -------
@@ -1018,7 +1055,8 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         ------
         ValueError
             If ``x`` is refused by :meth:`prepare_inputs` or holds no sample,
-            or if ``tol`` is not a finite number ``>= 1e-9``.
+            if ``tol`` is not a finite number ``>= 1e-9``, or if ``target`` is
+            neither ``"features"`` nor ``"state"``.
         RuntimeError
             If an estimate above ``tol`` is more than half of the one before,
             as for :func:`~hqnn_forge.rydberg.step_count`: the solver's
@@ -1044,7 +1082,9 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         * **Cost.**  One ``eigvalsh`` per segment and sample for ``n₀``, then
           ``k + 1`` runs of :meth:`density_matrices` on ``x``, at ``n₀, 2n₀,
           …, 2^k n₀`` steps per segment: ``2 · result − n₀`` steps per
-          segment in all, without gradients.
+          segment in all, without gradients.  ``target="state"`` adds one
+          ``eigvalsh`` per sample and comparison of two runs, and holds the
+          states of two runs, ``2 · batch · 4^N`` ``complex128`` entries.
 
         Examples
         --------
@@ -1059,8 +1099,14 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         >>> layer = AnalogRydbergLayer(n_qubits=2, n_segments=2, gamma=4 * math.pi, n_steps=n)
         >>> layer.load_state_dict(probe.state_dict())
         <All keys matched successfully>
+
+        For :meth:`density_matrices` and the kernels, one doubling more here:
+
+        >>> probe.step_count(x, tol=1e-6, target="state")
+        512
         """
         tol = _tolerance(tol)
+        target = _target(target)
         x = self.prepare_inputs(x)
         if x.shape[:-1].numel() == 0:
             raise ValueError(
@@ -1077,12 +1123,14 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
             for h in _segment_hamiltonians(self._pulse, x, weights)
         )
 
-        def features(n_steps: int) -> torch.Tensor:
-            # ⟨n_i⟩ and ⟨n_i n_j⟩ of ρ(T), the state density_matrices returns
-            rho = _final_density_matrix(self._pulse._replace(n_steps=n_steps), x, weights)
-            return readout(rho, pairs=True)
+        def state(n_steps: int) -> torch.Tensor:
+            # ρ(T), the state density_matrices returns, at n_steps per segment
+            return _final_density_matrix(self._pulse._replace(n_steps=n_steps), x, weights)
 
-        return _doubling_count(start, features, tol)
+        if target == "state":
+            return _doubling_count(start, state, tol, distance=_largest_trace_distance)
+        # ⟨n_i⟩ and ⟨n_i n_j⟩ of that state
+        return _doubling_count(start, lambda n_steps: readout(state(n_steps), pairs=True), tol)
 
     def prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """
