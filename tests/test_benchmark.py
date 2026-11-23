@@ -27,7 +27,7 @@ from hqnn_forge.evaluation import (
     rank_biserial_correlation,
     wilcoxon_signed_rank,
 )
-from hqnn_forge.models import HybridBinaryClassifier
+from hqnn_forge.models import HybridBinaryClassifier, LinearClassifier
 
 N_SPLITS = 4
 
@@ -734,11 +734,184 @@ class TestTuning:
         assert all(c["options"]["batch_size"] == 16 for c in captured)
 
     def test_trials_are_drawn_from_the_space(self) -> None:
-        configs = benchmark._sample_configs({"lr": [1, 2, 3], "batch_size": [4, 5]}, 4, seed=0)
+        configs = benchmark.sample_configs({"lr": [1, 2, 3], "batch_size": [4, 5]}, 4, seed=0)
         assert len(configs) == 4 and len({tuple(sorted(c.items())) for c in configs}) == 4
         assert all(c["lr"] in (1, 2, 3) and c["batch_size"] in (4, 5) for c in configs)
         # A space smaller than the budget is tried in full, once each.
-        assert len(benchmark._sample_configs({"lr": [1, 2]}, 5, seed=0)) == 2
+        assert len(benchmark.sample_configs({"lr": [1, 2]}, 5, seed=0)) == 2
+
+    def test_every_trial_and_every_final_fit_goes_through_fit_and_predict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one fit-and-score of ``run_benchmark``, shared with the Rydberg script (#524)."""
+        calls: list[int] = []
+        real = benchmark.fit_and_predict
+
+        def spy(*args: Any, **kwargs: Any) -> benchmark.FitPrediction:
+            calls.append(len(args[6]))  # the rows scored
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(benchmark, "fit_and_predict", spy)
+        tuning = benchmark.Tuning(n_trials=2, search_spaces=SPACES, inner_folds=2)
+        result = _run({"a": _data()}, n_splits=2, max_epochs=1, tuning=tuning)
+        # Per fold: both models' 2 trials x 2 inner folds, then the two final fits on the
+        # test rows, in the order of result.folds.
+        assert len(calls) == 2 * (2 * 2 * 2 + 2)
+        finals = [calls[10 * k + 8 + m] for k in range(2) for m in range(2)]
+        assert finals == [f.test_idx.size for f in result.folds]
+
+
+# ---------------------------------------------------------------------------
+# The shared pieces of a run: the draw of tuning and fit-and-predict (#524)
+# ---------------------------------------------------------------------------
+
+
+class TestSampleConfigs:
+    """Against the grid written out by hand (keys sorted, the last varying fastest)."""
+
+    SPACE: dict[str, list[int]] = {"lr": [1, 2, 3], "batch_size": [4, 5]}
+    GRID: list[dict[str, int]] = [
+        {"batch_size": 4, "lr": 1},
+        {"batch_size": 4, "lr": 2},
+        {"batch_size": 4, "lr": 3},
+        {"batch_size": 5, "lr": 1},
+        {"batch_size": 5, "lr": 2},
+        {"batch_size": 5, "lr": 3},
+    ]
+
+    @pytest.mark.parametrize("n_trials", [6, 7, 100])
+    def test_a_budget_of_the_whole_grid_gets_it_in_grid_order(self, n_trials: int) -> None:
+        assert benchmark.sample_configs(self.SPACE, n_trials, seed=5) == self.GRID
+
+    @pytest.mark.parametrize(
+        ("seed", "n_trials", "indices"), [(0, 4, [1, 2, 3, 4]), (1, 3, [1, 2, 4])]
+    )
+    def test_a_smaller_budget_is_a_draw_without_replacement_in_grid_order(
+        self, seed: int, n_trials: int, indices: list[int]
+    ) -> None:
+        # The indices of the docstring's draw, recorded from it once and checked here too.
+        drawn = np.random.default_rng(seed).choice(6, size=n_trials, replace=False)
+        assert sorted(drawn.tolist()) == indices
+        expected = [self.GRID[i] for i in indices]
+        assert benchmark.sample_configs(self.SPACE, n_trials, seed) == expected
+        # The order in which the space lists its keys does not enter.
+        reordered = {"batch_size": [4, 5], "lr": [1, 2, 3]}
+        assert benchmark.sample_configs(reordered, n_trials, seed) == expected
+
+    @pytest.mark.parametrize(
+        ("space", "n_trials", "match"),
+        [
+            ({"lr": [1]}, 0, r"n_trials must be >= 1; got 0\."),
+            ({"lr": [1], "batch_size": []}, 2, r"no values to draw from for \['batch_size'\]\."),
+        ],
+    )
+    def test_rejected(self, space: dict[str, list[int]], n_trials: int, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            benchmark.sample_configs(space, n_trials, seed=0)
+
+
+class _History:
+    """What ``fit_and_predict`` reads of a ``TrainingHistory``."""
+
+    def __init__(self, best_threshold: float | None, n_epochs: int) -> None:
+        self.best_threshold = best_threshold
+        self.n_epochs = n_epochs
+
+
+class TestFitAndPredict:
+    """
+    The threshold, the labels and the MCC against a confusion matrix counted by hand,
+    with ``train_model`` replaced by a recorder and fixed test probabilities.
+    """
+
+    #: Test probabilities and labels: two rows sit exactly on the threshold 0.25.
+    PROBABILITY = [0.1, 0.25, 0.3, 0.2, 0.9, 0.25]
+    Y_TEST = np.array([0, 1, 1, 0, 0, 1], dtype=np.int64)
+
+    def _fit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        best_threshold: float | None,
+        probability: list[float] | None = None,
+    ) -> tuple[benchmark.FitPrediction, dict[str, Any]]:
+        seen: dict[str, Any] = {}
+
+        def fake_train_model(
+            model: nn.Module, loss_fn: Any, optimizer: Any, *tensors: Any, **kwargs: Any
+        ) -> _History:
+            seen.update(loss=loss_fn, optimizer=optimizer, tensors=tensors, kwargs=kwargs)
+            return _History(best_threshold, 3)
+
+        monkeypatch.setattr(benchmark, "train_model", fake_train_model)
+        model = LinearClassifier(2)
+        values = torch.tensor(self.PROBABILITY if probability is None else probability)
+        monkeypatch.setattr(model, "predict_proba", lambda x: values)
+        rng = np.random.default_rng(0)
+        X_train, X_val, X_test = (
+            rng.normal(size=(8, 2)),
+            rng.normal(size=(4, 2)),
+            rng.normal(size=(6, 2)),
+        )
+        fit = benchmark.fit_and_predict(
+            model,
+            nn.BCEWithLogitsLoss,
+            X_train,
+            np.array([0, 1] * 4, dtype=np.int64),
+            X_val,
+            np.array([0, 1, 0, 1], dtype=np.int64),
+            X_test,
+            self.Y_TEST,
+            lr=0.02,
+            max_epochs=9,
+            batch_size=4,
+            patience=2,
+            batch_seed=11,
+        )
+        seen["inputs"] = (X_train, X_val)
+        return fit, seen
+
+    def test_a_probability_at_the_threshold_is_positive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ŷ = p >= 0.25: [0, 1, 1, 0, 1, 1] against [0, 1, 1, 0, 0, 1] gives
+        # TP = 3, FP = 1, TN = 2, FN = 0, so MCC = (3·2 − 1·0)/√(4·3·3·2) = 1/√2.
+        fit, _ = self._fit(monkeypatch, 0.25)
+        assert fit.threshold == 0.25
+        assert fit.mcc == pytest.approx(1 / math.sqrt(2), abs=1e-15)
+        assert (fit.epochs, fit.finite) == (3, True)
+        torch.testing.assert_close(fit.probability, torch.tensor(self.PROBABILITY), rtol=0, atol=0)
+
+    def test_without_a_recorded_threshold_it_is_one_half(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ŷ = p >= 0.5: [0, 0, 0, 0, 1, 0] gives TP = 0, FP = 1, TN = 2, FN = 3,
+        # so MCC = (0·2 − 1·3)/√(1·3·3·5) = −1/√5.
+        fit, _ = self._fit(monkeypatch, None)
+        assert fit.threshold == 0.5
+        assert fit.mcc == pytest.approx(-1 / math.sqrt(5), abs=1e-15)
+
+    def test_nan_probabilities_label_every_row_negative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No row is positive: TP = FP = 0, a zero factor of the denominator, MCC 0.
+        fit, _ = self._fit(monkeypatch, 0.25, [math.nan] * 6)
+        assert (fit.mcc, fit.finite) == (0.0, False)
+
+    def test_the_training_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, seen = self._fit(monkeypatch, 0.25)
+        assert isinstance(seen["loss"], nn.BCEWithLogitsLoss)
+        assert isinstance(seen["optimizer"], torch.optim.Adam)
+        assert seen["optimizer"].param_groups[0]["lr"] == 0.02
+        X_train, X_val = seen["inputs"]
+        x_train, y_train, x_val, y_val = seen["tensors"]
+        assert all(t.dtype == torch.float32 for t in seen["tensors"])
+        torch.testing.assert_close(x_train, torch.from_numpy(X_train.astype(np.float32)))
+        torch.testing.assert_close(x_val, torch.from_numpy(X_val.astype(np.float32)))
+        assert y_train.tolist() == [0.0, 1.0] * 4 and y_val.tolist() == [0.0, 1.0, 0.0, 1.0]
+        kwargs = dict(seen["kwargs"])
+        generator = kwargs.pop("generator")
+        assert kwargs == {"max_epochs": 9, "batch_size": 4, "monitor": "mcc", "patience": 2}
+        assert torch.equal(generator.get_state(), torch.Generator().manual_seed(11).get_state())
 
     @pytest.mark.parametrize(
         ("kwargs", "match"),
@@ -880,3 +1053,91 @@ class TestNoiseSweep:
     def test_rejected(self, kwargs: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
             _run({"a": _data()}, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# A seeded run, against numbers recorded before the helpers were shared (#524)
+# ---------------------------------------------------------------------------
+
+#: The tuning of the pinned run: the control's grid (6) is larger than the
+#: budget (2), so its configurations are a random draw, not the whole grid.
+PINNED_TUNING = benchmark.Tuning(
+    n_trials=2,
+    search_spaces={
+        "hybrid": {"lr": [0.01, 0.03, 0.1]},
+        "control": {"lr": [0.01, 0.03, 0.1], "batch_size": [16, 32]},
+    },
+    inner_folds=2,
+)
+
+#: ``(model, fold, seed_index, mcc, threshold, epochs, brier, ece, hyperparameters)`` of
+#: every ``FoldResult`` of :func:`_pinned_run`, in order.  Recorded on c6ce325 (``main``
+#: before #524, whose private ``_fit_and_score`` and ``_sample_configs`` the run went
+#: through) with Python 3.13 and the locked dependencies, as the ``repr`` of each value of
+#: ``result.folds``.  On the declared floors (Python 3.11, torch 2.3.0, PennyLane 0.45) the
+#: same run differs only in the hybrid's thresholds, Brier scores and ECEs, by at most
+#: 1.5e-7 relative (float32 rounding in its circuit); with the newest dependencies on
+#: Python 3.14 it is equal.  Hence ``rel=1e-6`` for those three and equality for the rest.
+PINNED_FOLDS: list[tuple[str, int, int, float, float, int, float, float, dict[str, Any]]] = [
+    ("hybrid", 0, 0, -0.3085304536722668, 0.33060216903686523, 3, 0.19878986617741598, 0.28849848014552415, {"lr": 0.1}),
+    ("hybrid", 0, 1, -0.11857936244317066, 0.34217381477355957, 2, 0.19914991209511404, 0.29862508541200217, {"lr": 0.1}),
+    ("control", 0, 0, 0.6742083750340275, 0.44874751567840576, 3, 0.10843546668829955, 0.17749110264022178, {"batch_size": 32, "lr": 0.1}),
+    ("control", 0, 1, 0.318529494648516, 0.5052579641342163, 2, 0.12754034626783278, 0.2198960395847879, {"batch_size": 32, "lr": 0.1}),
+    ("hybrid", 1, 0, 0.3476767476825577, 0.4864552915096283, 4, 0.18672603273616012, 0.3403041407465935, {"lr": 0.1}),
+    ("hybrid", 1, 1, 0.03863074974250641, 0.4010036587715149, 4, 0.20237398087120417, 0.2510642617940903, {"lr": 0.1}),
+    ("control", 1, 0, 0.5396503655414019, 0.5002725124359131, 2, 0.12052263035634396, 0.2512470234185457, {"batch_size": 32, "lr": 0.1}),
+    ("control", 1, 1, 0.4981167541368988, 0.5889585018157959, 2, 0.11831982242168466, 0.1546763960272074, {"batch_size": 32, "lr": 0.1}),
+    ("hybrid", 2, 0, 0.36845506613308465, 0.5895894765853882, 2, 0.18216980798345916, 0.2622399963438511, {"lr": 0.03}),
+    ("hybrid", 2, 1, -0.20001902768532515, 0.41008269786834717, 3, 0.2161856047336422, 0.26115107350051403, {"lr": 0.03}),
+    ("control", 2, 0, 0.6972125160644389, 0.5285782814025879, 4, 0.1360627490425037, 0.24769549760967494, {"batch_size": 16, "lr": 0.01}),
+    ("control", 2, 1, -0.15209125683114622, 0.5040912628173828, 2, 0.2952428189054187, 0.3653160039335489, {"batch_size": 16, "lr": 0.01}),
+    ("hybrid", 3, 0, 0.346843987809648, 0.5772862434387207, 2, 0.2505165352896215, 0.3259222094829266, {"lr": 0.01}),
+    ("hybrid", 3, 1, -0.29315098498896436, 0.5283404588699341, 3, 0.2641799290861653, 0.3680146947885171, {"lr": 0.01}),
+    ("control", 3, 0, 0.7462025072446365, 0.4997085630893707, 3, 0.14300499909765288, 0.23638867300290328, {"batch_size": 32, "lr": 0.1}),
+    ("control", 3, 1, 0.6953288019758299, 0.5140228271484375, 3, 0.07935083937519145, 0.1606803910854535, {"batch_size": 32, "lr": 0.1}),
+]  # fmt: skip
+
+#: ``(model, mcc_mean, mcc_std, mcc_seed_std, brier_mean, ece_mean, wilcoxon_p,
+#: rank_biserial)`` of the run's records, recorded with :data:`PINNED_FOLDS`.
+PINNED_RECORDS: list[tuple[str, float, float, float, float, float, float, float]] = [
+    ("hybrid", 0.022665840322258726, 0.1719229648487537, 0.3018402243507316, 0.21251145862159782, 0.2994774927767524, 0.125, -1.0),
+    ("control", 0.5021446947268254, 0.1833189534303184, 0.22934831139954298, 0.14105995901936597, 0.2266738909127929, 0.125, -1.0),
+]  # fmt: skip
+
+
+def _pinned_run() -> BenchmarkResult:
+    """Tuning drawn from a grid larger than the budget, two seeds, early stopping, SMOTE."""
+    return _run({"a": _data()}, max_epochs=4, patience=1, n_seeds=2, tuning=PINNED_TUNING)
+
+
+class TestSeededRunIsUnchanged:
+    """
+    ``run_benchmark``'s numbers are those of ``main`` before its tuning draw and its
+    fit-and-score were shared with ``examples/benchmark_rydberg_features.py`` (#524).
+
+    The run goes through every part that moved: the configurations drawn for tuning, the
+    training and validation threshold of each trial and of each final fit, the test MCC at
+    that threshold and the calibration of the test probabilities.
+    """
+
+    def test_every_fold_and_record_is_as_recorded(self) -> None:
+        result = _pinned_run()
+        assert len(result.folds) == len(PINNED_FOLDS)
+        for fold, pinned in zip(result.folds, PINNED_FOLDS, strict=True):
+            model, k, seed_index, mcc, threshold, epochs, brier, ece, chosen = pinned
+            assert (fold.model, fold.fold, fold.seed_index) == (model, k, seed_index)
+            assert (fold.mcc, fold.epochs, fold.hyperparameters) == (mcc, epochs, chosen)
+            assert fold.threshold == pytest.approx(threshold, rel=1e-6)
+            assert fold.brier == pytest.approx(brier, rel=1e-6)
+            assert fold.ece == pytest.approx(ece, rel=1e-6)
+        for record, row in zip(result.records, PINNED_RECORDS, strict=True):
+            name, mcc_mean, mcc_std, mcc_seed_std, brier_mean, ece_mean, p, effect = row
+            assert record["model"] == name
+            assert (record["mcc_mean"], record["mcc_std"], record["mcc_seed_std"]) == (
+                mcc_mean,
+                mcc_std,
+                mcc_seed_std,
+            )
+            assert record["brier_mean"] == pytest.approx(brier_mean, rel=1e-6)
+            assert record["ece_mean"] == pytest.approx(ece_mean, rel=1e-6)
+            assert (record["wilcoxon_p"], record["rank_biserial"]) == (p, effect)

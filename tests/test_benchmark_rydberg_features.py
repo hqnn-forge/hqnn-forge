@@ -55,7 +55,8 @@ import torch
 import torch.nn as nn
 
 import hqnn_forge
-from hqnn_forge.benchmark import _sample_configs, fingerprint
+from hqnn_forge import benchmark, experiment
+from hqnn_forge.benchmark import fingerprint, sample_configs
 from hqnn_forge.data import load_iranian_churn
 from hqnn_forge.diagnostics import separation_measures
 from hqnn_forge.evaluation import matthews_corrcoef, pr_auc
@@ -840,12 +841,55 @@ class TestModels:
         with pytest.raises(ValueError, match="unknown head"):
             bench.build_model("svm", 4, bench.Settings(), 0)
 
-    def test_candidates_are_drawn_as_the_benchmark_tuning_draws_them(self) -> None:
-        space = {"lr": (0.003, 0.01, 0.03), "batch_size": (32, 128)}
-        for seed in (0, 1, 99):
-            assert bench.sample_configs(space, 4, seed) == _sample_configs(space, 4, seed)
-            assert len(bench.sample_configs(space, 4, seed)) == 4
-        assert len(bench.sample_configs(space, 10, 0)) == 6  # the whole grid, no more
+    def test_the_shared_helpers_are_the_library_ones(self) -> None:
+        """
+        One implementation each, the one ``run_benchmark`` uses (#524): the tuning draw,
+        fit-and-predict and the JSON mapping are imported, not written again.
+        """
+        assert bench.sample_configs is benchmark.sample_configs
+        assert bench.fit_and_predict is benchmark.fit_and_predict
+        assert bench.plain_data is experiment.plain_data
+
+    def test_fit_and_score_is_fit_and_predict_on_the_blocks_of_the_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rng = np.random.default_rng(3)
+        labels = np.tile([0, 1], 20)
+        features = rng.normal(size=(40, 2)) + labels[:, None]
+        # training rows 0-19 (16 real, 4 synthetic), validation 20-29, test 30-39
+        split = bench.Split(
+            inputs=features, labels=labels, n_train=20, n_synthetic=4, n_val=10, n_test=10
+        )
+        calls: list[tuple[tuple[Any, ...], dict[str, Any], Any]] = []
+        real = bench.fit_and_predict
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            out = real(*args, **kwargs)
+            calls.append((args, kwargs, out))
+            return out
+
+        monkeypatch.setattr(bench, "fit_and_predict", spy)
+        config = {"lr": 0.05, "max_epochs": 5, "batch_size": 8, "patience": None}
+        model = LinearClassifier(2, init_seed=1)
+        fit = bench.fit_and_score(model, features, split, config, loss="bce", batch_seed=7)
+        ((args, kwargs, out),) = calls
+        assert args[0] is model and args[1] is nn.BCEWithLogitsLoss
+        for got, rows in zip(
+            args[2::2], (slice(0, 20), slice(20, 30), slice(30, 40)), strict=True
+        ):
+            np.testing.assert_array_equal(got, features[rows])
+        for got, rows in zip(
+            args[3::2], (slice(0, 20), slice(20, 30), slice(30, 40)), strict=True
+        ):
+            np.testing.assert_array_equal(got, labels[rows])
+        assert kwargs == {**config, "batch_seed": 7}
+        assert (fit.mcc, fit.threshold, fit.seconds, fit.epochs) == (
+            out.mcc,
+            out.threshold,
+            out.seconds,
+            out.epochs,
+        )
+        assert fit.pr_auc == pr_auc(labels[30:], out.probability)
 
 
 # ---------------------------------------------------------------------------
@@ -4081,7 +4125,7 @@ class TestTuning:
         assert len(records) == 6
         assert fits_per_tune == [3 * settings.inner_folds] * 6
         assert fits[0] == 6 * (3 * settings.inner_folds + 1)
-        expected = _sample_configs({"lr": (0.01, 0.03, 0.1, 0.3)}, 3, fold.seeds["tune_seed"])
+        expected = sample_configs({"lr": (0.01, 0.03, 0.1, 0.3)}, 3, fold.seeds["tune_seed"])
         for record in records:
             assert record["tuning"]["n_trials"] == 3
             assert record["tuning"]["inner_folds"] == settings.inner_folds
@@ -4202,7 +4246,7 @@ class TestTuning:
 
         # The tuning of every line: the same folds, candidates and seed ...
         assert len(tunes) == len(ROWS)
-        candidates = _sample_configs(space, settings.n_trials, fold.seeds["tune_seed"])
+        candidates = sample_configs(space, settings.n_trials, fold.seeds["tune_seed"])
         assert len(candidates) == settings.n_trials == 2 < len(space["lr"])
         for tune in tunes:
             assert len(tune.splits) == settings.inner_folds
@@ -4589,6 +4633,99 @@ class TestQuick:
             assert returned["test_idx"].tolist() == read["test_idx"]
         table = bench.summarise(quick.records)
         assert len(table.splitlines()) == 1 + len(ROWS)
+
+
+# ---------------------------------------------------------------------------
+# Seeded runs, against numbers recorded before the helpers were shared (#524)
+# ---------------------------------------------------------------------------
+
+_QUICK_CHOSEN = {"lr": 0.05, "max_epochs": 6, "batch_size": 32, "patience": None}
+_QUICK_CANDIDATES = [{"lr": 0.01}, {"lr": 0.05}]
+
+#: ``(arm, head, mcc, pr_auc, threshold, epochs, hyperparameters, tuning candidates,
+#: tuning scores)`` of every line of the ``--quick`` run (the ``quick`` fixture), in
+#: order, as read back from the file.  Recorded on c6ce325 (``main`` before #524, whose
+#: own ``fit_and_score`` and ``sample_configs`` the run went through) with Python 3.13 and
+#: the locked dependencies, as the ``repr`` of each value of ``read_records`` of a
+#: ``main(["--quick", ...])`` file.  On the declared floors (Python 3.11, torch 2.3.0,
+#: PennyLane 0.45) the same run differs only in the threshold of ``D-hybrid``, by 1.1e-7
+#: relative (float32 rounding in its trained circuit); with the newest dependencies on
+#: Python 3.14 it is equal.  Hence ``rel=1e-6`` for thresholds and PR-AUCs and equality for
+#: the rest.
+PINNED_QUICK: list[tuple[Any, ...]] = [
+    ("A", "linear", -0.20558916985752212, 0.5329118467546871, 0.3602352738380432, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.2990380270712763, 0.3766888457297747]),
+    ("A", "mlp", 0.4002254054659389, 0.820174388605423, 0.7212197780609131, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.4635477431867409, 0.5250485620506561]),
+    ("B", "linear", 0.14815570653432425, 0.5465996863888339, 0.6279727220535278, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.3431302575779871, 0.3730147033864202]),
+    ("B", "mlp", 0.4552444556393538, 0.7846675347791451, 0.4923308491706848, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.3323368410689924, 0.4683972478385392]),
+    ("C", "linear", 0.23018043421059298, 0.6799227754498263, 0.6437177062034607, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.4321224662491732, 0.458441142352223]),
+    ("C", "mlp", 0.5683600322805923, 0.7793636709763081, 0.5460516214370728, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.38242515233508956, 0.3964050669890513]),
+    ("D", "linear", 0.3651561712358987, 0.6299677873719636, 0.5444587469100952, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.20787000637835967, 0.22999276535327426]),
+    ("D", "mlp", 0.17996712863233494, 0.6731643962297735, 0.5894492864608765, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.2642957782445727, 0.3462264656229034]),
+    ("D-hybrid", "hybrid", 0.223367231551576, 0.6580915539517214, 0.556437075138092, 6, _QUICK_CHOSEN, _QUICK_CANDIDATES, [0.25875104190884707, 0.3656388625821353]),
+]  # fmt: skip
+
+_DRAWN_CANDIDATES = [
+    {"batch_size": 16, "lr": 0.03},
+    {"batch_size": 32, "lr": 0.01},
+    {"batch_size": 32, "lr": 0.03},
+]
+
+#: The same fields for the lines of :func:`_drawn_run`, recorded with :data:`PINNED_QUICK`
+#: (``run_dataset`` of that run's settings, without a cache).  The linear head's first and
+#: third candidates tie, and the first is chosen.
+PINNED_DRAWN: list[tuple[Any, ...]] = [
+    ("C", "linear", 0.23018043421059298, 0.6780477754498262, 0.6350880861282349, 3, {"lr": 0.03, "max_epochs": 6, "batch_size": 16, "patience": 2}, _DRAWN_CANDIDATES, [0.4453757000449171, 0.41655436046835304, 0.4453757000449171]),
+    ("C", "mlp", 0.42516542614512887, 0.7093699492764305, 0.5214287042617798, 4, {"lr": 0.03, "max_epochs": 6, "batch_size": 32, "patience": 2}, _DRAWN_CANDIDATES, [0.38049407261126644, 0.38242515233508956, 0.39746943174633065]),
+]  # fmt: skip
+
+
+def _drawn_run() -> list[dict[str, Any]]:
+    """
+    Arm C with a search space of six configurations and a budget of three, so tuning
+    draws them (``--quick``'s two candidates are its whole grid), and early stopping.
+    """
+    settings = _replace(
+        QUICK,
+        arms=("C",),
+        search_space={"lr": (0.01, 0.03, 0.05), "batch_size": (16, 32)},
+        n_trials=3,
+        patience=2,
+    )
+    X, y, _ = bench.load_dataset("positive-control", settings)
+    return list(bench.run_dataset("positive-control", X, y, settings, bench.FeatureCache(None)))
+
+
+def _assert_pinned(records: list[dict[str, Any]], pinned: list[tuple[Any, ...]]) -> None:
+    assert len(records) == len(pinned)
+    for record, row in zip(records, pinned, strict=True):
+        arm, head, mcc, pr, threshold, epochs, chosen, candidates, scores = row
+        assert (record["arm"], record["head"]) == (arm, head)
+        assert (record["mcc"], record["epochs"], record["hyperparameters"]) == (
+            mcc,
+            epochs,
+            chosen,
+        )
+        assert record["tuning"]["candidates"] == candidates
+        assert record["tuning"]["scores"] == scores
+        assert record["threshold"] == pytest.approx(threshold, rel=1e-6)
+        assert record["pr_auc"] == pytest.approx(pr, rel=1e-6)
+
+
+class TestSeededRunsAreUnchanged:
+    """
+    The script's numbers are those of ``main`` before its tuning draw and its
+    fit-and-score were shared with ``hqnn_forge.benchmark`` (#524).
+
+    Every line goes through the parts that moved: the candidates of tuning, each trial's
+    training and validation threshold, and the final fit's MCC at that threshold, PR-AUC
+    and epochs.
+    """
+
+    def test_the_quick_run_is_as_recorded(self, quick: Any) -> None:
+        _assert_pinned(quick.lines, PINNED_QUICK)
+
+    def test_a_run_whose_tuning_draws_from_the_grid_is_as_recorded(self) -> None:
+        _assert_pinned(_drawn_run(), PINNED_DRAWN)
 
 
 class TestShotsRun:
@@ -6256,9 +6393,10 @@ class TestSeparationSubsamplingIntegration:
         y = np.array([0, 1] * 50)
         data = {"positive-control": (X, y, 0)}
 
-        # Capture model training inputs to verify full dataset was used
+        # Capture model training inputs to verify full dataset was used.  The script trains
+        # through hqnn_forge.benchmark.fit_and_predict (#524), so the spy goes there.
         train_row_counts: list[int] = []
-        orig_train_model = bench.train_model
+        orig_train_model = benchmark.train_model
 
         def spy_train_model(
             model: Any,
@@ -6271,7 +6409,7 @@ class TestSeparationSubsamplingIntegration:
             train_row_counts.append(x_train.shape[0])
             return orig_train_model(model, loss_fn, optimizer, x_train, *args, **kwargs)
 
-        monkeypatch.setattr(bench, "train_model", spy_train_model)
+        monkeypatch.setattr(benchmark, "train_model", spy_train_model)
 
         settings = _replace(
             QUICK,
