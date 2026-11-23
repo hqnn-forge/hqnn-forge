@@ -552,6 +552,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a record to strict-JSON data) are public. `examples/benchmark_rydberg_features.py` uses
   them in place of its own copies and of the private `_plain`; no number of `run_benchmark` or
   of the script changes, pinned on a seeded run of each (#524, #779)
+- Device options on `examples/benchmark_rydberg_features.py`: `--readout-error P01 P10` (arms
+  A, B and D read through one detection model), `--position-jitter` with `--jitter-samples`
+  (displacements from a fourth seed of the run, shared by A and B), `--encoding global-drive`
+  with `--levels` (no default), `--t-ramp` and `--n-ramp-segments`, and `--device aquila`,
+  which sets the model page's values (`(0.01, 0.08)`, 0.2 µm, `t_ramp` at the slew bound
+  rounded up, 32 segments per edge, `--shots 100`) and refuses a pulse outside the device's
+  limits. Every global-drive line records its `device_violations` (a square pulse none: it
+  always breaks the slew bound, and its config stays that of before), arm B keeps its reuse
+  across `V/Ω` and geometries, and both summarisers refuse a row that mixes device models.
+  Without the options a run writes the lines, features and cache keys of before, pinned on
+  values recorded there (#775, #781)
 
 ### Changed
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented

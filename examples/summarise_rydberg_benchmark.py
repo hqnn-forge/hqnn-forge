@@ -107,6 +107,20 @@ counts as one more value, ``not recorded``.  The check is per row: within
 one shots run arm C and ``D-hybrid`` are exact while A, B and D are
 sampled, and such a run summarises as before.
 
+**One row, one device model** (#775).  Nor may the lines of a row come from
+different device models: the same ``(readout_error, position_jitter,
+jitter_samples, encoding)``, read from the map's settings in the line's
+``feature_map`` (:func:`feature_realism`; the encoding as ``square`` or as the
+global drive's ``levels``, ``t_ramp`` and ``n_ramp_segments``).  An ideal run
+and one under the runner's ``--device aquila``, or two runs that differ in
+one of these options, pass every guard above.  The script refuses them,
+before printing anything, with a ``ValueError`` naming the dataset, its label
+bonds, the first such row and each value found there with its number of
+lines (:func:`_check_one_realism`).  Unlike the measurement, a key a line
+does not have is the model without the option, not ``not recorded``: a line
+written before the option existed was computed without it, so the committed
+results, all of them ideal, summarise as before.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
@@ -521,6 +535,109 @@ def _check_one_measurement(
     )
 
 
+Realism = tuple[Any, Any, Any, Any]  # readout_error, position_jitter, jitter_samples, encoding
+
+
+def feature_realism(record: Mapping[str, Any]) -> Realism:
+    """
+    The device model of a line's features: ``(readout_error, position_jitter, jitter_samples, encoding)``.
+
+    As the runner's :func:`feature_realism`, read from the map's settings in
+    the line's ``feature_map`` (``feature_map["config"]``): ``readout_error``
+    as ``(p01, p10)`` or ``None``; ``position_jitter`` (µm) and
+    ``jitter_samples``, ``0.0`` and ``None`` without jitter; ``encoding``
+    ``"square"``, ``("global-drive", levels, t_ramp, n_ramp_segments)``, or
+    ``None`` for a line without a pulse (arms C, D and ``D-hybrid``).  A key
+    the line does not have is the model without the option, not ``not
+    recorded``: a line written before the map had it (#730, #731, #732) was
+    computed without it, and arm D records ``readout_error`` only with one.
+    The jitter's seed is left out: another ``--seed`` draws other
+    displacements of the same model, as it draws other folds of the same
+    data.
+    """
+    config = (record.get("feature_map") or {}).get("config") or {}
+    error = config.get("readout_error")
+    encoding = config.get("encoding")
+    pulse: Any = None
+    if encoding is not None:
+        pulse = (
+            (
+                "global-drive",
+                encoding.get("levels"),
+                encoding.get("t_ramp"),
+                encoding.get("n_ramp_segments"),
+            )
+            if "t_ramp" in encoding
+            else "square"
+        )
+    return (
+        None if error is None else tuple(error),
+        config.get("position_jitter", 0.0),
+        config.get("jitter_samples"),
+        pulse,
+    )
+
+
+def _realism_text(value: Realism) -> str:
+    """
+    A :func:`feature_realism` in words: ``readout_error [0.01, 0.08], position_jitter 0.2,
+    jitter_samples 8, encoding global-drive levels 4 t_ramp 0.0503 n_ramp_segments 32``.
+
+    ``none`` for a readout without error, a ``K`` not given or no pulse.
+    """
+    error, sigma, count, pulse = value
+    if isinstance(pulse, tuple):
+        kind, levels, t_ramp, segments = pulse
+        pulse_text = (
+            f"{kind} levels {'continuous' if levels is None else levels} t_ramp {t_ramp:g} "
+            f"n_ramp_segments {'none' if segments is None else segments}"
+        )
+    else:
+        pulse_text = "none" if pulse is None else str(pulse)
+    return (
+        f"readout_error {'none' if error is None else list(error)}, position_jitter "
+        f"{sigma:g}, jitter_samples {'none' if count is None else count}, encoding {pulse_text}"
+    )
+
+
+def _check_one_realism(
+    dataset: str, records: Sequence[Mapping[str, Any]], bonds: Bonds | None = None
+) -> None:
+    """
+    Refuse ``records`` of ``dataset`` unless the lines of each row share one device model.
+
+    As :func:`_check_one_measurement`, for :func:`feature_realism`: the
+    detection error, the position jitter and the encoding (#775).  Two runs
+    of the same data, label and folds, one ideal and one under the runner's
+    ``--device aquila``, or two that differ in one of these options, pass
+    every guard above, and a row pooling their lines would report a spread,
+    interval or paired test over features of different models.  Every line
+    of a row must have the same value; otherwise the ``ValueError`` names the
+    first such row in the order of the scores table, each value found there
+    (:func:`_realism_text`) with its number of lines, and how many of the
+    group's rows have more than one.  Per row: arms C and ``D-hybrid`` have
+    no device model, and the lines of one run all have the run's.
+    """
+    per_row: dict[Key, dict[Realism, int]] = {}
+    for r in records:
+        found = per_row.setdefault(_key(r), {})
+        value = feature_realism(r)
+        found[value] = found.get(value, 0) + 1
+    mixed = [key for key in sorted(per_row, key=_sort) if len(per_row[key]) > 1]
+    if not mixed:
+        return
+    first = per_row[mixed[0]]
+    found_text = "; ".join(f"{_realism_text(v)} ({n} lines)" for v, n in first.items())
+    label = "" if bonds is None else f" (label_bonds {_bonds_text(bonds)})"
+    raise ValueError(
+        f"dataset {dataset!r}{label} has lines of {len(first)} device models (readout_error, "
+        f"position_jitter, jitter_samples, encoding) in row {_label(mixed[0], geometry=True)}: "
+        f"{found_text} (rows with more than one: {len(mixed)} of {len(per_row)}).  Its "
+        "spread, intervals and paired tests would pool lines whose features come from "
+        "different models; summarise each run's lines on their own."
+    )
+
+
 def _label(key: Key, *, geometry: bool = False) -> str:
     """``arm/head`` and the grid point; with ``geometry``, arm A's geometry first."""
     arm, head, shape, v, gamma = key
@@ -900,15 +1017,17 @@ def summarise(
         outer split, more than one ``n_splits`` or, for one fold, more than
         one ``test_idx`` (:func:`_check_one_split`), naming the dataset, its
         label bonds and the values found; or if the lines of one row differ
-        in how their features were measured (:func:`_check_one_measurement`),
-        naming the dataset, its label bonds, the row and the values found.
-        Nothing is printed then.
+        in how their features were measured (:func:`_check_one_measurement`)
+        or in their device model (:func:`_check_one_realism`), naming the
+        dataset, its label bonds, the row and the values found.  Nothing is
+        printed then.
     """
     by_group = groups(records)
     for (dataset, bonds), recs in by_group.items():
         _check_one_fingerprint(dataset, recs, bonds)
         _check_one_split(dataset, recs, bonds)
         _check_one_measurement(dataset, recs, bonds)
+        _check_one_realism(dataset, recs, bonds)
     labels_per_dataset: dict[str, int] = {}
     for dataset, _ in by_group:
         labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1

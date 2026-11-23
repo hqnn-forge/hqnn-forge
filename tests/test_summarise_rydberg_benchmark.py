@@ -1230,3 +1230,145 @@ def test_each_group_counts_its_own_folds() -> None:
     first, second = summary.summarise(toy + other, permutations=99).split("## other")
     assert "fold fit in 0 of 13 folds, a tuning fit in 0 of 13 folds." in first
     assert "fold fit in 1 of 13 folds, a tuning fit in 1 of 13 folds." in second
+
+
+# ---------------------------------------------------------------------------
+# One row, one device model (#775)
+# ---------------------------------------------------------------------------
+
+#: The tail of every refusal of :func:`summary._check_one_realism`.
+REALISM_ADVICE = (
+    "Its spread, intervals and paired tests would pool lines whose features come from "
+    "different models; summarise each run's lines on their own."
+)
+#: The encoding config of a square pulse and of a global drive, as ``get_config()`` writes them.
+SQUARE = {"n_features": 4, "omega": 4 * math.pi, "t": 0.25, "delta_max": 21.77}
+RAMP = {
+    "n_features": 4,
+    "omega": 4 * math.pi,
+    "t": 0.25,
+    "delta_local": 21.77,
+    "levels": 8,
+    "t_ramp": 0.0503,
+    "n_ramp_segments": 32,
+}
+
+
+def _modelled(lines: list[dict[str, Any]], **config: Any) -> list[dict[str, Any]]:
+    """
+    ``lines`` whose arms A and B carry a map config of the ideal model with ``config``; arm C
+    has a ``feature_map`` of ``null``, as the runner writes it.
+    """
+    ideal = {
+        "readout_error": None,
+        "position_jitter": 0.0,
+        "jitter_samples": None,
+        "jitter_seed": None,
+        "encoding": SQUARE,
+    }
+    out = []
+    for r in lines:
+        feature_map = (
+            None
+            if r["arm"] == "C"
+            else {"feature_map": "RydbergFeatureMap", "config": {**ideal, **config}}
+        )
+        out.append({**r, "feature_map": feature_map})
+    return out
+
+
+IDEAL_TEXT = "readout_error none, position_jitter 0, jitter_samples none, encoding square"
+
+
+def test_a_detection_error_beside_an_ideal_run_is_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    An ideal run and one with ``--readout-error`` of the same data, label and folds pass every
+    guard of #742, #753 and #763; each of the 3 rows of A and B would pool both.  Refused at
+    the first row of the scores table, naming each value with its number of lines.
+    """
+    ideal = _modelled(_records())
+    noisy = _modelled(_records(), readout_error=[0.01, 0.08])
+    assert _refusal(ideal + noisy, capsys) == (
+        "dataset 'toy' has lines of 2 device models (readout_error, position_jitter, "
+        f"jitter_samples, encoding) in row A/linear chain V/Ω=1 γ/Ω=0: {IDEAL_TEXT} "
+        f"({N_FOLDS} lines); readout_error [0.01, 0.08], position_jitter 0, jitter_samples "
+        f"none, encoding square ({N_FOLDS} lines) (rows with more than one: 3 of 5).  "
+        + REALISM_ADVICE
+    )
+
+
+def test_jitter_beside_an_ideal_run_is_refused_with_the_label_bonds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run, _ = _control_run(geometries=("chain",))
+    jittered = _modelled(run, position_jitter=0.2, jitter_samples=8, jitter_seed=3)
+    assert _refusal(_modelled(run) + jittered, capsys) == (
+        "dataset 'positive-control' (label_bonds [[0, 1], [1, 2], [2, 3]]) has lines of 2 "
+        "device models (readout_error, position_jitter, jitter_samples, encoding) in row "
+        f"A/linear chain V/Ω=1 γ/Ω=0: {IDEAL_TEXT} ({N_FOLDS} lines); readout_error none, "
+        f"position_jitter 0.2, jitter_samples 8, encoding square ({N_FOLDS} lines) (rows with "
+        "more than one: 3 of 5).  " + REALISM_ADVICE
+    )
+    # Another K is another model; another seed of the same model is not refused.
+    assert "position_jitter 0.2, jitter_samples 4, encoding square" in _refusal(
+        jittered + _modelled(run, position_jitter=0.2, jitter_samples=4, jitter_seed=3), capsys
+    )
+    reseeded = _modelled(run, position_jitter=0.2, jitter_samples=8, jitter_seed=4)
+    assert summary.summarise(jittered + reseeded, permutations=99) == summary.summarise(
+        jittered, permutations=99
+    )
+
+
+def test_another_encoding_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    ramped = _modelled(_records(), encoding=RAMP)
+    assert (
+        f"{IDEAL_TEXT} ({N_FOLDS} lines); readout_error none, position_jitter 0, "
+        "jitter_samples none, encoding global-drive levels 8 t_ramp 0.0503 n_ramp_segments 32 "
+        f"({N_FOLDS} lines) (rows with more than one: 3 of 5)."
+    ) in _refusal(_modelled(_records()) + ramped, capsys)
+    coarse = _modelled(_records(), encoding={**RAMP, "levels": 4})
+    assert "encoding global-drive levels 4 t_ramp 0.0503 n_ramp_segments 32" in _refusal(
+        ramped + coarse, capsys
+    )
+
+
+def test_lines_from_before_the_options_are_the_ideal_model_and_print_as_before() -> None:
+    """
+    A line written before #730, #731 and #732 has none of the keys: it was computed without
+    the options, so it joins an ideal line of today, and the output is that of the lines
+    without any config (the committed results file, read twice, checks the same on real
+    lines in :func:`test_the_committed_results_summarise_as_before`).
+    """
+    old = [
+        {**r, "feature_map": {"config": {"encoding": SQUARE}}} if r["arm"] != "C" else r
+        for r in _modelled(_records())
+    ]
+    before = summary.summarise(_records(), permutations=99, long=True)
+    assert summary.summarise(old + _modelled(_records()), permutations=99, long=True) == before
+    assert {summary.feature_realism(r) for r in old} == {
+        (None, 0.0, None, "square"),
+        (None, 0.0, None, None),
+    }
+
+
+def test_the_runner_and_the_summariser_read_one_model_alike() -> None:
+    """The two readings of a line agree on lines of a preset run's every representation."""
+    settings = dataclasses.replace(
+        bench.QUICK,
+        **bench.device_preset("aquila", 4 * math.pi),
+        device="aquila",
+        levels="continuous",
+        jitter_samples=2,
+    )
+    for rep in bench.representations(settings):
+        line = {"feature_map": rep.config}
+        assert summary.feature_realism(line) == bench.feature_realism(line)
+    (a,) = [r for r in bench.representations(settings) if r.arm == "A"]
+    assert summary.feature_realism({"feature_map": a.config}) == (
+        (0.01, 0.08),
+        0.2,
+        2,
+        ("global-drive", None, 0.0503, bench.AQUILA_RAMP_SEGMENTS),
+    )
