@@ -344,6 +344,13 @@ class TestPlainData:
         with pytest.raises(TypeError, match=r"cannot record a set \(\{1\}\) as JSON"):
             plain_data({"a": [{1}]})
 
+    @pytest.mark.parametrize("value", [np.array(1.5), np.array("ab"), np.array(None)])
+    def test_a_0d_array_is_refused(self, value: np.ndarray) -> None:
+        # tolist() of a 0-d array is its element, not a list: iterating it would raise for
+        # a number but split a string into its characters.
+        with pytest.raises(TypeError, match=r"cannot record a ndarray \(array\("):
+            plain_data({"a": value})
+
 
 class TestSeveralSeedsInTheRecord:
     def test_seed_indices_are_recorded_and_rerun(self, tmp_path: Path) -> None:

@@ -120,8 +120,9 @@ def plain_data(value: Any) -> Any:
       which ``bool`` is a subclass);
     * a Python or NumPy integer → ``int``;
     * a NumPy array of at least one dimension → nested lists of its
-      elements, row-major (``tolist``); a 0-d array raises ``TypeError``,
-      as ``tolist`` returns its element rather than a list;
+      elements, row-major (``tolist``); a 0-d array, which has no rows,
+      raises ``TypeError`` like any other value below (its element is
+      ``value.item()``);
     * a mapping → a ``dict`` with every key as ``str(key)``, in its order;
     * a list or tuple → a ``list``, in its order;
     * ``None`` and ``str`` unchanged.
@@ -138,7 +139,7 @@ def plain_data(value: Any) -> Any:
         return bool(value)
     if isinstance(value, int | np.integer):
         return int(value)
-    if isinstance(value, np.ndarray):
+    if isinstance(value, np.ndarray) and value.ndim > 0:
         return [plain_data(v) for v in value.tolist()]
     if isinstance(value, Mapping):
         return {str(k): plain_data(v) for k, v in value.items()}
