@@ -330,7 +330,8 @@ formulas are the model page's and are only referred to:
     ``--shots`` every bit of every shot is flipped after the bitstrings are
     drawn.  The error acts before the standardisation of step 4, as on a
     device.  With exact features it maps each column to ``a + c F[·, j]``
-    with ``c > 0``, which that step removes (*Why (#518)*): with
+    with ``c > 0`` (``p01 + p10 < 1``, as for any device), which that step
+    removes (*Why (#518)*): with
     ``--standardise``, the default, the heads of A, B and D get the same
     input with and without the error, to rounding.  Their scores then
     show the error only with ``--shots``, whose spread
@@ -422,7 +423,8 @@ the list as ``device_violations``, empty when compatible.  Without
 ``--device`` a run outside the limits is simulated as given.  A square pulse
 records no list (decided in #781), so its config, and with it a default
 run's cache keys and shot streams, is the one from before: the list would be
-the same at every Ω and never empty.  The square pulse is the global drive
+the same at every Ω within the device's other bounds, and never empty.  The
+square pulse is the global drive
 with ``levels`` continuous and ``t_ramp = 0`` (their features agree bit for
 bit), and that drive's slope ``Ω/t_ramp`` is infinite, so its list always
 holds ``omega_slew_max``; its other entries follow from the line's ``omega``
