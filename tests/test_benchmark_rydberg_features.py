@@ -6756,6 +6756,9 @@ class TestDetectionError:
         Each estimate of ``S`` flipped shots has mean ``⟨Z'⟩ = c ⟨Z⟩ + (p10 − p01)`` and
         variance ``(1 − ⟨Z'⟩²)/S``: over 64 copies of the inputs, the mean is within 5
         standard errors of the exact error-mapped value; the matrix's stream repeats it.
+        Flipped, not rescaled: each estimate is ``(2k' − S)/S`` with ``k'`` the whole number
+        of shots read 0, which ``c ẑ + (p10 − p01)`` of a sampled ``ẑ`` is not (it would
+        pass the mean).
         """
         p01, p10 = AQUILA_ERROR
         shots = 256
@@ -6763,6 +6766,8 @@ class TestDetectionError:
         rep = _rep(settings, "D")
         copies = np.tile(REALISM_X, (64, 1))
         sampled = rep.compute(copies).reshape(64, *REALISM_X.shape)
+        zeros_read = (1 + sampled) * shots / 2
+        np.testing.assert_allclose(zeros_read, np.round(zeros_read), rtol=0, atol=1e-9)
         circuit_seed = bench.run_seeds(QUICK.random_state)["circuit_seed"]
         exact = (1 - p01 - p10) * _circuit_by_hand(REALISM_X, circuit_seed) + (p10 - p01)
         error = np.sqrt((1 - exact**2) / (shots * 64))
