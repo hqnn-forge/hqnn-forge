@@ -2003,7 +2003,7 @@ class RydbergFeatureMap:
         ... )
         >>> X = torch.tensor([[-1.0, 2.0], [0.5, 0.5], [3.0, -2.0]])
         >>> n = probe.step_count(X, tol=1e-6)
-        >>> n  # n₀ = 32: 19 from the plateau, rounded up to a multiple of 2^4
+        >>> n  # n₀ = 2^4 · 2 = 32 from the two edge segments next to the plateau (it needs 19)
         256
         >>> feature_map = RydbergFeatureMap(**{**probe.get_config(), "n_steps": n})
         >>> feature_map.get_config()["n_steps"] == n
