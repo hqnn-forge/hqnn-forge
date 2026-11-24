@@ -22,6 +22,8 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import random
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -37,7 +39,9 @@ from hqnn_forge.rydberg import (
     GlobalDrivePulseEncoding,
     PulseEncoding,
     RydbergFeatureMap,
+    evolve,
     readout,
+    rydberg_hamiltonian,
 )
 
 F64 = torch.float64
@@ -121,7 +125,9 @@ def device_encoding(n_features: int = 1, /, **kwargs: object) -> GlobalDrivePuls
 
 
 def device_map(
-    register: AtomRegister, encoding: GlobalDrivePulseEncoding, **kwargs: object
+    register: AtomRegister,
+    encoding: GlobalDrivePulseEncoding | PulseEncoding,
+    **kwargs: object,
 ) -> RydbergFeatureMap:
     settings: dict[str, object] = {"c6": DEFAULT_C6, "gamma": 0.0}
     settings.update(kwargs)
@@ -225,15 +231,18 @@ class TestDephasedRamp:
             rho = scipy.linalg.expm(two_atom_liouvillian(omega_k, delta, v, gamma) * tau_k) @ rho
         exact = rho.reshape(4, 4)
         errors = []
-        for n_steps in (10, 20, 40):
+        # The edge segments of 0.04 µs have 2^2 τ <= T = 0.25 < 2^3 τ, so ceil(n/4) steps:
+        # counts that 4 divides double every segment's count together (#782).
+        for n_steps in (16, 32, 64):
             fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=n_steps)
+            assert fmap.segment_steps == (n_steps // 4,) * 2 + (n_steps,) + (n_steps // 4,) * 2
             errors.append(np.abs(fmap.states(x)[0].numpy() - exact).max())
         # Strang splitting, per segment: second order in dt.
         assert errors[0] / errors[1] == pytest.approx(4.0, rel=0.05), errors
         assert errors[1] / errors[2] == pytest.approx(4.0, rel=0.05), errors
         assert errors[2] < 1e-4
         # The features are read from that state.
-        fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=40, correlations=True)
+        fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=64, correlations=True)
         torch.testing.assert_close(
             fmap.transform(x), readout(fmap.states(x), pairs=True), rtol=0, atol=0
         )
@@ -391,6 +400,251 @@ class TestDeviceLimits:
             omega_max=100.0, detuning_max=1e3, duration_max=10.0, omega_slew_max=math.inf
         )
         assert device_encoding(t_ramp=0.0).device_violations(loose) == []
+
+
+def doubled_halvings(tau: float, t: float) -> int:
+    """
+    ``p``, the largest integer ``>= 0`` with ``2^p τ <= T`` (#782), by doubling ``τ``.
+
+    A float times a power of two is exact in binary, so each comparison is of
+    the exact ``2^(p+1) τ``; not the library's ``frexp`` form.
+    """
+    p = 0
+    while tau > 0 and 2 ** (p + 1) * tau <= t:
+        p += 1
+    return p
+
+
+def chain_by_hand(
+    register: AtomRegister,
+    encoding: GlobalDrivePulseEncoding | PulseEncoding,
+    x: torch.Tensor,
+    gamma: float,
+    counts: tuple[int | None, ...],
+) -> torch.Tensor:
+    """
+    ``ρ(T)``: one :func:`evolve` per segment in time order, with the step counts given.
+
+    The segments are the encoding's (``(Ω, T)`` for a :class:`PulseEncoding`),
+    the first from ``|g…g⟩``, each other from the state the one before left,
+    as #732 documents the map's chain.
+    """
+    segments = (
+        encoding.segments()
+        if isinstance(encoding, GlobalDrivePulseEncoding)
+        else ((encoding.omega, encoding.t),)
+    )
+    delta = encoding.detunings(x)
+    rho: torch.Tensor | None = None
+    for (omega_k, tau_k), n_k in zip(segments, counts, strict=True):
+        h = rydberg_hamiltonian(register, omega_k, delta, c6=DEFAULT_C6)
+        if rho is None:
+            rho = evolve(h, tau_k, gamma=gamma, n_steps=n_k)
+        else:
+            rho = evolve(h, tau_k, gamma=gamma, n_steps=n_k, rho0=rho)
+    assert rho is not None
+    return rho
+
+
+class TestSolverStepsPerSegment:
+    """
+    #782: with dephasing, segment ``k`` of ``τ_k`` µs takes ``ceil(n / 2^p_k)``
+    steps, ``p_k`` the largest integer ``>= 0`` with ``2^p_k τ_k <= T``, so no
+    step is longer than ``T/n``; the square pulse keeps ``n``.  The counts are
+    typed in, or from :func:`doubled_halvings`, and the chain is rebuilt by
+    hand from :func:`evolve` calls.
+    """
+
+    @pytest.mark.parametrize(
+        ("t", "t_ramp", "segments", "n_steps", "expected"),
+        [
+            # The benchmark's Aquila preset: τ = 0.0503/32 µs, T/τ = 159.0, p = 7.
+            (math.pi / OMEGA, 0.0503, 32, 200, (2,) * 32 + (200,) + (2,) * 32),
+            # τ = 0.05 µs: T/τ = 5, p = 2; the plateau of 0.15 µs is longer than T/2.
+            (0.25, 0.1, 2, 10, (3, 3, 10, 3, 3)),
+            # A plateau of 0.1 µs (p = 1) between edges of 0.15 µs (p = 0).
+            (0.25, 0.15, 1, 7, (7, 4, 7)),
+            # Triangles: τ = T keeps n, τ = T/2 exactly is in the band p = 1.
+            (0.25, 0.25, 1, 7, (7, 7)),
+            (0.25, 0.25, 2, 7, (4, 4, 4, 4)),
+            (0.25, 0.0, None, 7, (7,)),
+        ],
+    )
+    def test_the_counts_typed_in(
+        self,
+        t: float,
+        t_ramp: float,
+        segments: int | None,
+        n_steps: int,
+        expected: tuple[int, ...],
+    ) -> None:
+        encoding = device_encoding(t=t, t_ramp=t_ramp, n_ramp_segments=segments)
+        fmap = device_map(ONE_ATOM, encoding, gamma=1.0, n_steps=n_steps)
+        assert fmap.segment_steps == expected
+        assert device_map(ONE_ATOM, encoding).segment_steps is None  # no n_steps
+        square = RydbergFeatureMap(
+            ONE_ATOM, PulseEncoding(1, omega=OMEGA, t=t), c6=DEFAULT_C6, gamma=1.0, n_steps=9
+        )
+        assert square.segment_steps == (9,)
+
+    def test_the_bands_are_closed_above(self) -> None:
+        """
+        ``τ = T/2`` exactly is in the band ``p = 1``, the next float above it
+        in ``p = 0``: ``T = 0.25`` and ``t_ramp = 0.125`` are exact in binary,
+        and so is the plateau ``T − t_ramp``.  The rule reads the segments'
+        floats: with ``t_ramp`` one float below ``0.125`` the plateau
+        ``0.25 − t_ramp`` is ``0.125 + 2^-56``, a tie that rounds to even,
+        back to ``0.125``, so both are in ``p = 1``.
+        """
+        below = math.nextafter(0.125, 0.0)
+        assert 0.25 - below == 0.125
+        cases = [
+            (0.125, (3, 3, 3)),
+            (math.nextafter(0.125, 1.0), (5, 3, 5)),
+            (below, (3, 3, 3)),
+        ]
+        for t_ramp, expected in cases:
+            encoding = device_encoding(t=0.25, t_ramp=t_ramp, n_ramp_segments=1)
+            fmap = device_map(ONE_ATOM, encoding, gamma=1.0, n_steps=5)
+            assert fmap.segment_steps == expected, t_ramp
+
+    def test_the_rule_and_its_bounds_on_random_drives(self) -> None:
+        """
+        On 300 random drives and counts: the counts are ``ceil(n / 2^p_k)``
+        with ``p_k`` from :func:`doubled_halvings`; every step ``τ_k / n_k``
+        is at most ``T/n`` (in exact rational arithmetic); and where ``2^P``
+        divides ``n``, every step is longer than ``T/(2n)`` and doubling ``n``
+        doubles every count, which the step count's estimate needs.
+        """
+        rng = random.Random(782)
+        for _ in range(300):
+            t = rng.uniform(0.01, 2.0)
+            t_ramp = rng.choice([t, rng.uniform(0.0, t), rng.uniform(0.0, t / 50)])
+            segments = rng.randint(1, 64)
+            encoding = device_encoding(t=t, t_ramp=t_ramp, n_ramp_segments=segments)
+            drive = encoding.segments()
+            p = [doubled_halvings(tau, t) for _, tau in drive]
+            n = rng.choice([rng.randint(1, 1000), rng.randint(1, 20) * 2 ** max(p)])
+            counts = device_map(ONE_ATOM, encoding, gamma=1.0, n_steps=n).segment_steps
+            assert counts == tuple(math.ceil(n / 2**p_k) for p_k in p)
+            assert counts is not None
+            for (_, tau), n_k in zip(drive, counts, strict=True):
+                assert Fraction(tau) * n <= Fraction(t) * n_k  # τ_k / n_k <= T / n
+            if n % 2 ** max(p) == 0:
+                doubled = device_map(ONE_ATOM, encoding, gamma=1.0, n_steps=2 * n).segment_steps
+                assert doubled == tuple(2 * n_k for n_k in counts)
+                for (_, tau), n_k in zip(drive, counts, strict=True):
+                    assert 2 * Fraction(tau) * n > Fraction(t) * n_k  # τ_k / n_k > T / (2n)
+
+    def test_each_segment_is_evolved_with_its_count(self) -> None:
+        """
+        The map's states are the chain of ``evolve`` calls with ``(3, 3, 10,
+        3, 3)`` bit for bit, and not the chain with 10 steps everywhere, the
+        rule before #782.
+        """
+        gamma = OMEGA / 2
+        encoding = device_encoding(2, t=0.25, t_ramp=0.1, n_ramp_segments=2)
+        fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=10, correlations=True)
+        x = torch.tensor([[0.4, -0.7], [1.2, 0.3]], dtype=F64)
+        expected = chain_by_hand(TWO_ATOMS, encoding, x, gamma, (3, 3, 10, 3, 3))
+        assert torch.equal(fmap.states(x), expected)
+        assert torch.equal(fmap.transform(x), readout(expected, pairs=True))
+        before = chain_by_hand(TWO_ATOMS, encoding, x, gamma, (10,) * 5)
+        assert (fmap.states(x) - before).abs().max() > 1e-6
+
+    @pytest.mark.parametrize(
+        "encoding",
+        [
+            PulseEncoding(2, omega=OMEGA, t=0.3),
+            device_encoding(2, t=0.3, t_ramp=0.0),
+            device_encoding(2, t=0.3, t_ramp=0.3, n_ramp_segments=1),  # a triangle, τ = T
+        ],
+        ids=["square", "no-ramp", "triangle"],
+    )
+    @pytest.mark.parametrize("jitter", [False, True])
+    def test_drives_without_short_segments_are_unchanged_bit_for_bit(
+        self, encoding: PulseEncoding | GlobalDrivePulseEncoding, jitter: bool
+    ) -> None:
+        """
+        No segment is shorter than ``T/2``, so every one keeps ``n_steps``: the
+        map makes the calls of the rule before #782 (``n_steps`` on every
+        segment), bit for bit, with and without position jitter.
+        """
+        gamma, n_steps = OMEGA / 2, 7
+        settings: dict[str, object] = (
+            {"position_jitter": 0.3, "jitter_samples": 2, "jitter_seed": 5} if jitter else {}
+        )
+        fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=n_steps, **settings)
+        x = torch.tensor([[0.4, -0.7], [1.2, 0.3]], dtype=F64)
+        counts = (n_steps,) * len(fmap._segments())
+        assert fmap.segment_steps == counts
+        registers = fmap._jitter_registers if jitter else (TWO_ATOMS,)
+        states = [chain_by_hand(r, encoding, x, gamma, counts) for r in registers]
+        expected = states[0] if len(states) == 1 else (states[0] + states[1]) / 2
+        assert torch.equal(fmap.states(x), expected)
+
+    def test_without_dephasing_the_counts_change_nothing(self) -> None:
+        """``γ = 0``: ``evolve`` is exact and uses no steps, so a ramp is the chain of before."""
+        encoding = device_encoding(2, t=0.25, t_ramp=0.0503, n_ramp_segments=32)
+        fmap = device_map(TWO_ATOMS, encoding, gamma=0.0, n_steps=200)
+        x = torch.tensor([[0.4, -0.7], [1.2, 0.3]], dtype=F64)
+        assert fmap.segment_steps == (2,) * 32 + (200,) + (2,) * 32
+        assert torch.equal(fmap.states(x), chain_by_hand(TWO_ATOMS, encoding, x, 0.0, (200,) * 65))
+
+    def test_the_counts_are_read_from_the_config(self) -> None:
+        encoding = device_encoding(2, t=0.25, t_ramp=0.1, n_ramp_segments=2)
+        fmap = device_map(TWO_ATOMS, encoding, gamma=OMEGA / 2, n_steps=10)
+        rebuilt = RydbergFeatureMap(**json.loads(json.dumps(fmap.get_config())))
+        assert rebuilt.segment_steps == fmap.segment_steps == (3, 3, 10, 3, 3)
+        x = torch.tensor([[0.4, -0.7], [1.2, 0.3]], dtype=F64)
+        assert torch.equal(rebuilt.transform(x), fmap.transform(x))
+
+    def test_the_chunking_changes_the_features_by_rounding_only(self) -> None:
+        """As for the square pulse (``TestChunks.ROUNDING`` in the feature map's tests)."""
+        encoding = device_encoding(3, t=0.25, t_ramp=0.1, n_ramp_segments=3)
+        register = AtomRegister.chain(3, BLOCKADE_RADIUS)
+        fmap = device_map(register, encoding, gamma=OMEGA / 2, n_steps=12, correlations=True)
+        x = 1.5 * torch.randn(7, 3, generator=torch.Generator().manual_seed(2), dtype=F64)
+        whole = fmap.transform(x, chunk_size=7)
+        for chunk_size in (1, 2, 3):
+            assert (fmap.transform(x, chunk_size=chunk_size) - whole).abs().max() <= 1e-12
+
+    @pytest.mark.parametrize(("gamma_over_omega", "measured"), [(1.0, 1.59e-6), (10.0, 5.58e-5)])
+    def test_the_preset_drive_against_the_chained_liouvillian(
+        self, gamma_over_omega: float, measured: float
+    ) -> None:
+        """
+        The Aquila preset's drive at the default ``n_steps = 200``, two atoms
+        at ``V = Ω``: the edges take 2 steps per segment.  Against the
+        exponential of the Liouvillian per segment, chained, the features are
+        off by ``measured`` (to 5 %; the rule before #782, 200 steps on every
+        segment, gave 2.3e-6 and 5.1e-5), within the preset's ``tol = 1e-4``,
+        and a third of their difference from ``n_steps = 100`` (1 and 100
+        steps: every count doubles) is that error to 5 %.
+        """
+        gamma = gamma_over_omega * OMEGA
+        encoding = device_encoding(2, t=math.pi / OMEGA, t_ramp=0.0503, n_ramp_segments=32)
+        x = torch.tensor([[0.4, -0.7], [2.0, 1.1], [-1.5, 0.2]], dtype=F64)
+        v = DEFAULT_C6 / BLOCKADE_RADIUS**6
+        exact = []
+        for delta in encoding.detunings(x).numpy():
+            rho = np.zeros(16, dtype=complex)
+            rho[0] = 1.0
+            for omega_k, tau_k in encoding.segments():
+                rho = (
+                    scipy.linalg.expm(two_atom_liouvillian(omega_k, delta, v, gamma) * tau_k) @ rho
+                )
+            exact.append(rho.reshape(4, 4))
+        features = readout(torch.tensor(np.array(exact)), pairs=True)
+        fmap = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=200, correlations=True)
+        coarse = device_map(TWO_ATOMS, encoding, gamma=gamma, n_steps=100, correlations=True)
+        assert fmap.segment_steps == (2,) * 32 + (200,) + (2,) * 32
+        assert coarse.segment_steps == (1,) * 32 + (100,) + (1,) * 32
+        error = (fmap.transform(x) - features).abs().max().item()
+        assert error == pytest.approx(measured, rel=0.05)
+        assert error <= 1e-4
+        estimate = (coarse.transform(x) - fmap.transform(x)).abs().max().item() / 3
+        assert estimate == pytest.approx(error, rel=0.05)
 
 
 class TestConfig:

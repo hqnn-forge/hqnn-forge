@@ -565,6 +565,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values recorded there (#775, #781)
 
 ### Changed
+- `RydbergFeatureMap` with dephasing scales the solver steps of each segment of a
+  `GlobalDrivePulseEncoding` drive with its duration: `n_steps` is the count of the square
+  pulse, `dt = T/n_steps`, and a segment of `τ` µs takes `ceil(n_steps / 2^p)` steps, `2^p`
+  the largest power of two with `2^p τ <= T`. No step is longer than `T/n_steps`, and where
+  `2^P` divides `n_steps` doubling it doubles every segment's count, so `step_count`, which
+  now starts at a multiple of `2^P`, keeps its two-run estimate. The benchmark's Aquila drive
+  takes 328 steps per register and sample at `n_steps = 200` instead of 13 000 (25 s to 1.7 s
+  for 600 samples of 4 atoms), with its features within the preset's tolerance. The square
+  pulse, `t_ramp = 0` and every segment longer than `T/2` keep `n_steps`, bit for bit;
+  `RydbergFeatureMap.segment_steps` returns the counts (#782)
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
   now. A tensor or array is refused with a message that says so and names `.item()` for one
   element whose value would be accepted, or the shape for more, instead of calling a valid
