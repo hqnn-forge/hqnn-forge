@@ -148,9 +148,10 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   left the features within ``2.8e-6`` of a reference at ``γ = Ω`` and within
   ``1.0e-4`` at ``γ = 10 Ω`` (#507); the error grows about as ``γ²``, so
   raise the count for larger rates.  With ``γ = 0`` the evolution is exact
-  and the count is not used.  A ramped drive takes the count per segment,
-  and the check of 200 for the ramped and jittered maps is under *Step
-  counts* in "Device realism".
+  and the count is not used.  A ramped drive keeps the count on its plateau
+  and takes fewer steps on its short edge segments (#782), and the check of
+  200 for the ramped and jittered maps is under *Step counts* in "Device
+  realism".
 * **Arms C and D have no grid.**  They are run once per fold, with ``null``
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
   no interaction term): its non-interacting features are computed once per

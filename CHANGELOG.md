@@ -563,6 +563,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across `V/Ω` and geometries, and both summarisers refuse a row that mixes device models.
   Without the options a run writes the lines, features and cache keys of before, pinned on
   values recorded there (#775, #781)
+- `RydbergFeatureMap.segment_steps`: the solver steps of each segment of the drive, in time
+  order, a function of `n_steps` and the encoding and so of `get_config()` (#782, #788)
 
 ### Changed
 - `RydbergFeatureMap` with dephasing scales the solver steps of each segment of a

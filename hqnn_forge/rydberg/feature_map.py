@@ -1323,6 +1323,8 @@ class RydbergFeatureMap:
         pulse.  The segments are those of
         :meth:`GlobalDrivePulseEncoding.segments`, or ``(Ω, T)`` alone.  A
         function of ``n_steps`` and the encoding, so of :meth:`get_config`.
+        With ``gamma = 0`` the counts are given but not used: the evolution
+        is exact.
         """
         if self._n_steps is None:
             return None
