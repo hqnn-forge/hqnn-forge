@@ -574,7 +574,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes 328 steps per register and sample at `n_steps = 200` instead of 13 000 (25 s to 1.7 s
   for 600 samples of 4 atoms), with its features within the preset's tolerance. The square
   pulse, `t_ramp = 0` and every segment longer than `T/2` keep `n_steps`, bit for bit;
-  `RydbergFeatureMap.segment_steps` returns the counts (#782)
+  `RydbergFeatureMap.segment_steps` returns the counts (#782, #788)
 - `evolve` takes `t` and `gamma` as numbers only (a Python or NumPy scalar), as documented
   now. A tensor or array is refused with a message that says so and names `.item()` for one
   element whose value would be accepted, or the shape for more, instead of calling a valid
