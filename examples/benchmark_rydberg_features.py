@@ -148,9 +148,10 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   left the features within ``2.8e-6`` of a reference at ``γ = Ω`` and within
   ``1.0e-4`` at ``γ = 10 Ω`` (#507); the error grows about as ``γ²``, so
   raise the count for larger rates.  With ``γ = 0`` the evolution is exact
-  and the count is not used.  A ramped drive takes the count per segment,
-  and the check of 200 for the ramped and jittered maps is under *Step
-  counts* in "Device realism".
+  and the count is not used.  A ramped drive keeps the count on every
+  segment longer than ``T/2``, its plateau when ``t_ramp < T/2``, and takes
+  fewer steps on the shorter ones (#782), and the check of 200 for the
+  ramped and jittered maps is under *Step counts* in "Device realism".
 * **Arms C and D have no grid.**  They are run once per fold, with ``null``
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
   no interaction term): its non-interacting features are computed once per
@@ -463,27 +464,35 @@ difference over ``⟨n_i⟩`` and ``⟨n_i n_j⟩`` and the inputs:
   the error of ``n`` segments is ``(4/3) |F_n − F_2n|``: 0.038, 9.5e-3,
   2.4e-3, 5.9e-4, 1.5e-4 and 3.7e-5 for ``n`` = 1, 2, 4, 8, 16 and 32.
   32 is the first power of two within ``tol``.
-* *Solver steps.*  The default ``n_steps = 200`` is kept.  On 14 random
-  inputs and two at the bounds, with 32 segments per edge and
-  ``σ = 0.2`` µm (``K = 2``), at ``γ/Ω`` 0.1, 1 and 10,
-  ``RydbergFeatureMap.step_count(X, tol=1e-4)``, which runs the whole
-  chain of 65 segments and the ``K`` registers, returned 64 to 128 at
-  ``γ/Ω`` 0.1 and 1 and ``V/Ω <= 3``, below 200, but 262 to 308 at
-  ``γ = 10 Ω`` and, from ``V/Ω = 10`` on, its doubling from a starting
-  count that resolves the interaction (``dt · W <= 1/2``), 318 to 3256.
-  Its estimate itself, a third of ``|F_100 − F_200|``, gave at 200 steps at
-  most 6.8e-7, 3.5e-6 and 5.1e-5 at ``γ/Ω`` 0.1, 1 and 10, over the whole
-  grid, and from ``V/Ω = 10`` on it agreed within 1 % with the error
-  against a run of 4096 steps.  That is within ``tol`` everywhere and of the
-  size the square pulse has at 200 steps (6.4e-7, 3.2e-6 and 1.0e-4,
-  measured the same way; #507 has 6.7e-7, 2.8e-6 and 1.0e-4 against the
-  Liouvillian), so the preset uses 200, and the two errors together stay
-  below ``1e-4``.  Runs at other Ω, ``ΩT`` or rates are not covered by
-  this check; ``step_count`` gives their count.
+* *Solver steps.*  The default ``n_steps = 200`` is kept.  It is the
+  count of the plateau; each edge segment of ``0.0503/32`` µs, in the band
+  ``2^7 τ <= T < 2^8 τ``, takes ``ceil(200/128) = 2`` (*Solver steps per
+  segment* in ``hqnn_forge.rydberg.feature_map``, #782).  On 14 random
+  inputs in ``(−π, π)`` and two at the bounds, with 32 segments per edge
+  and ``σ = 0.2`` µm (``K = 2``), at ``γ/Ω`` 0.1, 1 and 10, the features
+  at 200 were off by at most 4.1e-7, 2.5e-6 and 5.6e-5 over the whole
+  grid, against the Richardson value of runs at 3200 and 6400 (multiples
+  of ``2^7``, so every segment doubles).  A third of ``|F_100 − F_200|``
+  (one and two steps per edge segment) agreed with these within 1 %.
+  With 200 steps on every segment, the rule before #782, the same
+  measurement gave 6.9e-7, 3.5e-6 and 5.1e-5 (#781 had 6.8e-7, 3.5e-6 and
+  5.1e-5 from its estimate), and the square pulse has 6.4e-7, 3.2e-6 and
+  1.0e-4 at 200 steps (#507 has 6.7e-7, 2.8e-6 and 1.0e-4 against the
+  Liouvillian).  That is within ``tol`` everywhere, so the preset uses
+  200, and the two errors together stay below ``1e-4``
+  (``3.7e-5 + 5.6e-5``).  ``RydbergFeatureMap.step_count(X, tol=1e-4)``,
+  which runs the whole chain of 65 segments and the ``K`` registers and
+  whose counts are multiples of 256 here, returned 256 at ``γ/Ω`` 0.1 and
+  1 and ``V/Ω <= 3``, 512 at ``γ = 10 Ω``, and from ``V/Ω = 10`` on, its
+  doubling from a starting count that resolves the interaction
+  (``dt · W <= 1/2``), 512 to 3072.  Runs at other Ω, ``ΩT`` or rates are
+  not covered by this check; ``step_count`` gives their count.
 
 **Cost.**  Jitter evolves arm A ``K`` times (not arm B).  The ramp evolves
-each register through ``2n + 1`` segments, each with ``n_steps`` steps when
-``γ > 0``: 65 instead of one for the preset.
+each register through ``2n + 1`` segments, 65 instead of one for the preset,
+with ``n_steps`` steps on the plateau and fewer on each edge segment when
+``γ > 0``: ``200 + 64 · 2 = 328`` steps for the preset instead of the square
+pulse's 200, and 65 eigendecompositions instead of one.
 
 **Not pooled.**  :func:`summarise` and ``examples/summarise_rydberg_benchmark.py``
 refuse a row whose lines differ in the detection error, the jitter
@@ -989,8 +998,9 @@ class Settings:
         Columns of the grid geometry, ``None`` for the default shape of
         :func:`grid_shape`; only with ``"grid"`` in ``geometries``.
     n_steps:
-        Solver steps of every map with ``γ > 0``, per segment of the drive
-        (*Step counts* in the module docstring).
+        Solver steps of every map with ``γ > 0``: the square pulse's count,
+        which a global drive's plateau keeps and its short edge segments
+        scale down (*Step counts* in the module docstring).
     shots:
         ``None`` for exact features, or the bitstrings per sample, each
         feature matrix drawn from a stream of its own ("Measurement" in the

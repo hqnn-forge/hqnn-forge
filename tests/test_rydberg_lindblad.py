@@ -13,8 +13,9 @@ over a subset of #598's sweep, with its counts there pinned to the integer
 subset (the whole sweep opt-in, ``HQNN_FORGE_REPRODUCE=1``), and
 ``RydbergFeatureMap.step_count`` (#760) by that of a ramped drive and of a
 jittered register, against the chained exponential of the Liouvillian per
-segment, and with ``target="state"`` (#774) by the trace distance of the
-mixture ``ρ̄`` there (#768's sweep opt-in, ``HQNN_FORGE_REPRODUCE=1``).
+segment, with the per-segment step counts of #782, and with
+``target="state"`` (#774) by the trace distance of the mixture ``ρ̄`` there
+(#768's sweep opt-in for both, ``HQNN_FORGE_REPRODUCE=1``).
 
 Every expected value is obtained another way than the solver obtains it:
 
@@ -1824,6 +1825,29 @@ def trapezoid_segments(
     return rising + plateau + rising[::-1]
 
 
+def halvings(tau: float, t: float) -> int:
+    """
+    ``p``, the largest integer ``>= 0`` with ``2^p τ <= T`` (#782), by doubling ``τ``.
+
+    Multiplying a float by a power of two is exact in binary, so each
+    comparison is of the exact ``2^(p+1) τ``; not the library's ``frexp`` form.
+    """
+    p = 0
+    while tau > 0 and 2 ** (p + 1) * tau <= t:
+        p += 1
+    return p
+
+
+def resolved_start(counts: list[tuple[float, int]], t: float) -> int:
+    """
+    ``n₀`` of #782 from each segment's ``(τ_k, c_k)``, ``c_k`` its resolution count:
+    the smallest multiple of ``2^P`` that is at least every ``2^p_k max(c_k, 1)``.
+    """
+    unit = 2 ** max(halvings(tau, t) for tau, _ in counts)
+    start = max(2 ** halvings(tau, t) * max(c, 1) for tau, c in counts)
+    return math.ceil(start / unit) * unit
+
+
 def displaced_registers(
     register: AtomRegister, sigma: float, samples: int | None, seed: int | None
 ) -> list[AtomRegister]:
@@ -1936,22 +1960,25 @@ class TestFeatureMapStepCount:
         self, case: MapCase, feature_map: RydbergFeatureMap, x: torch.Tensor
     ) -> int:
         """
-        ``n₀ = max ceil(2 τ_k (W + Nγ/2))`` over the typed-in segments, the
-        registers drawn by hand and the samples, ``W`` from ``eigvalsh``.
+        ``n₀`` of :func:`resolved_start`, from ``c_k = max ceil(2 τ_k (W + Nγ/2))``
+        over the registers drawn by hand and the samples for each typed-in
+        segment, ``W`` from ``eigvalsh``.
         """
         n_atoms, _, _, ramp, segments, sigma, samples = case
         registers = displaced_registers(feature_map.register, sigma, samples, self.SEED)
         delta = math.sqrt(3) * self.OMEGA * torch.sigmoid(x)
-        start = 1
+        counts = []
         for omega, tau in trapezoid_segments(self.OMEGA, self.T, ramp * self.T, segments):
+            count = 1
             for register in registers:
                 energies = torch.linalg.eigvalsh(
                     rydberg_hamiltonian(register, omega, delta, c6=DEFAULT_C6)
                 )
                 spread = (energies.amax(dim=-1) - energies.amin(dim=-1)).max().item()
                 rate = spread + n_atoms * feature_map.gamma / 2
-                start = max(start, math.ceil(2 * tau * rate))
-        return start
+                count = max(count, math.ceil(2 * tau * rate))
+            counts.append((tau, count))
+        return resolved_start(counts, self.T)
 
     @staticmethod
     def features_at(feature_map: RydbergFeatureMap, x: torch.Tensor, n_steps: int) -> torch.Tensor:
@@ -1996,28 +2023,88 @@ class TestFeatureMapStepCount:
         assert error > 1e-9  # above the rounding floor, so the ratio is not noise
         assert error / estimate == pytest.approx(1.0, rel=0.1)
 
-    # The plateau sets n₀, or, with a long ramp of one segment per edge, the rising edge.
+    @pytest.mark.reproducibility
+    @pytest.mark.slow
+    @pytest.mark.may_skip  # opt-in: skips in CI even under HQNN_FORGE_FAIL_ON_SKIP=1
+    def test_the_count_meets_tol_over_the_sweep_of_768(self) -> None:
+        """
+        The cases of :func:`map_sweep` at ``tol = 1e-6``, against
+        :func:`chained_features`, with the per-segment counts of #782: a few
+        minutes on a laptop, so opt-in (``HQNN_FORGE_REPRODUCE=1``).  At
+        ``2n₀`` the error is 0.9 to 1.1 times a third of the largest
+        ``|F_n₀ − F_2n₀|`` where it is above ``1e-9`` (measured: 0.977 to
+        1.019, all 419); at the count returned it is at most ``tol``
+        (measured: ``0.9987 tol`` at most) and, where the estimate is above
+        the rounding floor, 0.9 to 1.1 times it (measured: 0.9988 to 1.0025).
+        """
+        if os.environ.get("HQNN_FORGE_REPRODUCE") != "1":
+            pytest.skip("opt-in: set HQNN_FORGE_REPRODUCE=1 (the cases of #768's sweep)")
+        tol = 1e-6
+        cases = map_sweep()
+        assert len(cases) == 419
+        failures = []
+        for case, x in cases:
+            feature_map = sweep_map(case)
+            registers, segments = sweep_parts(case, feature_map)
+            delta = math.sqrt(3) * self.OMEGA * torch.sigmoid(x)
+            exact = chained_features(registers, segments, delta, feature_map.gamma)
+            start = sweep_starting_count(case, feature_map, x)
+            coarse = self.features_at(feature_map, x, start)
+            fine = self.features_at(feature_map, x, 2 * start)
+            at_start = (fine - exact).abs().max().item()
+            ratio_at_start = at_start / ((coarse - fine).abs().max().item() / 3)
+            n = feature_map.step_count(x, tol=tol)
+            at_n = self.features_at(feature_map, x, n)
+            error = (at_n - exact).abs().max().item()
+            before = self.features_at(feature_map, x, n // 2)
+            estimate = (before - at_n).abs().max().item() / 3
+            ratio = error / estimate if estimate > 1e-10 else 1.0
+            if (
+                error > tol
+                or not 0.9 <= ratio <= 1.1
+                or (at_start > 1e-9 and not 0.9 <= ratio_at_start <= 1.1)
+            ):
+                failures.append((case, n, error, estimate, ratio_at_start))
+        assert failures == []
+
+    # Which segment sets n₀: the edges (short, or long and just below T/2), the plateau.
     @pytest.mark.parametrize(
-        ("ramp", "segments", "longest"), [(0.2, 2, 2), (0.0, None, 0), (0.9, 1, 0)]
+        ("ramp", "segments", "expected", "setting"),
+        [
+            (0.2, 2, 16, [8, 16, 10, 16, 8]),
+            (0.0, None, 13, [13]),
+            (0.45, 1, 10, [10, 7, 10]),
+            (0.9, 1, 16, [10, 16, 10]),
+            (0.3, 1, 10, [8, 9, 8]),
+        ],
     )
     def test_the_start_is_the_largest_over_the_segments(
-        self, ramp: float, segments: int | None, longest: int
+        self, ramp: float, segments: int | None, expected: int, setting: list[int]
     ) -> None:
         """
         One atom, ``Δ = √3 σ(0.4) Ω ≈ 1.04 Ω``, ``γ = Ω``: segment ``k`` has
-        ``W_k = √(Ω_k² + Δ²)``, so ``n₀ = max_k ceil(2 τ_k (W_k + γ/2))``,
-        typed in; with a ``tol`` that every estimate meets, ``2 n₀`` comes
-        back.  ``longest`` is the segment that sets it.
+        ``W_k = √(Ω_k² + Δ²)`` and ``c_k = ceil(2 τ_k (W_k + γ/2))``, and it
+        takes ``n/2^p_k`` steps, so it needs ``n >= 2^p_k c_k``: ``setting``,
+        typed in with ``p_k`` from :func:`halvings`.  ``n₀`` is the largest
+        of these rounded up to a multiple of ``2^P``; with a ``tol`` that
+        every estimate meets, ``2 n₀`` comes back.  At ``0.2 T`` with two
+        segments the edge segments next to the plateau (``Ω_k = 3Ω/4``,
+        ``τ = T/10``, ``p = 3``) need ``8 · 2`` against the plateau's 10; at ``0.45 T`` the edges
+        (``p = 1``) need ``2 · 5`` against the plateau's 7; at ``0.9 T`` the
+        plateau (``τ = T/10``) needs ``8 · 2``; at ``0.3 T`` the plateau sets
+        9, which ``2^P = 2`` rounds up to 10.
         """
         omega, gamma, x = self.OMEGA, self.OMEGA, 0.4
         delta = math.sqrt(3) * omega / (1 + math.exp(-x))
+        drive = trapezoid_segments(omega, self.T, ramp * self.T, segments)
         counts = [
-            math.ceil(2 * tau * (math.sqrt(omega_k**2 + delta**2) + gamma / 2))
-            for omega_k, tau in trapezoid_segments(omega, self.T, ramp * self.T, segments)
+            (tau, math.ceil(2 * tau * (math.sqrt(omega_k**2 + delta**2) + gamma / 2)))
+            for omega_k, tau in drive
         ]
-        assert counts.index(max(counts)) == longest
+        assert [2 ** halvings(tau, self.T) * c for tau, c in counts] == setting
+        assert resolved_start(counts, self.T) == expected
         feature_map, _ = self.build((1, 1.0, 1.0, ramp, segments, 0.0, None))
-        assert feature_map.step_count([[x]], tol=1.0) == 2 * max(counts)
+        assert feature_map.step_count([[x]], tol=1.0) == 2 * expected
 
     def test_the_start_is_the_largest_over_the_displaced_registers(self) -> None:
         """
@@ -2195,9 +2282,10 @@ def map_sweep() -> list[tuple[SweepMapCase, torch.Tensor]]:
     ``σ = 0.3`` µm, ``K = 3``.  Kept are the cases whose ``n₀`` (over the
     segments, registers and both inputs) is at most 1000, or 800 for 4
     atoms.  #768 did not record its inputs; here each case draws
-    ``torch.randn(2, N)`` in this order from one generator seeded 768,
-    which keeps 443 cases (340 ramped, 159 jittered) where #768 kept 446
-    (342, 163).
+    ``torch.randn(2, N)`` in this order from one generator seeded 768.
+    With the starting count of #782 (a multiple of ``2^P``) this keeps 419
+    cases (316 ramped, 146 jittered); with the one before it, the same
+    inputs kept 443 (340, 159), and #768 kept 446 (342, 163).
     """
     generator = torch.Generator().manual_seed(768)
     cases: list[tuple[SweepMapCase, torch.Tensor]] = []
@@ -2260,29 +2348,40 @@ def sweep_parts(
 def sweep_starting_count(
     case: SweepMapCase, feature_map: RydbergFeatureMap, x: torch.Tensor
 ) -> int:
-    """``n₀ = max ceil(2 τ_k (W + Nγ/2))`` over the segments, registers and samples."""
+    """
+    ``n₀`` of :func:`resolved_start`, from ``c_k = max ceil(2 τ_k (W + Nγ/2))``
+    over the registers and samples for each segment.
+    """
     registers, segments = sweep_parts(case, feature_map)
     delta = math.sqrt(3) * TestFeatureMapStepCount.OMEGA * torch.sigmoid(x)
-    start = 1
+    counts = []
     for omega, tau in segments:
+        count = 1
         for register in registers:
             energies = torch.linalg.eigvalsh(
                 rydberg_hamiltonian(register, omega, delta, c6=DEFAULT_C6)
             )
             spread = (energies.amax(dim=-1) - energies.amin(dim=-1)).max().item()
-            start = max(start, math.ceil(2 * tau * (spread + case[0] * feature_map.gamma / 2)))
-    return start
+            count = max(count, math.ceil(2 * tau * (spread + case[0] * feature_map.gamma / 2)))
+        counts.append((tau, count))
+    return resolved_start(counts, case[3] / TestFeatureMapStepCount.OMEGA)
 
 
 #: The feature counts of ``RydbergFeatureMap.step_count`` for
-#: ``TestFeatureMapStepCount.CASES``, at ``tol = 1e-4`` and ``1e-6``, as
-#: ``main`` returned them at c6ce325, before the map had a state target (#774).
+#: ``TestFeatureMapStepCount.CASES``, at ``tol = 1e-4`` and ``1e-6``.  The
+#: square pulse (the fourth) as ``main`` returned it at c6ce325, before the
+#: map had a state target (#774); the ramped drives as the per-segment counts
+#: of #782 give them.  Where ``main`` returned ``n`` steps on every segment
+#: (``(34, 544)``, ``(24, 192)``, ``(124, 992)``, ``(230, 920)``), the drive
+#: at ``tol = 1e-6`` now takes 672 steps in all instead of ``7 · 544 = 3808``,
+#: 288 instead of 960 and 1440 instead of 4600; the triangle (``τ = T/2``,
+#: ``p = 1``) takes ``1984/2 = 992`` per segment, as before.
 MAP_FEATURE_COUNTS: list[tuple[int, int]] = [
-    (34, 544),
-    (24, 192),
-    (124, 992),
+    (48, 384),
+    (48, 192),
+    (248, 1984),
     (66, 264),
-    (230, 920),
+    (240, 960),
 ]
 
 
@@ -2357,21 +2456,23 @@ class TestFeatureMapStepCountForTheState:
     def test_the_count_meets_tol_over_the_sweep_of_768(self) -> None:
         """
         The cases of :func:`map_sweep` at ``tol = 1e-6``, against
-        :func:`chained_states`: about 20 minutes on a laptop, so opt-in
+        :func:`chained_states`: several minutes on a laptop, so opt-in
         (``HQNN_FORGE_REPRODUCE=1``).  At ``2n₀`` the error is 0.9 to 1.1
         times a third of ``D(ρ̄_n₀, ρ̄_2n₀)`` where it is above ``1e-9``
-        (measured: 0.989 to 1.019, all 443); at the count returned it is at
-        most ``tol`` (measured: ``0.9997 tol`` at most) and, where the
-        estimate is above the rounding floor, 0.9 to 1.1 times it (measured:
-        0.998 to 1.001).
+        (measured with the per-segment counts of #782: 0.989 to 1.019, all
+        419); at the count returned it is at most ``tol`` (measured:
+        ``0.9956 tol`` at most) and, where the estimate is above the rounding
+        floor, 0.9 to 1.1 times it (measured: 0.998 to 1.001).  Before #782,
+        with ``n`` steps on every segment, the 443 cases of the start before
+        it gave 0.989 to 1.019, ``0.9997 tol`` and 0.998 to 1.001.
         """
         if os.environ.get("HQNN_FORGE_REPRODUCE") != "1":
             pytest.skip("opt-in: set HQNN_FORGE_REPRODUCE=1 (the cases of #768's sweep)")
         tol = 1e-6
         cases = map_sweep()
-        assert len(cases) == 443
-        assert sum(case[5] is not None for case, _ in cases) == 340  # ramped
-        assert sum(case[7] is not None for case, _ in cases) == 159  # jittered
+        assert len(cases) == 419
+        assert sum(case[5] is not None for case, _ in cases) == 316  # ramped
+        assert sum(case[7] is not None for case, _ in cases) == 146  # jittered
         failures = []
         for case, x in cases:
             feature_map = sweep_map(case)

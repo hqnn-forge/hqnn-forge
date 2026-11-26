@@ -242,10 +242,67 @@ the level boundaries, the pulse area and the second-order error of the
 segments.  The map evolves the segments in time order, each with
 :func:`evolve` from the previous one's state, for every realisation of the
 register; the readout, the detection error and the mixture over positions
-act on the final state as above.  ``n_steps`` is the step count of every
-segment, and :meth:`RydbergFeatureMap.step_count` chooses one for the whole
-chain.  :meth:`GlobalDrivePulseEncoding.device_violations` checks the
-pulse against :data:`AQUILA_LIMITS`, on request only.
+act on the final state as above.  With dephasing each segment takes its own
+number of solver steps, ``n_steps`` scaled down by its duration (*Solver
+steps per segment*), and :meth:`RydbergFeatureMap.step_count` chooses
+``n_steps`` for the whole chain.
+:meth:`GlobalDrivePulseEncoding.device_violations` checks the pulse against
+:data:`AQUILA_LIMITS`, on request only.
+
+Solver steps per segment
+------------------------
+With ``γ > 0`` every segment ``(Ω_k, τ_k)`` of the drive, in the time order
+of :meth:`GlobalDrivePulseEncoding.segments` (a square pulse is the one
+segment ``(Ω, T)``), is one :func:`evolve` call with a step count of its
+own.  For ``n = n_steps`` and ``T = encoding.t`` in µs, the duration of the
+square pulse of the same area::
+
+    p_k = the largest integer >= 0 with 2^p_k τ_k <= T,      n_k = ceil(n / 2^p_k)
+
+so a segment in the band ``T/2^(p+1) < τ_k <= T/2^p`` takes ``n/2^p`` steps,
+rounded up (``p_k = 0`` for ``τ_k = 0``).  Its step ``dt_k = τ_k / n_k`` is
+bounded on both sides: ``n_k >= n/2^p_k`` and ``2^p_k τ_k <= T`` give::
+
+    dt_k <= 2^p_k τ_k / n <= T / n
+
+and where ``2^p_k`` divides ``n``, ``dt_k = 2^p_k τ_k / n > T/(2n)``, since
+``2^(p_k+1) τ_k > T``.  **No step is longer than the square pulse's step
+``T/n``**, where ``2^p_k`` divides ``n`` every step is within a factor 2 of
+it, and the number of steps of a segment grows with its duration: fewer than
+``2 n τ_k / T + 1``, since ``n/2^p_k < 2 n τ_k / T`` before the rounding
+up.  Each segment's splitting error is of second order in its own ``dt_k``
+(:func:`evolve`).
+
+* **What keeps ``n``.**  A segment longer than ``T/2`` has ``p = 0`` and
+  ``n`` steps: the square pulse (``τ = T``) makes the same single
+  :func:`evolve` call with the same ``n_steps`` as before this rule
+  existed, bit for bit, and so do ``t_ramp = 0``, the plateau of every ramp
+  with ``t_ramp < T/2`` and a triangle with one segment per edge
+  (``τ = T``).  The short segments of an edge take fewer: at the Aquila
+  edge of the benchmark preset, ``τ = 0.0503/32`` µs and ``T = 0.25`` µs,
+  ``T/τ = 159``, so ``p = 7`` and ``ceil(200/128) = 2`` steps each, and
+  the pulse of 65 segments takes ``200 + 64 · 2 = 328`` steps instead of
+  ``65 · 200 = 13 000``.
+* **Why powers of two.**  Let ``P`` be the largest ``p_k``.  Where
+  ``2^P`` divides ``n``, every count is exactly ``n_k = n / 2^p_k``, so
+  doubling ``n`` doubles every segment's count, ``n_k(2n) = 2 n_k(n)``:
+  each count is a fixed multiple ``2^(−p_k)`` of one ``n``, which the
+  two-run estimate of :meth:`RydbergFeatureMap.step_count` needs (its
+  counts are all multiples of ``2^P``).  ``ceil(n τ_k / T)``, the count
+  closest to the durations, does not have this: ``ceil(2x)`` is
+  ``2 ceil(x)`` only for some ``x``, and a segment whose count does not
+  double between the two runs drops out of their difference, entirely at
+  ``x <= ½`` (one step at ``n`` and at ``2n``).  Integer counts that are a
+  fixed fraction of every ``n`` in a doubling sequence are fractions
+  ``1/2^p`` of it.
+* **The two properties of #507.**  The counts depend on ``n_steps`` and the
+  drive only, never on the data or the chunk, so a sample's features still
+  depend on the chunking by rounding only (:meth:`RydbergFeatureMap.transform`),
+  and they are a function of :meth:`RydbergFeatureMap.get_config`, which
+  records ``n_steps`` and the encoding:
+  :attr:`RydbergFeatureMap.segment_steps` returns them.
+* **Without dephasing** :func:`evolve` is exact and uses no steps; the
+  counts change nothing.
 
 Not an encoding layer
 ---------------------
@@ -329,6 +386,37 @@ def _flag(value: Any, name: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{name} must be a bool; got {value!r}.")
     return value
+
+
+def _halvings(tau: float, t: float) -> int:
+    """
+    ``p``, the largest integer ``>= 0`` with ``2^p τ <= T``; 0 when ``τ`` or ``T`` is 0.
+
+    A segment of ``τ`` µs in the band ``T/2^(p+1) < τ <= T/2^p`` (*Solver
+    steps per segment* in the module docstring).  From the binary exponents
+    of the two floats (``math.frexp``: ``x = m 2^e`` with ``½ <= m < 1``), so
+    the comparison is exact, with no product that could round or overflow:
+    ``2^p τ <= T`` is ``m_τ 2^(e_τ + p) <= m_T 2^(e_T)``, which holds for
+    ``p = e_T − e_τ`` when ``m_τ <= m_T`` and for one less otherwise.
+    """
+    if tau <= 0 or t <= 0:
+        return 0
+    m_tau, e_tau = math.frexp(tau)
+    m_t, e_t = math.frexp(t)
+    return max(0, e_t - e_tau - (1 if m_tau > m_t else 0))
+
+
+def _segment_steps(
+    segments: tuple[tuple[float, float], ...], t: float, n_steps: int
+) -> tuple[int, ...]:
+    """
+    The solver steps of each ``(Ω_k, τ_k)`` segment at ``n_steps``: ``ceil(n / 2^p_k)``.
+
+    ``p_k = _halvings(τ_k, T)``; ``-(-n >> p)`` is ``ceil(n / 2^p)`` in
+    integers.  The rule is derived under *Solver steps per segment* in the
+    module docstring.
+    """
+    return tuple(-(-n_steps >> _halvings(tau, t)) for _, tau in segments)
 
 
 class PulseEncoding:
@@ -965,12 +1053,17 @@ class RydbergFeatureMap:
         :meth:`step_count`, called once on all inputs, for a count that
         meets a tolerance with any encoding and jitter, for the features or,
         with ``target="state"``, for :meth:`states`); not used
-        when ``gamma = 0``, where the evolution is exact.  It is passed
-        unchanged to every solver call, one per segment of the drive (the
-        plateau and each ramp segment of a
-        :class:`GlobalDrivePulseEncoding`), and never derived from the data, so
-        the features of a sample do not depend, beyond rounding, on which
-        other samples it is processed with (see :meth:`transform`).
+        when ``gamma = 0``, where the evolution is exact.  It is the step
+        count of the square pulse, ``dt = T/n_steps``.  Each segment of the
+        drive (the plateau and each ramp segment of a
+        :class:`GlobalDrivePulseEncoding`) is one solver call with
+        ``ceil(n_steps / 2^p)`` steps, ``2^p`` the largest power of two with
+        ``2^p τ <= T`` for its duration ``τ`` (:attr:`segment_steps`, *Solver
+        steps per segment* in the module docstring), so no step is longer than
+        ``T/n_steps``, and a segment longer than ``T/2``, the square pulse
+        among them, takes ``n_steps``.  The counts are never derived from the
+        data, so the features of a sample do not depend, beyond rounding, on
+        which other samples it is processed with (see :meth:`transform`).
     interactions:
         ``False`` drops the term ``Σ_{i<j} V_ij n_i n_j`` and nothing else:
         the non-interacting control, in which feature ``i`` depends on input
@@ -1020,6 +1113,8 @@ class RydbergFeatureMap:
     register, encoding, c6, gamma, n_steps, interactions, correlations, readout_error
         The settings, read-only; ``readout_error`` as a tuple of two
         ``float`` or ``None``.
+    segment_steps : tuple of int or None
+        The step count of each segment of the drive, from ``n_steps``.
     position_jitter, jitter_samples, jitter_seed
         The jitter settings, read-only: a ``float``, and an ``int`` each or
         ``None`` without jitter.  ``register`` stays the undisplaced one.
@@ -1218,6 +1313,24 @@ class RydbergFeatureMap:
         return self._n_steps
 
     @property
+    def segment_steps(self) -> tuple[int, ...] | None:
+        """
+        The solver steps of each segment of the drive, in time order; ``None`` without ``n_steps``.
+
+        ``ceil(n_steps / 2^p_k)`` for segment ``k`` of ``τ_k`` µs, ``p_k``
+        the largest integer ``>= 0`` with ``2^p_k τ_k <= T`` (*Solver steps
+        per segment* in the module docstring): ``(n_steps,)`` for a square
+        pulse.  The segments are those of
+        :meth:`GlobalDrivePulseEncoding.segments`, or ``(Ω, T)`` alone.  A
+        function of ``n_steps`` and the encoding, so of :meth:`get_config`.
+        With ``gamma = 0`` the counts are given but not used: the evolution
+        is exact.
+        """
+        if self._n_steps is None:
+            return None
+        return _segment_steps(self._segments(), self._encoding.t, self._n_steps)
+
+    @property
     def interactions(self) -> bool:
         """Whether the Hamiltonian keeps its ``n_i n_j`` term."""
         return self._interactions
@@ -1289,7 +1402,7 @@ class RydbergFeatureMap:
     @torch.no_grad()
     def _evolve_with(self, delta: torch.Tensor, n_steps: int | None) -> torch.Tensor:
         """
-        ``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``, at ``n_steps`` per segment.
+        ``ρ(T)`` for the detunings of one chunk, shape ``(chunk, N)``, at ``n_steps``.
 
         With jitter and interactions, the mixture ``ρ̄ = (1/K) Σ_k ρ_k(T)``
         of the displaced registers, summed in the order ``k = 0, …, K − 1``
@@ -1298,17 +1411,24 @@ class RydbergFeatureMap:
         positions are evolved once, as without jitter.
 
         Each register is evolved through the drive's segments in time order,
-        each segment by :func:`evolve` with ``n_steps`` from the state the
-        previous one returned; the first starts from ``|g…g⟩``.  A square
-        pulse is one segment, the single ``evolve`` call of the map without
-        a ramp.  :meth:`step_count` runs it at other counts than the map's.
+        segment ``k`` by :func:`evolve` with ``ceil(n_steps / 2^p_k)`` steps
+        (``_segment_steps``, *Solver steps per segment* in the module
+        docstring) from the state the previous one returned; the first starts
+        from ``|g…g⟩``.  A square pulse is one segment with ``n_steps``, the
+        single ``evolve`` call of the map without a ramp.  :meth:`step_count`
+        runs it at other counts than the map's.
         """
         registers = self._registers()
         segments = self._segments()
+        steps: tuple[int | None, ...] = (
+            (None,) * len(segments)
+            if n_steps is None
+            else _segment_steps(segments, self._encoding.t, n_steps)
+        )
         total: torch.Tensor | None = None
         for register in registers:
             rho: torch.Tensor | None = None
-            for omega, tau in segments:
+            for (omega, tau), segment_steps in zip(segments, steps, strict=True):
                 hamiltonian = rydberg_hamiltonian(
                     register,
                     omega,
@@ -1317,9 +1437,11 @@ class RydbergFeatureMap:
                     interactions=self._interactions,
                 )
                 if rho is None:  # from |g…g⟩: the one call of a square pulse, unchanged
-                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=n_steps)
+                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=segment_steps)
                 else:
-                    rho = evolve(hamiltonian, tau, gamma=self._gamma, n_steps=n_steps, rho0=rho)
+                    rho = evolve(
+                        hamiltonian, tau, gamma=self._gamma, n_steps=segment_steps, rho0=rho
+                    )
             assert rho is not None
             total = rho if total is None else total + rho
         assert total is not None
@@ -1634,15 +1756,16 @@ class RydbergFeatureMap:
         state :meth:`states` returns (``target="state"``, see *The state*)
         is at most ``tol`` for every sample, to pass as ``n_steps`` to a map
         with this config, ``RydbergFeatureMap(**{**m.get_config(), "n_steps": n})``.
-        The map evolves every register through every segment of its drive
-        with ``n_steps`` steps each (*A device-compatible pulse* and
-        *Position jitter* in the module docstring): a
-        :class:`GlobalDrivePulseEncoding` has ``2n + 1`` segments
-        (``n = n_ramp_segments``) with their own Ω and duration, and position
-        jitter ``K`` registers with their own couplings, so neither one
-        Hamiltonian nor one time describes the run, and the count is taken
-        from the run itself.  With neither, the map makes the one
-        :func:`~hqnn_forge.rydberg.evolve` call of ``step_count``, and the
+        The map evolves every register through every segment of its drive,
+        segment ``k`` with ``ceil(n_steps / 2^p_k)`` steps (*A
+        device-compatible pulse*, *Solver steps per segment* and *Position
+        jitter* in the module docstring): a :class:`GlobalDrivePulseEncoding`
+        has ``2n + 1`` segments (``n = n_ramp_segments``) with their own Ω and
+        duration, and position jitter ``K`` registers with their own
+        couplings, so neither one Hamiltonian nor one time describes the run,
+        and the count is taken from the run itself.  With neither, the map
+        makes the one :func:`~hqnn_forge.rydberg.evolve` call of
+        ``step_count``, and the
         result is ``step_count`` of its Hamiltonians at ``t = encoding.t``.
         It does not depend on the map's own ``n_steps``: a map built with any
         count, ``n_steps=1`` for example, gives it.
@@ -1661,35 +1784,44 @@ class RydbergFeatureMap:
 
         **Why the two-run estimate carries over to the chain.**  Segment
         ``k`` (``Ω_k`` for ``τ_k`` µs, Liouvillian ``𝓛_k`` of register
-        ``r``) is evolved by ``P_k(n) = S_k(τ_k/n)^n``, the Strang splitting
-        of :func:`~hqnn_forge.rydberg.evolve` with ``dt = τ_k/n``.  Its
-        logarithm has odd powers of ``dt`` only (``step_count``), so::
+        ``r``) is in the band ``p_k`` of *Solver steps per segment*.  Every
+        count tried is a multiple of ``2^P``, ``P`` the largest ``p_k`` (see
+        *The starting count*), so at ``n`` the segment takes exactly
+        ``n_k = n / 2^p_k`` steps and is evolved by
+        ``P_k(n) = S_k(τ_k/n_k)^(n_k)``, the Strang splitting of
+        :func:`~hqnn_forge.rydberg.evolve` with ``dt = τ_k/n_k``.  Its
+        logarithm has odd powers of ``dt`` only (``step_count``), so, with
+        ``n_k² = n² / 4^p_k``::
 
-            P_k(n) = exp(𝓛_k τ_k + τ_k³ C_k / n² + O(n⁻⁴)) = E_k + D_k / n² + O(n⁻⁴)
+            P_k(n) = exp(𝓛_k τ_k + τ_k³ C_k / n_k² + O(n⁻⁴)) = E_k + 4^p_k D_k / n² + O(n⁻⁴)
 
         with ``E_k = exp(𝓛_k τ_k)`` the exact map of the segment and ``D_k``,
         the derivative of the exponential at ``𝓛_k τ_k`` in the direction
         ``τ_k³ C_k``, fixed by the segment and independent of ``n``.  Every
-        segment takes the same ``n``, so all steps halve together, and the
-        chain of the ``m`` segments is, to that order::
+        segment's count is the fixed fraction ``2^(−p_k)`` of the same ``n``,
+        so all steps halve together when ``n`` doubles, and the chain of the
+        ``m`` segments is, to that order::
 
-            P_m(n) ⋯ P_1(n) = E_m ⋯ E_1 + (1/n²) Σ_k E_m ⋯ E_(k+1) D_k E_(k−1) ⋯ E_1 + O(n⁻⁴)
+            P_m(n) ⋯ P_1(n) = E_m ⋯ E_1
+                              + (1/n²) Σ_k 4^p_k E_m ⋯ E_(k+1) D_k E_(k−1) ⋯ E_1 + O(n⁻⁴)
 
         the exact chain plus ``1/n²`` times a map that does not depend on
         ``n``.  The features are linear in ρ, and the mixture is the mean
         over the registers, so every feature of the map comes out of ``n``
-        steps per segment as::
+        as::
 
             F̄_n = F̄ + Ā / n² + O(n⁻⁴),        Ā = (1/K) Σ_r Σ_k a_(r,k)
 
         ``a_(r,k)`` the part of segment ``k`` of register ``r``, and
         ``F̄_n − F̄_2n = 3 (F̄_2n − F̄)`` as for one segment: **the finer run
         is off by a third of their difference**.  This needs one doubling
-        for the whole pulse; a count fixed for the edges and doubled for the
-        plateau would leave the edges' error out of the difference.  What
-        the derivation does not settle is the size of the ``O(n⁻⁴)`` rest
-        where the ``a_(r,k)`` of segments or registers cancel in ``Ā``,
-        hence the measurement below.
+        for the whole pulse: a count fixed for the edges and doubled for the
+        plateau, or one rounded so that it does not double with ``n``
+        (``ceil(n τ_k / T)``, *Solver steps per segment*), would leave part
+        of the edges' error out of the difference.  What the derivation does
+        not settle is the size of the ``O(n⁻⁴)`` rest where the ``a_(r,k)``
+        of segments or registers cancel in ``Ā``, hence the measurement
+        below.
 
         **The state** (``target="state"``, #774).  The error is that of
         ``step_count(..., target="state")``: the trace distance
@@ -1723,20 +1855,32 @@ class RydbergFeatureMap:
         Monte Carlo error of ``ρ̄`` and the detection error stay outside it.
 
         **The starting count.**  Each ``P_k`` needs its own step to resolve
-        its generator, ``dt_k · (W + Nγ/2) <= 1/2`` with ``dt_k = τ_k/n``
+        its generator, ``dt_k · (W + Nγ/2) <= 1/2`` with ``dt_k = τ_k/n_k``
         and ``W`` the spread ``E_max − E_min`` of that segment's Hamiltonian
-        (``step_count``), for every segment, register and sample, so the
-        coarsest run has::
+        (``step_count``), for every segment, register and sample: at least
+        ``c_k = ceil(2 τ_k · (W_k + Nγ/2))`` steps (at least 1), ``W_k`` the
+        largest spread of segment ``k`` over the registers and samples
+        (``τ_k`` in µs, rates in rad/µs).  With ``n_k = n / 2^p_k`` that is
+        ``n >= 2^p_k c_k``, and ``n`` has to be a multiple of ``2^P`` for
+        every ``n_k`` to be exact, so the coarsest run is at::
 
-            n₀ = max over k of ceil(2 τ_k · (W_k + Nγ/2)),    at least 1
+            n₀ = the smallest multiple of 2^P with n₀ >= max over k of 2^p_k c_k
 
-        steps per segment, ``W_k`` the largest spread of segment ``k`` over
-        the registers and samples (``τ_k`` in µs, rates in rad/µs).  The
-        plateau sets it as a rule, but a long edge with few segments can:
-        for one atom at ``Δ = γ = 0``, one segment of ``Ω/2`` per edge does
-        when ``t_ramp > 2T/3``.  The counts tried are ``2n₀, 4n₀, …``, each
-        a run of the whole map at that count, and the first whose estimate
-        is at most ``tol`` comes back: ``2^k n₀`` with ``k >= 1``.
+        where every segment has at least its ``c_k`` steps.  One segment has
+        ``P = 0`` and ``n₀ = c``, as in ``step_count``.  ``2^p_k τ_k`` lies
+        in ``(T/2, T]`` for every segment, so ``2^p_k c_k`` is
+        ``2T (W_k + Nγ/2)`` to within a factor 2 before the rounding of
+        ``c_k``, and any segment can set it.  For one atom at
+        ``Δ = √3 σ(0.4) Ω ≈ 1.04 Ω`` and ``γ = Ω``, the plateau's own count
+        is 10 at ``t_ramp = 0.2 T`` and 7 at ``0.45 T``, but with two
+        segments per edge in the first case (``τ = T/10``, ``p = 3``) the two
+        next to the plateau (``Ω_k = 3Ω/4``) need ``8 · 2 = 16``
+        (``c = ceil(1.12)``), and with one in the second (``p = 1``)
+        ``2 · 5 = 10``.  A segment much shorter than ``T/n₀`` raises ``n₀`` to
+        at least ``2^P``, more than ``T/(2 τ_min)``, since it takes at least
+        one step at ``n₀``.  The counts tried are ``2n₀, 4n₀, …``, each a run
+        of the whole map at that count, and the first whose estimate is at
+        most ``tol`` comes back: ``2^k n₀`` with ``k >= 1``.
 
         **Measured** against the exponential of the full Liouvillian per
         segment, chained, and averaged over the registers, on the features
@@ -1745,24 +1889,28 @@ class RydbergFeatureMap:
         π and 4π, the square pulse, ramps of ``0.2 T`` with 1 and 4
         segments per edge and a triangle (``t_ramp = T``) with 2, each
         without jitter and, with interactions, with ``σ = 0.3`` µm and
-        ``K = 3``: the 446 cases whose ``n₀`` was at most 1000 (800 for 4
-        atoms), 342 of them ramped and 163 jittered.  At ``2n₀`` the error
-        was 0.987 to 1.018 times a third of the difference (in the 445 cases
-        with an error above ``1e-9``).  At the count returned for
-        ``tol = 1e-6`` it was 0.9994 to 1.0077 times the estimate, and every
-        count met ``tol`` (largest error ``0.988 tol``), as close as for the
-        one segment of ``step_count`` (0.987 to 1.084 over #598's sweep);
-        square, ramped and jittered cases do not differ.  Bounding each
-        register's features instead of the mixture's would have doubled the
-        count in 10 of the 163 jittered cases, without changing what the map
-        returns.  For ``target="state"`` the same grid with its inputs drawn
-        again (#774; 443 cases pass the same ``n₀`` limits, 340 ramped and
-        159 jittered) gave, in the trace distance from the chained ``ρ̄``,
-        0.989 to 1.019 times a third of ``D(ρ̄_n₀, ρ̄_2n₀)`` at ``2n₀``, and
-        0.998 to 1.001 times the estimate at the count returned for
-        ``tol = 1e-6``.  Every count met ``tol`` (largest error
-        ``0.9997 tol``); it was the features' count in 281 cases, twice it
-        in 159 and four times it in 3.
+        ``K = 3``, the inputs drawn from one seeded generator (#774): the
+        419 cases whose ``n₀`` was at most 1000 (800 for 4 atoms), 316 of
+        them ramped and 146 jittered.  At ``2n₀`` the error was 0.977 to
+        1.019 times a third of the difference (all 419 above ``1e-9``).  At
+        the count returned for ``tol = 1e-6`` it was 0.9988 to 1.0025 times
+        the estimate, and every count met ``tol`` (largest error
+        ``0.9987 tol``), as close as for the one segment of ``step_count``
+        (0.987 to 1.084 over #598's sweep); square, ramped and jittered cases
+        do not differ.  For ``target="state"``, in the trace distance from
+        the chained ``ρ̄``, the same cases gave 0.989 to 1.019 times a third
+        of ``D(ρ̄_n₀, ρ̄_2n₀)`` at ``2n₀`` and 0.998 to 1.001 times the
+        estimate at the count returned for ``tol = 1e-6``; every count met
+        ``tol`` (largest error ``0.9956 tol``), and it was the features'
+        count in 241 cases, twice it in 176 and four times it in 2.  The
+        opt-in tests ``test_the_count_meets_tol_over_the_sweep_of_768``
+        (``HQNN_FORGE_REPRODUCE=1``) rerun both.  Before #782, with ``n``
+        steps on every segment, #768's 446 cases gave 0.987 to 1.018 at
+        ``2n₀`` and 0.9994 to 1.0077 at the count, and #774's 443 for the
+        state 0.989 to 1.019 and 0.998 to 1.001.  Bounding each register's
+        features instead of the mixture's would have doubled the count in
+        10 of #768's 163 jittered cases, without changing what the map
+        returns.
 
         Parameters
         ----------
@@ -1788,7 +1936,9 @@ class RydbergFeatureMap:
         Returns
         -------
         int
-            The step count per segment, ``2^k n₀`` with ``k >= 1``; 1 when
+            The count to pass as ``n_steps``, ``2^k n₀`` with ``k >= 1``, a
+            multiple of ``2^(P+1)``, at which segment ``k`` takes
+            ``n_steps / 2^p_k`` steps (:attr:`segment_steps`); 1 when
             ``gamma = 0``, where every segment is exact without steps.
 
         Raises
@@ -1809,8 +1959,8 @@ class RydbergFeatureMap:
         -----
         * **Cost.**  One ``eigvalsh`` per segment, register and sample for
           ``n₀``, then ``k + 1`` runs of the map's solver on ``X``, at
-          ``n₀, 2n₀, …, 2^k n₀`` steps per segment: ``(2 · result − n₀)``
-          steps per segment and register in all, less than twice the cost of
+          ``n₀, 2n₀, …, 2^k n₀``: ``(2 · result − n₀) / 2^p_k`` steps on
+          segment ``k`` per register in all, less than twice the cost of
           one :meth:`transform` at the result, plus one eigendecomposition
           per segment, register, sample and run.  The memory is that of one
           chunk of :meth:`transform` plus two matrices of the features,
@@ -1823,9 +1973,10 @@ class RydbergFeatureMap:
           ``2n`` steps, its largest ``D`` kept and its states dropped, which
           holds the states of two runs of one chunk.  When ``X`` spans more
           than one chunk, the coarser run of every chunk is therefore
-          computed again at each doubling: ``3 · (result − n₀)`` steps per
-          segment and register in all instead of ``2 · result − n₀``: the
-          same at one doubling, up to 1.5 times the cost at many.  When it
+          computed again at each doubling: ``3 · (result − n₀) / 2^p_k``
+          steps on segment ``k`` per register in all instead of
+          ``(2 · result − n₀) / 2^p_k``: the same at one doubling, up to 1.5
+          times the cost at many.  When it
           fits in one chunk (the default chunk
           holds ``2^20`` entries: 4096 samples at 4 atoms, 1 at 10) the finer
           run is kept for the next doubling and nothing is computed twice.
@@ -1854,16 +2005,18 @@ class RydbergFeatureMap:
         ... )
         >>> X = torch.tensor([[-1.0, 2.0], [0.5, 0.5], [3.0, -2.0]])
         >>> n = probe.step_count(X, tol=1e-6)
-        >>> n  # n₀ = 19, from the plateau
-        304
+        >>> n  # n₀ = 2^4 · 2 = 32 from the two edge segments next to the plateau (it needs 19)
+        256
         >>> feature_map = RydbergFeatureMap(**{**probe.get_config(), "n_steps": n})
         >>> feature_map.get_config()["n_steps"] == n
         True
+        >>> feature_map.segment_steps  # edges of 0.0503/4 µs, T/τ = 19.9: p = 4
+        (16, 16, 16, 16, 256, 16, 16, 16, 16)
 
         For :meth:`states`, the same map needs one doubling more here:
 
         >>> probe.step_count(X, tol=1e-6, target="state")
-        608
+        512
         """
         tol = _tolerance(tol)
         target = _target(target)
@@ -1879,10 +2032,13 @@ class RydbergFeatureMap:
             return 1
         n_atoms = self._register.n_atoms
         registers = self._registers()
-        # n₀: the largest resolution count over the segments, each with the largest
-        # spread W over the registers and samples.
+        segments = self._segments()
+        halvings = [_halvings(tau, self._encoding.t) for _, tau in segments]
+        # n₀: the smallest multiple of 2^P at which every segment k, which takes
+        # n / 2^p_k steps there, meets its resolution count, from the largest spread W
+        # over the registers and samples.
         start = 1
-        for omega, tau in self._segments():
+        for (omega, tau), p in zip(segments, halvings, strict=True):
             spread = 0.0
             for register in registers:
                 for first in range(0, n_samples, size):
@@ -1894,7 +2050,9 @@ class RydbergFeatureMap:
                         interactions=self._interactions,
                     )
                     spread = max(spread, _spread(_hermitian(hamiltonian)))
-            start = max(start, _starting_count(spread, tau, n_atoms, self._gamma))
+            start = max(start, _starting_count(spread, tau, n_atoms, self._gamma) << p)
+        unit = 1 << max(halvings)
+        start = -(-start // unit) * unit
 
         if target == "state":
             # ρ̄ of `states`, one chunk at a time (Notes, *Memory*)
@@ -1932,7 +2090,8 @@ class RydbergFeatureMap:
             place of ``delta_max``.
         ``c6``, ``gamma``, ``n_steps``, ``interactions``, ``correlations``
             As passed; ``n_steps`` is the solver's step count, ``None`` if
-            none was given (``gamma = 0``).
+            none was given (``gamma = 0``).  With the encoding it fixes the
+            count of every segment of the drive, :attr:`segment_steps`.
         ``readout_error``
             ``[p01, p10]`` as a list of two floats, or ``None``.
         ``position_jitter``, ``jitter_samples``, ``jitter_seed``

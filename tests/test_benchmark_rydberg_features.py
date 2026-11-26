@@ -6930,8 +6930,9 @@ class TestArmBUnderRealism:
         by_hand = np.column_stack(
             [alone.transform(REALISM_X[:, [i]]).numpy()[:, 0] for i in range(4)]
         )
-        # Equal up to the rounding of the 16 × 16 and 2 × 2 products over 5 segments of 40
-        # steps: 1.3e-13 on the declared floors (torch 2.3), as across geometries above.
+        # Equal up to the rounding of the 16 × 16 and 2 × 2 products over 5 segments (40
+        # steps on the plateau, 5 on each edge segment since #782): 1.3e-13 on the
+        # declared floors (torch 2.3) with 40 on every one, as across geometries above.
         np.testing.assert_allclose(b.numpy(), by_hand, rtol=0, atol=1e-12)
 
     @pytest.mark.slow
