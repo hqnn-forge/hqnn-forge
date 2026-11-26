@@ -500,6 +500,7 @@ meet.
 | No decay | `T/τ_r = 1.7 × 10⁻³` for the Rydberg lifetime, `5 × 10⁻³` against the 50 µs effective lifetime of Bernien et al. | Good approximation |
 | No detection error | Aquila misreads a ground-state atom as excited with probability 0.01 and an excited atom as ground with 0.08; Bernien et al. report detection fidelities of 98 to 99 % and 93 %. With independent errors `ε` and `ε′` a feature becomes `ε + (1 − ε − ε′) ⟨n_i⟩` | Idealisation by default; `readout_error=(ε, ε′)` models it (see [Readout](#readout)) |
 | Exact expectation values | 1 to 1000 shots per task at fewer than 10 shots per second, and each input sample is its own task; about 100 shots are typical | Idealisation; the shots option models the statistics |
+| All of the above in a benchmark | `examples/benchmark_rydberg_features.py --device aquila` sets the detection error, the jitter, the ramped global drive and 100 shots (#775) | The run and what it leaves of the published results: [Rydberg benchmark under Aquila's settings](results/rydberg-aquila-benchmark.md) (#776) |
 
 **The encoding is an idealisation.** A detuning that is set freely and independently for each
 atom is more than current devices offer as a standard capability. A device-compatible variant
