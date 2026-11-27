@@ -491,7 +491,7 @@ meet.
 | Assumption | On a current device | Status |
 |---|---|---|
 | Hamiltonian, units, `C6` | Aquila's native Hamiltonian has this form, with the phase convention above and `C6` of `70S` | Supported |
-| Chain, spacings 4 to 15 µm | Sites at least 4 µm apart in a region 75 µm wide: a row of 6 atoms fits up to `a = 15 µm`, so `0.04 ≤ V/Ω ≤ 105` at the reference Ω | Supported |
+| Chain, spacings 4 to 15 µm | Sites at least 4 µm apart in a region 75 µm wide and 76 µm high (Wurtz et al. 2023), the largest difference of the `x` and of the `y` coordinates of two sites, as the Braket device schema defines its area: a row of 6 atoms fits up to `a = 15 µm`, so `0.04 ≤ V/Ω ≤ 105` at the reference Ω | Supported; `AQUILA_LIMITS` holds these as `min_spacing` and `region`, and `AtomRegister.device_violations()` checks a register's nominal positions against them, not the positions a shot-to-shot spread displaces. Aquila's minimum vertical spacing between rows, also 4 µm, is not checked (#794): the ring of 4 breaks it from `V/Ω = 13.2` on |
 | Fixed positions | Positions vary by 0.2 µm from shot to shot, which near `a = R_b` spreads `V` by about 20 % (`6 √2 · 0.2 µm / a`); the same expression gives about 42 % at `a = 4.03 µm`. Wurtz et al. advise placing atoms well inside or outside `R_b` | Idealisation by default; the spread of `V` grows as the spacing shrinks. `position_jitter=0.2` with `jitter_samples` and `jitter_seed` models it (see [Geometry](#geometry)) |
 | Pulse bounds | `Ω ≤ 15.8 rad/µs`, `−125 ≤ Δ ≤ 125 rad/µs`, at most 4 µs: the reference `Ω = 12.57`, `Δ_max = 21.8 rad/µs` and `T = 0.25 µs` are inside | Supported; `AQUILA_LIMITS` holds these and the slew bound, and `GlobalDrivePulseEncoding.device_violations()` checks a pulse against them |
 | Constant pulse | Ω may change by at most 250 rad/µs², so each edge of the pulse takes at least `Ω/250`: 0.0503 µs at the reference Ω, about a fifth of `T = 0.25 µs` (a 0.05 µs edge would be a slew of 251 rad/µs²) | Idealisation by default; `GlobalDrivePulseEncoding` with `t_ramp ≥ Ω/250` ramps the edges and keeps the pulse area (see [Pulse](#pulse)) |
@@ -517,7 +517,11 @@ square pulse (see [Encoding](#encoding) and [Pulse](#pulse)):
 ## References
 
 - AWS (2024), "Submit an analog program using QuEra Aquila", *Amazon Braket Developer Guide*,
-  <https://docs.aws.amazon.com/braket/latest/developerguide/braket-quera-submitting-analog-program-aquila.html>;
+  <https://docs.aws.amazon.com/braket/latest/developerguide/braket-quera-submitting-analog-program-aquila.html>,
+  and the device schema it refers to, `quera_ahs_paradigm_properties_v1.py` of
+  <https://github.com/amazon-braket/amazon-braket-schemas-python>, whose `lattice.area` has a
+  `width` and a `height`, the "largest allowed difference between x coordinates of any two
+  sites" and the same in y;
   and Komar, Bylinskii, Becker & Lin (2024), "Local detuning now available on QuEra's Aquila
   device with Braket Direct", *AWS Quantum Technologies Blog*, 17 April 2024.
 - Bernien, Schwartz, Keesling, Levine, Omran, Pichler, Choi, Zibrov, Endres, Greiner, Vuletić

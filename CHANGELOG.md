@@ -552,6 +552,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a record to strict-JSON data) are public. `examples/benchmark_rydberg_features.py` uses
   them in place of its own copies and of the private `_plain`; no number of `run_benchmark` or
   of the script changes, pinned on a seeded run of each (#524, #779)
+- `DeviceLimits.min_spacing` and `DeviceLimits.region` (`(width, height)` in µm, the largest
+  difference of the `x` and of the `y` coordinates of two atoms; both unbounded by default),
+  `AQUILA_LIMITS` with Aquila's 4 µm and 75 × 76 µm, and `AtomRegister.device_violations`,
+  which checks a register's nominal positions against them. The Aquila preset of
+  `examples/benchmark_rydberg_features.py` refuses a run with a grid point whose register
+  breaks a bound, naming it, and every global-drive line records `register_violations` next
+  to `device_violations` (#783, #793)
 - Device options on `examples/benchmark_rydberg_features.py`: `--readout-error P01 P10` (arms
   A, B and D read through one detection model), `--position-jitter` with `--jitter-samples`
   (displacements from a fourth seed of the run, shared by A and B), `--encoding global-drive`
