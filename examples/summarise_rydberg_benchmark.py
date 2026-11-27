@@ -15,9 +15,11 @@ it each label (*Groups* below), it prints, as Markdown:
   feature simulation and of the final fit over the lines that computed them.
   ``feature s`` is the fold's own feature matrix.  When a line of the group
   records the seconds of its tuning folds' matrices too (#785), ``total
-  feature s`` beside it adds them (:func:`total_feature_seconds`), and is
-  ``–`` in a row with a line that does not; a file without such a line, as
-  every committed one, prints the table it printed before.
+  feature s`` beside it is the mean over the same lines of the fold's and
+  the tuning folds' seconds together (:func:`total_feature_seconds`), not a
+  sum over the file, and is ``–`` in a row with a line that does not; a
+  file without such a line, as every committed one, prints the table it
+  printed before.
   Under the table, one line (:func:`degeneracy_line`, #747) says in how many
   folds the PCA fit, and in how many a tuning fold's fit, was degenerate
   (the runner's ``pca`` and ``tuning["pca"]``, #525): in such a fold the
@@ -729,7 +731,8 @@ def scores_table(
     One row per arm, head and grid point; with ``geometry``, a column for arm A's geometry.
 
     With a line that records its tuning folds' feature seconds, a ``total feature s``
-    column after ``feature s`` (:func:`total_feature_seconds`); without one, none.
+    column after ``feature s``: the mean :func:`total_feature_seconds` over the row's
+    folds, as ``feature s`` is the mean ``feature_seconds``; without one, none.
     """
     where = ("geometry | ", "---|") if geometry else ("", "")
     timed = any(_times_tuning(r) for folds in rows.values() for r in folds.values())
