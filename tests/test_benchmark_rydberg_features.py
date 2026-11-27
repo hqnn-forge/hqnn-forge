@@ -7084,9 +7084,12 @@ class TestDevicePreset:
 
     @staticmethod
     def _preset(**changes: Any) -> Any:
-        """``QUICK`` under ``--device aquila --levels 8 --jitter-samples 2``, with ``changes``."""
+        """
+        ``QUICK`` under ``--device aquila --levels 8 --jitter-samples 2``, with ``changes``
+        (the preset's ``t_ramp`` at their Ω, if they set one).
+        """
         values = {
-            **bench.device_preset("aquila", OMEGA),
+            **bench.device_preset("aquila", changes.get("omega", OMEGA)),
             "device": "aquila",
             "levels": 8,
             "jitter_samples": 2,
@@ -7119,6 +7122,13 @@ class TestDevicePreset:
                 "grid at V/Ω = 0.00013",
                 "region: max y − min y = 77.2402 µm exceeds the height 76 µm",
             ),
+            # Another Ω (#783): at Aquila's largest, 15.8 rad/µs, R_b = 8.36687 µm, and the
+            # default V/Ω = 100 puts the chain at a = 3.88356 µm.
+            (
+                {"omega": 15.8, "v_over_omega": (100.0,)},
+                "chain at V/Ω = 100",
+                "min_spacing: min |r_i − r_j| = 3.88356 µm (atoms ?) is below 4 µm",
+            ),
         ],
     )
     def test_a_register_that_breaks_a_bound_is_refused_with_its_grid_point_named(
@@ -7144,6 +7154,9 @@ class TestDevicePreset:
         assert radius * 106.0 ** (-1 / 6) == pytest.approx(3.99564, abs=5e-6)
         assert 5 * radius * 0.037 ** (-1 / 6) == pytest.approx(75.2906, abs=5e-5)
         assert 2 * radius * 1.3e-4 ** (-1 / 6) == pytest.approx(77.2402, abs=5e-5)
+        assert (DEFAULT_C6 / 15.8) ** (1 / 6) * 100.0 ** (-1 / 6) == pytest.approx(
+            3.88356, abs=5e-6
+        )
 
     def test_every_register_that_breaks_a_bound_is_named(self) -> None:
         """Two geometries at two values of ``V/Ω`` too close: four grid points, in grid order."""
@@ -7162,6 +7175,8 @@ class TestDevicePreset:
             {"n_atoms": 6, "v_over_omega": (0.04,)},  # 5a = 74.3186 µm
             # 3 rows of 2 at a = 37.92 µm: 2a = 75.84 µm high.
             {"n_atoms": 6, "geometries": ("grid",), "grid_cols": 2, "v_over_omega": (1.45e-4,)},
+            # At Ω = 15.8 rad/µs the spacing reaches 4 µm at V/Ω = (R_b/4)⁶ = 83.76.
+            {"omega": 15.8, "v_over_omega": (83.7,), "geometries": bench.GEOMETRIES},
         ],
     )
     def test_a_register_just_inside_the_bounds_is_kept(self, changes: dict[str, Any]) -> None:
