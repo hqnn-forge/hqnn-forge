@@ -130,6 +130,53 @@ def test_b_lines_reused_across_v_count_once() -> None:
     assert all(r["reused_from_v_over_omega"] is None for r in b.values())
 
 
+def _score_cells(text: str, row: str) -> list[str]:
+    """The cells of the scores row that starts with ``row``, e.g. ``"| A | linear | 1 | 0 |"``."""
+    (line,) = [line for line in text.splitlines() if line.startswith(row)]
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def test_the_scores_add_the_feature_seconds_of_the_tuning_folds() -> None:
+    """
+    #785: once a line records ``tuning["feature_seconds"]``, the scores table has a
+    ``total feature s`` column after ``feature s``, the mean over the row's folds of
+    ``feature_seconds + Σ_j tuning["feature_seconds"][j]``; arm B's from its computed
+    lines, as ``feature s`` is.  A line without tuning adds nothing, and a row with a line
+    from before #785 (``tuning`` without the field) shows ``–``.  Without such a line the
+    table has no such column.
+    """
+    records = _records()  # feature_seconds 1.0, 0.0 on the reused B lines; no "tuning"
+    plain = summary.summarise(records, permutations=99)
+    assert "total feature s" not in plain
+    for r in records:
+        fold = r["fold"]
+        if r["arm"] == "A" and r["v_over_omega"] == 1.0:
+            # 1 + 0.25 + 0.25 · fold: mean 1.25 + 0.25 · 6 = 2.75 over folds 0 … 12
+            r["tuning"] = {"feature_seconds": [0.25, 0.25 * fold]}
+        elif r["arm"] == "A":
+            r["tuning"] = {"feature_seconds": [1.0]} if fold else {"scores": [0.5]}
+        elif r["arm"] == "B":
+            # the computed line: 1 + 2 + 1 = 4; a reused one carries the same tuning seconds
+            r["tuning"] = {"feature_seconds": [2.0, 1.0]}
+        elif r["head"] == "linear":
+            r["tuning"] = None
+    text = summary.summarise(records, permutations=99)
+    assert "| dim | params | feature s | total feature s | fit s |" in text
+    assert "\n|" + "---|" * 14 + "\n" in text
+    # cells: ..., dim, params, feature s, total feature s, fit s
+    assert _score_cells(text, "| A | linear | 1 | 0 |")[-3:] == ["1.00", "2.75", "0.10"]
+    assert _score_cells(text, "| A | linear | 10 | 0 |")[-3:] == ["1.00", "–", "0.10"]
+    assert _score_cells(text, "| B | linear | – | 0 |")[-3:] == ["1.00", "4.00", "0.10"]
+    assert _score_cells(text, "| C | linear |")[-3:] == ["1.00", "1.00", "0.10"]
+    assert _score_cells(text, "| C | mlp |")[-3:] == ["1.00", "1.00", "0.10"]
+
+    def outside_scores(text: str) -> str:
+        above, scores = text.split("### Scores", 1)
+        return above + scores.split("### A against B", 1)[1]
+
+    assert outside_scores(text) == outside_scores(plain)  # only the scores table changes
+
+
 def test_comparisons_form_one_holm_family() -> None:
     family = summary.comparisons(summary._rows(_records()))
     # A − B at two grid points; A at two, B at one, each against two baselines.

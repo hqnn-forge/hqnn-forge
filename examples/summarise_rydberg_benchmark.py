@@ -13,6 +13,13 @@ it each label (*Groups* below), it prints, as Markdown:
   interval over the folds, ``mean ± t(0.975, n − 1) · sd / √n``.  Beside them
   the feature dimension, the trainable parameters and the mean seconds of
   feature simulation and of the final fit over the lines that computed them.
+  ``feature s`` is the fold's own feature matrix.  When a line of the group
+  records the seconds of its tuning folds' matrices too (#785), ``total
+  feature s`` beside it is the mean over the same lines of the fold's and
+  the tuning folds' seconds together (:func:`total_feature_seconds`), not a
+  sum over the file, and is ``–`` in a row with a line that does not; a
+  file without such a line, as every committed one, prints the table it
+  printed before.
   Under the table, one line (:func:`degeneracy_line`, #747) says in how many
   folds the PCA fit, and in how many a tuning fold's fit, was degenerate
   (the runner's ``pca`` and ``tuning["pca"]``, #525): in such a fold the
@@ -687,6 +694,31 @@ def _p(value: float) -> str:
     return f"{value:.2e}" if value < 1e-3 else f"{value:.4f}"
 
 
+def _times_tuning(record: Mapping[str, Any]) -> bool:
+    """Whether a line records the seconds of its tuning folds' features (#785)."""
+    tuning = record.get("tuning")
+    return isinstance(tuning, Mapping) and "feature_seconds" in tuning
+
+
+def total_feature_seconds(record: Mapping[str, Any]) -> float | None:
+    """
+    The seconds of feature simulation behind a line: its fold's matrix and its tuning folds'.
+
+    ``T = feature_seconds + Σ_j tuning["feature_seconds"][j]``, in seconds,
+    with ``j`` over the tuning folds (#785), as the runner's
+    ``total_feature_seconds`` has it.  A line without tuning (``tuning``
+    ``null`` or absent) simulated no tuning matrix, so ``T =
+    feature_seconds``; one whose ``tuning`` does not record the field was
+    written before #785, and ``T`` is ``None``.
+    """
+    tuning = record.get("tuning")
+    if tuning is None:
+        return float(record["feature_seconds"])
+    if not _times_tuning(record):
+        return None
+    return float(record["feature_seconds"]) + float(sum(tuning["feature_seconds"]))
+
+
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
@@ -695,14 +727,22 @@ def _p(value: float) -> str:
 def scores_table(
     rows: Mapping[Key, Mapping[int, Mapping[str, Any]]], *, geometry: bool = False
 ) -> str:
-    """One row per arm, head and grid point; with ``geometry``, a column for arm A's geometry."""
+    """
+    One row per arm, head and grid point; with ``geometry``, a column for arm A's geometry.
+
+    With a line that records its tuning folds' feature seconds, a ``total feature s``
+    column after ``feature s``: the mean :func:`total_feature_seconds` over the row's
+    folds, as ``feature s`` is the mean ``feature_seconds``; without one, none.
+    """
     where = ("geometry | ", "---|") if geometry else ("", "")
+    timed = any(_times_tuning(r) for folds in rows.values() for r in folds.values())
+    total = ("total feature s | ", "---|") if timed else ("", "")
     lines = [
         (
             f"| arm | head | {where[0]}V/Ω | γ/Ω | n | MCC mean ± sd | MCC 95 % CI "
-            "| PR-AUC mean ± sd | PR-AUC 95 % CI | dim | params | feature s | fit s |"
+            f"| PR-AUC mean ± sd | PR-AUC 95 % CI | dim | params | feature s | {total[0]}fit s |"
         ),
-        f"|---|---|{where[1]}---|---|---|---|---|---|---|---|---|---|---|",
+        f"|---|---|{where[1]}---|---|---|---|---|---|---|---|---|{total[1]}---|---|",
     ]
     for key in sorted(rows, key=_sort):
         arm, head, shape, v, gamma = key
@@ -715,13 +755,17 @@ def scores_table(
         feat = np.mean([r["feature_seconds"] for r in recs])
         fit = np.mean([r["train_seconds"] for r in recs])
         cell = f"{'–' if shape is None else shape} | " if geometry else ""
+        seconds = f"{feat:.2f}"
+        if timed:
+            totals = [t for t in map(total_feature_seconds, recs) if t is not None]
+            seconds += f" | {np.mean(totals):.2f}" if len(totals) == len(recs) else " | –"
         lines.append(
             f"| {arm} | {head} | {cell}{'–' if v is None else f'{v:g}'} | "
             f"{'–' if gamma is None else f'{gamma:g}'} | {len(recs)} | "
             f"{_fmt(mcc[0])} ± {_fmt(mcc[1])} | [{_fmt(mcc[2])}, {_fmt(mcc[3])}] | "
             f"{_fmt(ap[0])} ± {_fmt(ap[1])} | [{_fmt(ap[2])}, {_fmt(ap[3])}] | "
             f"{'/'.join(map(str, dims))} | {'/'.join(map(str, params))} | "
-            f"{feat:.2f} | {fit:.2f} |"
+            f"{seconds} | {fit:.2f} |"
         )
     return "\n".join(lines)
 

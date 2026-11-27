@@ -565,6 +565,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values recorded there (#775, #781)
 - `RydbergFeatureMap.segment_steps`: the solver steps of each segment of the drive, in time
   order, a function of `n_steps` and the encoding and so of `get_config()` (#782, #788)
+- `examples/benchmark_rydberg_features.py` records `tuning["feature_seconds"]`, the simulation
+  seconds of each tuning fold's feature matrix as its cache entry stores them (a reused arm B
+  line carries its source's). With the default 3 inner folds those matrices hold about three
+  times the rows of the fold's own, and `feature_seconds` timed only the latter. Once a line
+  records the field, the runner's `summarise` prints a `tot feat s` column and
+  `examples/summarise_rydberg_benchmark.py` a `total feature s` column: fold and tuning folds
+  together. Files written before print as they did (#785, #792)
 
 ### Changed
 - `RydbergFeatureMap` with dephasing scales the solver steps of each segment of a
