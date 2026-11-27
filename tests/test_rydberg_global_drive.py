@@ -351,10 +351,27 @@ class TestDeviceLimits:
     """Each limit is flagged by a configuration that breaks it alone."""
 
     def test_aquilas_numbers(self) -> None:
-        # docs/rydberg-model.md, Hardware realism.
+        # docs/rydberg-model.md, Hardware realism; the register's bounds from the datasheet of
+        # Wurtz et al. (2023): sites 4 µm apart, a site pattern 75 µm wide and 76 µm high.
         assert AQUILA_LIMITS == DeviceLimits(
-            omega_max=15.8, detuning_max=125.0, duration_max=4.0, omega_slew_max=250.0
+            omega_max=15.8,
+            detuning_max=125.0,
+            duration_max=4.0,
+            omega_slew_max=250.0,
+            min_spacing=4.0,
+            region=(75.0, 76.0),
         )
+
+    def test_the_register_fields_default_to_no_bound(self) -> None:
+        """A pulse-only ``DeviceLimits``, as written before #783, bounds no register."""
+        pulse_only = DeviceLimits(15.8, 125.0, 4.0, 250.0)
+        assert (pulse_only.min_spacing, pulse_only.region) == (0.0, (math.inf, math.inf))
+
+    def test_the_pulse_check_ignores_the_register_fields(self) -> None:
+        """An encoding has no positions: the same list under any register bound."""
+        encoding = device_encoding(omega=20.0, t_ramp=0.05, n_ramp_segments=2)
+        tight = DeviceLimits(15.8, 125.0, 4.0, 250.0, min_spacing=1e9, region=(0.0, 0.0))
+        assert encoding.device_violations(tight) == encoding.device_violations()
 
     def test_the_reference_configuration_passes(self) -> None:
         # Ω = 4π, Δ_local = √3 Ω = 21.8, T = 0.25 µs and the shortest ramp,

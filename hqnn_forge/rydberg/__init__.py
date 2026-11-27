@@ -14,14 +14,14 @@ JAX, which this library does not depend on.
 
 Exported symbols
 ----------------
-AtomRegister          Atom positions in µm; chain, ring and grid constructors, C6/r^6 couplings, blockade radius.
+AtomRegister          Atom positions in µm; chain, ring and grid constructors, C6/r^6 couplings, blockade radius, device limits.
 rydberg_hamiltonian   Dense 2^n x 2^n Hamiltonian of a register, for one or a batch of pulses.
 evolve                ρ(t) from all atoms in |g⟩: exact without dephasing, Strang splitting with it.
 readout               ⟨n_i⟩ of every atom, optionally ⟨n_i n_j⟩ of every pair, from the diagonal of ρ.
 step_count            A count of splitting steps for evolve whose estimated feature or state error is at most tol.
 PulseEncoding         Inputs to bounded detunings, Δ_i = Δ_max · σ(x_i), with the fixed Ω and T.
 GlobalDrivePulseEncoding  Device-compatible variant: quantised pattern Δ_i = Δ_local · h_i, ramped global Ω.
-DeviceLimits          Bounds on Ω, |Δ|, the duration and the slew of Ω, checked against an encoding.
+DeviceLimits          Bounds on Ω, |Δ|, the duration and the slew of Ω, and on a register's spacing and region.
 AQUILA_LIMITS         QuEra Aquila's DeviceLimits from docs/rydberg-model.md.
 RydbergFeatureMap     Fixed map from a batch of inputs to ⟨n_i⟩ (optionally ⟨n_i n_j⟩), exact or from shots.
 DEFAULT_C6            C6 of two 87Rb atoms in 70S, 2π × 862 690 MHz µm^6, in rad/µs · µm^6.

@@ -434,6 +434,23 @@ list recorded for the ideal pulse runs ``--encoding global-drive --levels
 continuous --t-ramp 0``, which has the same features under cache entries of
 its own.
 
+**Register limits** (#783).  Next to it each such ``feature_map`` records
+``register_violations``, the map's register checked with
+``AtomRegister.device_violations(AQUILA_LIMITS)``: sites at least
+``min_spacing = 4`` µm apart, and within ``region = (75, 76)`` µm, the
+largest difference of the ``x`` and of the ``y`` coordinates of two atoms
+(*Hardware realism* in ``docs/rydberg-model.md``).  The check is of the
+**nominal positions**, the register of :func:`atom_register`, never of the
+displaced registers of ``--position-jitter``: the device's bounds are on the
+sites a program asks for, and the 0.2 µm spread about them is the device's
+own, not a setting of the run.  At ``V/Ω = 100`` the nearest neighbours are
+4.03 µm apart and keep the bound, although a realisation can bring a pair
+closer than 4 µm, as the device itself would.  On the default grid every
+geometry passes: ``a = R_b (V/Ω)^(−1/6) >= 4.03`` µm is the closest pair of
+each shape, and the widest register, the chain of 4, is ``3a <= 38.3`` µm
+long.  The bounds give way at ``V/Ω > (R_b/4)⁶ = 105.3`` at the reference
+Ω, and for a row of 6 below ``(R_b/15)⁶ = 0.0379``.
+
 **The Aquila preset**, ``--device aquila`` (:func:`device_preset`), sets
 every value the model page documents for the device: the detection error
 ``(0.01, 0.08)``; ``σ = 0.2`` µm; ``global-drive`` with ``t_ramp`` at the
@@ -446,7 +463,10 @@ realisations, a numerical choice like ``levels`` is a resolution nobody
 verified, not a value of the device.  The pulse is the same at every grid
 point (Ω, T and ``t_ramp`` are settings of the run), so a pulse that breaks
 the device's limits is refused before any dataset is loaded, naming each
-bound broken.
+bound broken.  The register changes with the geometry and ``V/Ω``, so the
+preset checks each of those grid points (with arm A or B) and refuses the
+run, also before any dataset is loaded, if a register breaks a bound,
+naming every such grid point and its bounds.
 
 **Step counts.**  Both discretisations of a preset map are held to
 ``tol = 1e-4``, about a hundredth of the smallest shot standard error of a
@@ -633,7 +653,8 @@ point (``geometry``, ``grid_shape`` as ``[rows, cols]`` for a grid and
 ``omega``, ``omega_t``, ``evolution_time_us`` (the whole pulse, ``T`` or
 ``T + t_ramp``), ``n_steps``; all ``null`` for arms C, D and ``D-hybrid``)
 and the map's ``get_config()`` (``feature_map``, for a global drive with its
-``device_violations``, "Device realism"); ``reused_from_v_over_omega`` and ``reused_from_geometry``
+``device_violations`` and ``register_violations``, "Device realism");
+``reused_from_v_over_omega`` and ``reused_from_geometry``
 (identifying the interaction-grid value and the geometry from which an arm B
 record was reused across the grid, both ``null`` if the record was computed
 rather than reused; for reused
@@ -872,7 +893,8 @@ ENCODINGS: tuple[str, ...] = ("square", "global-drive")
 #: Spelled out because ``levels`` has no default, so ``None`` in :class:`Settings` means
 #: "not stated", which the global drive refuses.
 CONTINUOUS: Final = "continuous"
-#: Devices that ``--device`` can select, with the limits of their preset (:func:`device_preset`).
+#: Devices that ``--device`` can select, with the limits of their preset (:func:`device_preset`):
+#: the pulse's and the register's.
 DEVICES: dict[str, DeviceLimits] = {"aquila": AQUILA_LIMITS}
 #: Aquila's detection error ``(p01, p10)``: *Hardware realism* in ``docs/rydberg-model.md``.
 AQUILA_READOUT_ERROR: Final = (0.01, 0.08)
@@ -1037,7 +1059,10 @@ class Settings:
         (:func:`device_preset`) must hold its values, and the pulse must
         keep the device's limits: a violation of any of them, named by
         :meth:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding.device_violations`,
-        is refused.
+        is refused.  With arm A or B, so must the nominal register of every
+        geometry and ``V/Ω``: a violation of ``min_spacing`` or ``region``,
+        named by :meth:`~hqnn_forge.rydberg.AtomRegister.device_violations`
+        with its grid point, is refused too.
     arms:
         A subset of :data:`ARMS`.
     hidden:
@@ -1319,6 +1344,23 @@ class Settings:
             raise ValueError(
                 f"device={device!r} refuses the pulse of every grid point (Ω, T and t_ramp are "
                 f"settings of the run, the same at each): {'; '.join(violations)}."
+            )
+        # The register changes with the geometry and V/Ω (not γ/Ω), and is built only where
+        # arm A or B runs, as the shapes above are checked.
+        if not {"A", "B"} & set(self.arms):
+            return
+        refused = [
+            f"{geometry} at V/Ω = {v:g}: {'; '.join(found)}"
+            for geometry in self.geometries
+            for v in self.v_over_omega
+            if (found := atom_register(self, geometry, v).device_violations(DEVICES[device]))
+        ]
+        if refused:
+            points = "grid point" if len(refused) == 1 else "grid points"
+            raise ValueError(
+                f"device={device!r} refuses the register of {len(refused)} {points}, at its "
+                f"nominal positions (the position jitter is the device's own spread about "
+                f"them, not a setting): {'; '.join(refused)}."
             )
 
     @property
@@ -2349,9 +2391,13 @@ def _rydberg_representation(
     # (empty when compatible); a square pulse records none ("Device realism": as the drive
     # with continuous levels and t_ramp = 0 it always breaks the slew bound), so its config,
     # and with it a default run's cache keys and shot streams, is the one from before #775.
+    # The register's list goes next to it, from the nominal positions (#783).
     encoding = fmap.encoding
     violations: dict[str, Any] = (
-        {"device_violations": encoding.device_violations(AQUILA_LIMITS)}
+        {
+            "device_violations": encoding.device_violations(AQUILA_LIMITS),
+            "register_violations": fmap.register.device_violations(AQUILA_LIMITS),
+        }
         if isinstance(encoding, GlobalDrivePulseEncoding)
         else {}
     )
@@ -4417,8 +4463,8 @@ def _parser() -> argparse.ArgumentParser:
             "--position-jitter 0.2, --encoding global-drive with --t-ramp at the slew bound "
             f"(Omega/250, rounded up to 1e-4 µs) and --n-ramp-segments {AQUILA_RAMP_SEGMENTS}, "
             f"and --shots {AQUILA_SHOTS}, which may not be given with it; --levels and "
-            "--jitter-samples are still required, and a pulse outside the device's limits is "
-            "refused"
+            "--jitter-samples are still required, and a pulse or a grid point's register "
+            "(spacing, region) outside the device's limits is refused"
         ),
     )
     parser.add_argument(

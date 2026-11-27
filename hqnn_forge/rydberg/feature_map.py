@@ -223,7 +223,10 @@ A realisation that brings two atoms so close that ``C6/r⁶`` is not finite in
 :class:`~hqnn_forge.rydberg.AtomRegister`) and the index of the realisation;
 without interactions nothing is checked.  The ``C6/r⁶`` form itself is
 long-distance (the model page does not use it below 4 µm), and no realisation
-is refused for coming closer than that.
+is refused for coming closer than that.  Nor is a realisation held to a
+device's register bounds (:class:`DeviceLimits`): those bound the nominal
+positions, :attr:`RydbergFeatureMap.register`, which a run programs, and the
+displacements are the device's own spread about them.
 
 The solver runs ``K`` times per chunk, so the cost grows ``K`` times; the
 working memory grows by one tensor of the chunk's states, the sum.  The
@@ -588,7 +591,22 @@ class PulseEncoding:
 @dataclass(frozen=True)
 class DeviceLimits:
     """
-    Bounds a device puts on a pulse, checked by :meth:`GlobalDrivePulseEncoding.device_violations`.
+    Bounds a device puts on a pulse and on a register.
+
+    The first four fields bound the pulse and are checked by
+    :meth:`GlobalDrivePulseEncoding.device_violations`; the last two bound
+    the positions and are checked by the register's
+    :meth:`~hqnn_forge.rydberg.AtomRegister.device_violations`.  A device is
+    one set of limits, the bounds its datasheet lists for a program, so that
+    both checks read one value (:data:`AQUILA_LIMITS`).
+
+    **The register bounds are on the nominal positions**, the ones a run
+    programs (the device's "user-defined sites"), not on the displaced
+    registers of ``position_jitter`` (*Position jitter*): those model the
+    device's own shot-to-shot spread about the nominal sites (0.2 µm on
+    Aquila), which no setting of the run controls.  A nominal spacing just
+    above ``min_spacing`` therefore keeps the bound although some realisations
+    come closer, as they would on the device.
 
     Attributes
     ----------
@@ -601,12 +619,27 @@ class DeviceLimits:
         falling one, in µs.
     omega_slew_max : float
         Largest rate of change ``|dΩ/dt|``, in rad/µs².
+    min_spacing : float
+        Smallest distance ``|r_i − r_j|`` between two atoms, in µm.  Default
+        ``0``: no bound, since a register never holds two atoms at one point.
+    region : tuple of float
+        ``(width, height)`` in µm: the largest difference between the ``x``
+        coordinates of two atoms, and between their ``y`` coordinates, i.e.
+        the sides of the axis-aligned box around the register, wherever it
+        lies.  This is how the Braket device schema defines a device's area
+        (``lattice.area``: "largest allowed difference between x coordinates
+        of any two sites", and the same in y).  Default ``(inf, inf)``: no
+        bound.  The two register fields have defaults so that a
+        ``DeviceLimits`` of the four pulse fields, as written before they
+        existed, still builds and bounds no register.
     """
 
     omega_max: float
     detuning_max: float
     duration_max: float
     omega_slew_max: float
+    min_spacing: float = 0.0
+    region: tuple[float, float] = (math.inf, math.inf)
 
 
 #: The bounds of QuEra's Aquila listed under *Hardware realism* in
@@ -615,10 +648,17 @@ class DeviceLimits:
 #: rad/µs².  The slew bound makes the shortest edge of a pulse of amplitude Ω
 #: last ``Ω/250`` µs: 0.0503 µs at the reference ``Ω = 4π`` rad/µs, about a fifth
 #: of ``T = 0.25`` µs (a 0.05 µs edge would be a slew of 251 rad/µs²).
+#: The register's sites are at least 4 µm apart, in a site pattern at most 75 µm
+#: wide (``x``) and 76 µm high (``y``), the datasheet of Wurtz et al. (2023).
 #: The resolution and the magnitude limits of the local detuning pattern were
 #: not verified for the model page and are not part of it.
 AQUILA_LIMITS: DeviceLimits = DeviceLimits(
-    omega_max=15.8, detuning_max=125.0, duration_max=4.0, omega_slew_max=250.0
+    omega_max=15.8,
+    detuning_max=125.0,
+    duration_max=4.0,
+    omega_slew_max=250.0,
+    min_spacing=4.0,
+    region=(75.0, 76.0),
 )
 
 
@@ -947,7 +987,10 @@ class GlobalDrivePulseEncoding:
         """
         The device limits this pulse breaks, as messages naming each limit; empty if none.
 
-        Checked, in the field order of :class:`DeviceLimits`:
+        Checked, in the field order of :class:`DeviceLimits`, its four pulse
+        fields (an encoding has no positions; ``min_spacing`` and ``region``
+        are the register's, checked by its
+        :meth:`~hqnn_forge.rydberg.AtomRegister.device_violations`):
 
         * ``omega_max``: the peak Ω;
         * ``detuning_max``: the largest ``|Δ_i|``, which is ``Δ_local``

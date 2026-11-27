@@ -6827,6 +6827,31 @@ class TestGlobalDrive:
             "omega_slew_max: Ω / t_ramp = 251.327 rad/µs² exceeds 250 rad/µs²"
         ]
 
+    def test_every_global_drive_line_records_its_register_violations(self) -> None:
+        """
+        Next to ``device_violations``, the nominal register's against ``AQUILA_LIMITS``
+        (#783): without ``--device`` a register outside them is simulated and the list says
+        what breaks; a square pulse records neither list, so its config stays that of ``main``.
+        """
+        drive = _replace(QUICK, encoding="global-drive", levels=4, t_ramp=0.0)
+        for rep in bench.representations(_replace(drive, arms=("A", "B"))):
+            assert rep.config["register_violations"] == []
+            keys = list(rep.config)
+            assert keys.index("register_violations") == keys.index("device_violations") + 1
+        # 6 atoms, 5a = 75.2906 µm at V/Ω = 0.037; 3.99564 µm apart at V/Ω = 106.
+        wide = _replace(drive, n_atoms=6, v_over_omega=(0.037, 106.0))
+        assert _rep(wide, "A", 0.037).config["register_violations"] == [
+            "region: max x − min x = 75.2906 µm exceeds the width 75 µm"
+        ]
+        (found,) = _rep(wide, "B", 106.0).config["register_violations"]
+        pair = re.search(r"\(atoms (\d) and (\d)\)", found)
+        assert pair is not None and int(pair[2]) == int(pair[1]) + 1  # a bond of the chain
+        assert found.replace(pair[0], "(atoms ?)") == (
+            "min_spacing: min |r_i − r_j| = 3.99564 µm (atoms ?) is below 4 µm"
+        )
+        square = _replace(QUICK, n_atoms=6, v_over_omega=(106.0,))
+        assert "register_violations" not in _rep(square, "A").config
+
 
 class TestPositionJitter:
     #: The run's seed sequence, ``[random_state, 2^16]``, written out (:func:`bench.run_seeds`).
@@ -7056,6 +7081,132 @@ class TestDevicePreset:
         message = str(caught.value)
         assert message.startswith("device='aquila' refuses the pulse of every grid point")
         assert message.endswith(named + ".")
+
+    @staticmethod
+    def _preset(**changes: Any) -> Any:
+        """``QUICK`` under ``--device aquila --levels 8 --jitter-samples 2``, with ``changes``."""
+        values = {
+            **bench.device_preset("aquila", OMEGA),
+            "device": "aquila",
+            "levels": 8,
+            "jitter_samples": 2,
+        }
+        return _replace(QUICK, **{**values, **changes})
+
+    @pytest.mark.parametrize(
+        ("changes", "point", "named"),
+        [
+            # a = R_b (V/Ω)^(−1/6) with R_b = 8.69236 µm: 3.99564 µm at V/Ω = 106.
+            (
+                {"v_over_omega": (1.0, 106.0)},
+                "chain at V/Ω = 106",
+                "min_spacing: min |r_i − r_j| = 3.99564 µm (atoms ?) is below 4 µm",
+            ),
+            (
+                {"v_over_omega": (106.0,), "geometries": ("ring",)},
+                "ring at V/Ω = 106",
+                "min_spacing: min |r_i − r_j| = 3.99564 µm (atoms ?) is below 4 µm",
+            ),
+            # A row of 6 at a = 15.0581 µm is 5a = 75.2906 µm long.
+            (
+                {"n_atoms": 6, "v_over_omega": (0.037,)},
+                "chain at V/Ω = 0.037",
+                "region: max x − min x = 75.2906 µm exceeds the width 75 µm",
+            ),
+            # 3 rows of 2 at a = 38.6201 µm: 38.6 µm wide, 2a = 77.2402 µm high.
+            (
+                {"n_atoms": 6, "geometries": ("grid",), "grid_cols": 2, "v_over_omega": (1.3e-4,)},
+                "grid at V/Ω = 0.00013",
+                "region: max y − min y = 77.2402 µm exceeds the height 76 µm",
+            ),
+        ],
+    )
+    def test_a_register_that_breaks_a_bound_is_refused_with_its_grid_point_named(
+        self, changes: dict[str, Any], point: str, named: str
+    ) -> None:
+        with pytest.raises(ValueError) as caught:
+            self._preset(**changes)
+        message = str(caught.value)
+        assert message.startswith(
+            "device='aquila' refuses the register of 1 grid point, at its nominal positions"
+        )
+        # Which nearest-neighbour pair comes out closest is a matter of rounding in
+        # ``i · a``; it is one of the shape's bonds.
+        pair = re.search(r"\(atoms (\d+) and (\d+)\)", message)
+        if pair is not None:
+            n_atoms = changes.get("n_atoms", 4)
+            bonds = bench.nearest_neighbour_bonds(n_atoms, point.split()[0], None)
+            assert (int(pair[1]), int(pair[2])) in bonds
+            message = message.replace(pair[0], "(atoms ?)")
+        assert message.endswith(f"{point}: {named}.")
+        # The same numbers in closed form.
+        radius = (DEFAULT_C6 / OMEGA) ** (1 / 6)
+        assert radius * 106.0 ** (-1 / 6) == pytest.approx(3.99564, abs=5e-6)
+        assert 5 * radius * 0.037 ** (-1 / 6) == pytest.approx(75.2906, abs=5e-5)
+        assert 2 * radius * 1.3e-4 ** (-1 / 6) == pytest.approx(77.2402, abs=5e-5)
+
+    def test_every_register_that_breaks_a_bound_is_named(self) -> None:
+        """Two geometries at two values of ``V/Ω`` too close: four grid points, in grid order."""
+        with pytest.raises(ValueError) as caught:
+            self._preset(v_over_omega=(110.0, 1.0, 120.0), geometries=("chain", "grid"))
+        message = str(caught.value)
+        assert "refuses the register of 4 grid points" in message
+        points = re.findall(r"(\w+) at V/Ω = (\d+): min_spacing", message)
+        assert points == [("chain", "110"), ("chain", "120"), ("grid", "110"), ("grid", "120")]
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"v_over_omega": (105.0,)},  # a = 4.00196 µm
+            {"v_over_omega": (105.0,), "geometries": ("ring", "grid")},
+            {"n_atoms": 6, "v_over_omega": (0.04,)},  # 5a = 74.3186 µm
+            # 3 rows of 2 at a = 37.92 µm: 2a = 75.84 µm high.
+            {"n_atoms": 6, "geometries": ("grid",), "grid_cols": 2, "v_over_omega": (1.45e-4,)},
+        ],
+    )
+    def test_a_register_just_inside_the_bounds_is_kept(self, changes: dict[str, Any]) -> None:
+        settings = self._preset(**changes)
+        for geometry in settings.geometries:
+            for v in settings.v_over_omega:
+                register = bench.atom_register(settings, geometry, v)
+                assert register.device_violations(AQUILA_LIMITS) == []
+
+    def test_the_default_grid_passes_on_every_geometry(self) -> None:
+        """
+        Chain, ring and grid of 4 atoms at ``V/Ω`` 0.1 to 100: the nominal spacing is
+        ``a = R_b (V/Ω)^(−1/6) >= 4.03`` µm, the closest pair of each shape, and the
+        widest is the chain, ``3a <= 38.3`` µm.  Each map's line records an empty list.
+        """
+        settings = self._preset(
+            v_over_omega=bench.Settings().v_over_omega, geometries=bench.GEOMETRIES
+        )
+        reps = [r for r in bench.representations(settings) if r.arm in ("A", "B")]
+        assert {(r.geometry, r.v_over_omega) for r in reps if r.arm == "A"} == {
+            (g, v) for g in bench.GEOMETRIES for v in bench.Settings().v_over_omega
+        }
+        for rep in reps:
+            assert rep.config["register_violations"] == []
+            positions = np.array(rep.config["config"]["register"])
+            gaps = [math.dist(p, q) for k, p in enumerate(positions) for q in positions[k + 1 :]]
+            assert min(gaps) >= 4.03
+            assert max(np.ptp(positions, axis=0)) < 38.4
+
+    def test_the_check_is_of_the_nominal_positions_not_the_displaced_ones(self) -> None:
+        """
+        At ``V/Ω = 100`` the nominal chain is 4.03 µm apart, and the preset keeps it, although
+        a displaced register of the run's own jitter, drawn here by hand from its seed
+        (``N(0, 0.2²)`` per coordinate), brings a pair closer than 4 µm.
+        """
+        settings = self._preset(v_over_omega=(100.0,), jitter_samples=4)
+        generator = torch.Generator().manual_seed(bench.jitter_seed(settings.random_state))
+        z = torch.randn((4, 4, 2), generator=generator, dtype=torch.float64)
+        chain = AtomRegister.chain(4, bench.spacing(100.0, OMEGA, DEFAULT_C6)).positions
+        displaced = [(chain + 0.2 * z[k]).numpy() for k in range(4)]
+        closest = min(
+            math.dist(p[i], p[j]) for p in displaced for i in range(4) for j in range(i + 1, 4)
+        )
+        assert closest < 4.0
+        assert _rep(settings, "A").config["register_violations"] == []
 
     @pytest.mark.parametrize(
         ("changes", "match"),

@@ -38,11 +38,15 @@ from __future__ import annotations
 
 import math
 import numbers
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from torch.autograd import forward_ad
+
+if TYPE_CHECKING:
+    # Only for the annotation: feature_map imports this module.
+    from hqnn_forge.rydberg.feature_map import DeviceLimits
 
 __all__ = ["AtomRegister"]
 
@@ -141,7 +145,9 @@ class AtomRegister:
     a statement about the atom, not the geometry: the ``C6 / r⁶`` form is a
     long-distance one, and ``docs/rydberg-model.md`` does not use it below
     4 µm.  The register has no upper limit on the number of atoms; the dense
-    Hamiltonian has (:data:`~hqnn_forge.rydberg.MAX_ATOMS`).
+    Hamiltonian has (:data:`~hqnn_forge.rydberg.MAX_ATOMS`).  What a device
+    allows, a smallest spacing and a region, is reported on request by
+    :meth:`device_violations` and never refused here.
 
     Examples
     --------
@@ -479,6 +485,97 @@ class AtomRegister:
             for k in range(j + 1, n)
             if inside[i][k] and inside[j][k]
         ]
+
+    def device_violations(self, limits: DeviceLimits) -> list[str]:
+        """
+        The register bounds of a device these positions break, as messages naming each; empty if none.
+
+        Checked, in the field order of
+        :class:`~hqnn_forge.rydberg.DeviceLimits`, its two register fields
+        (the pulse fields are the encoding's,
+        :meth:`~hqnn_forge.rydberg.GlobalDrivePulseEncoding.device_violations`),
+        in µm, the unit of :attr:`positions` and of the limits:
+
+        * ``min_spacing``: the distance of the closest pair::
+
+              d_min = min_{i<j} |r_i − r_j|,   |r_i − r_j|² = (x_i − x_j)² + (y_i − y_j)²
+
+          broken when ``d_min < min_spacing``.  The squared distances are
+          computed as in :meth:`interaction_matrix` and compared before the
+          one square root, which is increasing, so the pair with the
+          smallest square is the closest.  The message names it as atoms
+          ``i`` and ``j``, ``i < j``, rows of :attr:`positions`; of pairs
+          whose squared distances are equal in ``float64`` the first in
+          lexicographic order (the bonds of :meth:`chain`, ``i · a`` apart
+          in ``x``, can differ by rounding and are then not equal).  One
+          atom has no pair and never breaks it.
+        * ``region = (W, H)``: the extent along each axis::
+
+              w = max_i x_i − min_i x_i,        h = max_i y_i − min_i y_i
+
+          which is the largest difference between the ``x`` coordinates of
+          two atoms (``max_ij (x_i − x_j)``), and in ``y``, the definition
+          of the Braket device schema.  Broken when ``w > W`` (the width,
+          along ``x``) or ``h > H`` (the height, along ``y``), one message
+          for each.  Both are differences, so a shift of the register
+          changes nothing; a rotation does, and the register is checked as
+          given, in its own axes.
+
+        A value equal to its limit passes, as in the encoding's check.  Each
+        message starts with the field name and a colon.
+
+        **These are the nominal positions.**  A device's register bounds are
+        on the sites a program asks for; the shot-to-shot spread about them
+        (``position_jitter`` of
+        :class:`~hqnn_forge.rydberg.RydbergFeatureMap`) is the device's own
+        and not a setting, so a map with jitter is checked through its
+        :attr:`~hqnn_forge.rydberg.RydbergFeatureMap.register`, never its
+        displaced realisations.  The check is never run by a map itself.
+
+        Parameters
+        ----------
+        limits:
+            The bounds to check against, such as
+            :data:`~hqnn_forge.rydberg.AQUILA_LIMITS`.  Required, as ``c6``
+            is for :meth:`interaction_matrix`: the register holds positions
+            and nothing else.
+
+        Examples
+        --------
+        >>> from hqnn_forge.rydberg import AQUILA_LIMITS
+        >>> AtomRegister.chain(6, spacing=4.03).device_violations(AQUILA_LIMITS)
+        []
+        >>> AtomRegister.chain(6, spacing=16.0).device_violations(AQUILA_LIMITS)
+        ['region: max x − min x = 80 µm exceeds the width 75 µm']
+        """
+        positions = self._positions
+        violations = []
+        n = self.n_atoms
+        if n > 1:
+            difference = positions[:, None, :] - positions[None, :, :]
+            squared = (difference**2).sum(dim=-1)
+            # Only the pairs i < j; argmin of the row-major flattening returns the first.
+            pairs = torch.ones(n, n, dtype=torch.bool).triu(diagonal=1)
+            closest = int(torch.argmin(squared.masked_fill(~pairs, math.inf)))
+            i, j = divmod(closest, n)
+            distance = math.sqrt(float(squared[i, j]))
+            if distance < limits.min_spacing:
+                violations.append(
+                    f"min_spacing: min |r_i − r_j| = {distance:.6g} µm (atoms {i} and {j}) "
+                    f"is below {limits.min_spacing:.6g} µm"
+                )
+        width, height = limits.region
+        extent = positions.max(dim=0).values - positions.min(dim=0).values
+        for axis, value, limit, side in (
+            ("x", extent[0], width, "width"),
+            ("y", extent[1], height, "height"),
+        ):
+            if float(value) > limit:
+                violations.append(
+                    f"region: max {axis} − min {axis} = {float(value):.6g} µm exceeds the "
+                    f"{side} {limit:.6g} µm"
+                )
+        return violations
 
     def __repr__(self) -> str:
         return f"AtomRegister(positions={self._positions.tolist()})"
