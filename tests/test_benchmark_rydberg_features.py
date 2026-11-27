@@ -2881,6 +2881,105 @@ class TestCache:
         for line, record in zip(bench.read_records(tmp_path / "b.jsonl"), second, strict=True):
             assert line["tuning"] == record["tuning"]
 
+    @pytest.mark.slow
+    def test_the_tuning_folds_record_the_seconds_stored_with_their_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        #785: ``tuning["feature_seconds"]`` holds one value per tuning fold, in
+        the order of the folds, each the ``seconds`` stored with that fold's
+        cache entry: on a cold run the time just measured, on a warm one the
+        time read back with the features.  Between the two runs every entry
+        gets a value of its own planted in place of its seconds, so the warm
+        run shows which entry each value was read from.  The entries are
+        found from the tuning folds built by hand (:func:`inner_splits` on
+        fold 0's training part and ``tune_seed``).  Arm C simulates nothing
+        (``0.0`` per fold), and a reused arm B line carries its source's
+        values, as it does ``feature_cache_hits``, beside its own
+        ``feature_seconds`` of 0.
+        """
+        settings = _replace(QUICK, arms=FAST, v_over_omega=(1.0, 3.0))
+        X, y, data_seed = bench.load_dataset("positive-control", settings)
+        fold = _fold_by_hand(X, y, settings, 0)
+        own = bench.make_split(
+            X,
+            y,
+            fold.train_part,
+            fold.train_idx,
+            fold.val_idx,
+            fold.test_idx,
+            n_components=settings.n_atoms,
+            smote_seed=fold.seeds["smote_seed"],
+        )
+        tuning_splits = bench.inner_splits(
+            X, y, fold.train_part, settings, fold.seeds["tune_seed"]
+        )
+        assert len(tuning_splits) == settings.inner_folds == 2
+        directory = tmp_path / "cache"
+        cache = bench.FeatureCache(directory)  # the run's environment and code digest
+
+        def entries(record: dict[str, Any]) -> tuple[Path, list[Path]]:
+            config = record["feature_map"]
+            paths = [cache.path(s.inputs, s.labels, config) for s in (own, *tuning_splits)]
+            assert all(p is not None and p.is_file() for p in paths)
+            first, *rest = paths
+            assert first is not None
+            return first, [p for p in rest if p is not None]
+
+        def seconds(path: Path) -> float:
+            with np.load(path, allow_pickle=False) as stored:
+                return float(stored["seconds"])
+
+        data = {"positive-control": (X, y, data_seed)}
+        cold = bench.run(data, settings, tmp_path / "cold.jsonl", cache_dir=directory)
+        # A at two V/Ω, B computed at the first, each with the fold and two tuning folds.
+        assert len(list(directory.iterdir())) == (2 + 1) * (1 + settings.inner_folds)
+        measured = {path: seconds(path) for path in directory.iterdir()}
+        assert all(s > 0 for s in measured.values())
+        planted: dict[Path, float] = {}
+        for i, path in enumerate(sorted(directory.iterdir())):
+            with np.load(path, allow_pickle=False) as stored:
+                members = {name: stored[name] for name in stored.files}
+            planted[path] = 1000.0 + 0.25 * i  # exact in binary, one per entry
+            members["seconds"] = np.float64(planted[path])
+            with path.open("wb") as fh:
+                np.savez(fh, **members)
+        warm = bench.run(data, settings, tmp_path / "warm.jsonl", cache_dir=directory)
+
+        for records, name, stored_seconds in ((cold, "cold", measured), (warm, "warm", planted)):
+            lines = bench.read_records(tmp_path / f"{name}.jsonl")
+            assert len(records) == len(lines) == 2 * (2 + 2 + 1)  # heads × (A, B, C lines)
+            for record, line in zip(records, lines, strict=True):
+                np.testing.assert_array_equal(record["train_idx"], np.sort(fold.train_idx))
+                recorded = record["tuning"]["feature_seconds"]
+                assert line["tuning"]["feature_seconds"] == recorded
+                if record["arm"] == "C":
+                    assert recorded == [0.0] * settings.inner_folds
+                elif record["reused_from_v_over_omega"] is not None:
+                    (source,) = [
+                        r
+                        for r in records
+                        if r["arm"] == "B"
+                        and r["head"] == record["head"]
+                        and r["reused_from_v_over_omega"] is None
+                    ]
+                    assert record["feature_seconds"] == 0.0
+                    assert recorded == source["tuning"]["feature_seconds"]
+                else:
+                    fold_entry, tuning_entries = entries(record)
+                    assert record["feature_seconds"] == stored_seconds[fold_entry]
+                    assert recorded == [stored_seconds[p] for p in tuning_entries]
+            # Every entry is read by exactly one matrix of the run (per head).
+            values = [
+                s
+                for r in records
+                if r["arm"] != "C"
+                and r["reused_from_v_over_omega"] is None
+                and r["head"] == "linear"
+                for s in (r["feature_seconds"], *r["tuning"]["feature_seconds"])
+            ]
+            assert sorted(values) == sorted(stored_seconds.values())
+
     def test_prune_removes_entries_under_another_code_digest_and_keeps_current_entries(
         self, tmp_path: Path
     ) -> None:
@@ -6035,6 +6134,66 @@ class TestSummary:
         widths = {len(line) for line in table.splitlines()[1:]}
         assert len(widths) == 1  # a "-" keeps the columns aligned
 
+    def test_the_total_adds_the_seconds_of_the_tuning_folds(self) -> None:
+        """
+        #785: once a line records ``tuning["feature_seconds"]``, ``tot feat s``
+        follows ``feat s``: the mean over the computed lines of
+        ``feature_seconds + Σ_j tuning["feature_seconds"][j]``.  A line without
+        tuning adds nothing to its ``feature_seconds``, a reused arm B line is
+        left out although it carries its source's tuning seconds, and a row
+        with a line written before #785 (``tuning`` without the field) shows
+        ``-``.  Without a line that records it, there is no such column.
+        """
+
+        def timed(*seconds: float) -> dict[str, Any]:
+            return {"feature_seconds": list(seconds)}
+
+        before = {"scores": [0.5]}  # a tuning record from before #785
+        records = [
+            # 2 + 1 + 0.5 = 3.5 and 4 + 0.25 + 0.25 = 4.5: mean 4
+            self._line(0.5, "A", 2.0, 1.0, tuning=timed(1.0, 0.5)),
+            self._line(0.5, "A", 4.0, 1.0, tuning=timed(0.25, 0.25)),
+            # computed: 1 + 2 + 3 = 6; the reused line carries 2 and 3 and is left out
+            self._line(0.5, "B", 1.0, 0.5, reused_from_v_over_omega=None, tuning=timed(2.0, 3.0)),
+            self._line(1.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5, tuning=timed(2.0, 3.0)),
+            self._line(2.0, "B", 0.0, 0.0, reused_from_v_over_omega=0.5, tuning=timed(2.0, 3.0)),
+            self._line(2.0, "B", 5.0, 0.5, reused_from_v_over_omega=None, tuning=timed(0.5, 0.5)),
+            # no trials: nothing to add
+            self._line(None, "C", 0.0, 0.75, tuning=None),
+            self._line(None, "D", 1.5, 0.75, tuning=None),
+            # one line from before #785 in the row
+            self._line(2.0, "A", 1.0, 1.0, tuning=timed(1.0)),
+            self._line(2.0, "A", 3.0, 1.0, tuning=before),
+        ]
+        table = bench.summarise(records)
+        header = table.splitlines()[0]
+        assert header.endswith(" feat s tot feat s  fit s  n")
+        # columns: ..., feat s, tot feat s, fit s, n
+        assert self._row(table, "0.5", "A")[-4:] == ["3.00", "4.00", "1.00", "2"]
+        assert self._row(table, "0.5", "B")[-4:] == ["1.00", "6.00", "0.50", "1"]
+        assert self._row(table, "1", "B")[-4:] == ["-", "-", "-", "1"]
+        assert self._row(table, "2", "B")[-4:] == ["5.00", "6.00", "0.50", "2"]
+        assert self._row(table, "-", "C")[-4:] == ["0.00", "0.00", "0.75", "1"]
+        assert self._row(table, "-", "D")[-4:] == ["1.50", "1.50", "0.75", "1"]
+        assert self._row(table, "2", "A")[-4:] == ["2.00", "-", "1.00", "2"]
+        assert len({len(line) for line in table.splitlines()}) == 1
+        assert [bench.total_feature_seconds(r) for r in records] == [
+            3.5,
+            4.5,
+            6.0,
+            5.0,
+            5.0,
+            6.0,
+            0.0,
+            1.5,
+            2.0,
+            None,
+        ]
+        # Lines that do not record it: the table of before, without the column.
+        old = bench.summarise([r for r in records if not bench._times_tuning(r)])
+        assert old.splitlines()[0].endswith(" t-deg  feat s  fit s  n")
+        assert self._row(old, "2", "A")[-3:] == ["3.00", "1.00", "1"]
+
     def test_degenerate_folds_are_counted_per_row(self) -> None:
         """
         ``deg`` counts the lines (folds) of a row whose own PCA fit was
@@ -6599,7 +6758,8 @@ class TestPcaDegeneracy:
             line = json.loads(bench.to_json_line(record))
             assert line["pca"]["degenerate"] is True
             assert line["tuning"]["pca"][0]["degenerate"] is False
-        assert bench.summarise(records).splitlines()[1].split()[-5:-3] == ["1", "0"]
+        # deg and t-deg, then feat s, tot feat s (#785), fit s and n
+        assert bench.summarise(records).splitlines()[1].split()[-6:-4] == ["1", "0"]
 
     def test_the_run_warns_as_well(self) -> None:
         X, y, _ = self._data(lambda fold, y: fold.train_part)
@@ -6632,7 +6792,7 @@ class TestPcaDegeneracy:
                 rtol=1e-8,
                 atol=1e-14,
             )
-        assert bench.summarise(records).splitlines()[1].split()[-5:-3] == ["0", "1"]
+        assert bench.summarise(records).splitlines()[1].split()[-6:-4] == ["0", "1"]
 
     @pytest.mark.slow
     def test_the_positive_control_is_not_degenerate(self, quick: Any) -> None:
@@ -6655,7 +6815,7 @@ class TestPcaDegeneracy:
             for got, want in zip(record["tuning"]["pca"], tuning, strict=True):
                 assert got["degenerate"] is False
                 np.testing.assert_allclose(got["relative_gaps"], want, rtol=1e-8)
-        assert bench.summarise(quick.records).splitlines()[1].split()[-5:-3] == ["0", "0"]
+        assert bench.summarise(quick.records).splitlines()[1].split()[-6:-4] == ["0", "0"]
 
 
 # ---------------------------------------------------------------------------

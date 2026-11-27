@@ -572,7 +572,13 @@ features as the map returns them; the standardisation of step 4 is applied
 after it is read, so the key does not hold ``standardise`` and a run with
 ``--no-standardise`` reads the entries of one without it.  The recorded
 ``feature_seconds`` is the simulation time measured when the features were
-computed, also on a cache hit; on a reused arm B line it is 0.
+computed, also on a cache hit; on a reused arm B line it is 0.  The tuning
+folds' matrices are entries of their own, and ``tuning["feature_seconds"]``
+records their times the same way, one per tuning fold (#785).  Each holds
+the training part of the fold, so together they have about
+``--inner-folds`` times the rows of the fold's own matrix, and the
+simulation time behind a line is ``feature_seconds`` plus their sum
+(:func:`total_feature_seconds`), not ``feature_seconds`` alone.
 
 Tuning
 ------
@@ -640,10 +646,12 @@ rather than reused; for reused
 records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
 all zero, and ``feature_cache_hit``, ``feature_environment``,
 ``shot_stream_seed`` and the ``feature_cache_hits``,
-``feature_environments`` and ``shot_stream_seeds`` of ``tuning`` are those
-of the record it was reused from: they say how the features both lines
-rest on were obtained when that record was computed.  Nothing is fetched
-for a reused line, and the cache holds no entry under its own
+``feature_environments``, ``feature_seconds`` and ``shot_stream_seeds`` of
+``tuning`` are those of the record it was reused from: they say how the
+features both lines rest on were obtained when that record was computed.
+So ``tuning["feature_seconds"]`` of a reused line is not zero, and a total
+over lines leaves the reused ones out, as :func:`summarise` does.  Nothing
+is fetched for a reused line, and the cache holds no entry under its own
 ``feature_map``, so its ``feature_cache_hit`` is ``false`` on a cold cache
 and ``true`` on a warm one, as its source line's is); ``measurement``,
 ``shots`` and ``shot_stream_seed`` (the seed of the fold's matrix,
@@ -665,11 +673,14 @@ with their scores, the analogous ``raw_constant_columns`` and
 ``feature_constant_columns`` per tuning fold, its ``pca`` per tuning fold
 (the tuning folds' fits give the inputs every trial is trained and scored
 on, so a degenerate one can change which candidate is chosen, but not the
-inputs of the fold itself), and whether its features were a cache hit
-and the ``environment()`` they were computed in (``feature_cache_hits``,
-``feature_environments``, like the fields of the fold below) and the seeds
-of their matrices' shot streams (``shot_stream_seeds``, like
-``shot_stream_seed``); ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
+inputs of the fold itself), and whether its features were a cache hit,
+the ``environment()`` they were computed in and the seconds their
+simulation took (``feature_cache_hits``, ``feature_environments``,
+``feature_seconds``, one per tuning fold in the order of ``pca``, like the
+fields of the fold below; ``0.0`` for arm C and ``D-hybrid``; lines written
+before #785 have no ``feature_seconds`` there) and the seeds of their
+matrices' shot streams (``shot_stream_seeds``, like ``shot_stream_seed``);
+``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
 ``feature_seconds`` (the actual computation time simulating the fold's
 features, or 0.0 for reused records), ``feature_cache_hit`` and
 ``feature_environment`` (the ``environment()`` the fold's features were
@@ -3590,6 +3601,7 @@ def run_dataset(
                         "feature_constant_columns": tuning_feature_constant_columns,
                         "feature_cache_hits": [c.hit for c in tuning_cached],
                         "feature_environments": [c.environment for c in tuning_cached],
+                        "feature_seconds": [c.seconds for c in tuning_cached],
                         "shot_stream_seeds": [matrix_shot_seed(rep, s) for s in tuning_splits],
                     }
                 hyperparameters = {**settings.defaults, **chosen}
@@ -3649,6 +3661,47 @@ def _mean_seconds(rows: Sequence[Mapping[str, Any]], name: str, width: int) -> s
     if not rows:
         return format("-", f">{width}s")
     return format(float(np.mean([r[name] for r in rows])), f"{width}.2f")
+
+
+def _times_tuning(record: Mapping[str, Any]) -> bool:
+    """Whether a line records the seconds of its tuning folds' features (#785)."""
+    tuning = record.get("tuning")
+    return isinstance(tuning, Mapping) and "feature_seconds" in tuning
+
+
+def total_feature_seconds(record: Mapping[str, Any]) -> float | None:
+    """
+    The seconds of feature simulation behind a line: its fold's matrix and its tuning folds'.
+
+    ``T = feature_seconds + Σ_j tuning["feature_seconds"][j]``, in seconds,
+    with ``j`` over the tuning folds (#785), each term the time measured
+    when that matrix was computed, also on a cache hit ("Feature cache").
+    A line without tuning (``tuning`` ``null`` or absent: a run without
+    trials) simulated no tuning matrix, so ``T = feature_seconds``.  A line
+    whose ``tuning`` does not record the field was written before #785: its
+    tuning matrices were simulated but their time was not recorded, and
+    ``T`` is ``None``.  The heads of one arm share its matrices, so each of
+    their lines records the same ``T``.  On a reused arm B line it is the
+    tuning time of its source alone, its own ``feature_seconds`` being 0.
+    """
+    tuning = record.get("tuning")
+    if tuning is None:
+        return float(record["feature_seconds"])
+    if not _times_tuning(record):
+        return None
+    return float(record["feature_seconds"]) + float(sum(tuning["feature_seconds"]))
+
+
+def _mean_total(rows: Sequence[Mapping[str, Any]], width: int) -> str:
+    """
+    The mean :func:`total_feature_seconds` of ``rows`` as a column of ``width``.
+
+    ``-`` without a row, or if one of them does not record it.
+    """
+    totals = [total_feature_seconds(r) for r in rows]
+    if not totals or any(t is None for t in totals):
+        return format("-", f">{width}s")
+    return format(float(np.mean([t for t in totals if t is not None])), f"{width}.2f")
 
 
 def geometry_label(record: Mapping[str, Any]) -> str | None:
@@ -3903,7 +3956,13 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
     out, and a row whose lines are all reused shows ``-``.  The cost of arm B
     is therefore in the row of the geometry and ``V/Ω`` it was computed at:
     the first values given to ``--geometry`` and ``--v-over-omega``, which
-    need not be the smallest.
+    need not be the smallest.  ``feat s`` is the fold's own matrix only.
+    When a line records the seconds of its tuning folds' features (#785),
+    ``tot feat s`` beside it is the mean :func:`total_feature_seconds`, the
+    fold's and the tuning folds' matrices together, over the same lines;
+    ``-`` also when one of them does not record it (a line written before
+    #785 in the same row).  Without such a line the table has no such
+    column and prints as before.
 
     ``deg`` is the number of folds of the row whose PCA fit was degenerate
     (``pca["degenerate"]``, :func:`pca_degeneracy`): there the assignment of
@@ -3952,10 +4011,11 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
         groups.setdefault(key, []).append(record)
     _check_one_measurement(groups)
     _check_one_realism(groups)
+    total = any(_times_tuning(r) for r in records)
     header = (
         f"{'dataset':22s} {'geometry':10s} {'V/Ω':>6s} {'γ/Ω':>6s} {'arm':8s} {'head':6s} "
         f"{'MCC':>15s} {'PR-AUC':>7s} {'dim':>4s} {'params':>6s} {'deg':>4s} {'t-deg':>5s} "
-        f"{'feat s':>7s} {'fit s':>6s}  n"
+        f"{'feat s':>7s} {'tot feat s ' if total else ''}{'fit s':>6s}  n"
     )
     lines = [header]
     for (dataset, _, geometry, v, gamma, arm, head), rows in groups.items():
@@ -3971,6 +4031,7 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> str:
             f"{rows[0]['n_parameters']:6d} "
             f"{_degenerate_folds(rows, False, 4)} {_degenerate_folds(rows, True, 5)} "
             f"{_mean_seconds(computed, 'feature_seconds', 7)} "
+            f"{f'{_mean_total(computed, 10)} ' if total else ''}"
             f"{_mean_seconds(computed, 'train_seconds', 6)}  {len(rows)}"
         )
     return "\n".join(lines)
