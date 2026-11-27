@@ -650,6 +650,8 @@ class DeviceLimits:
 #: of ``T = 0.25`` µs (a 0.05 µs edge would be a slew of 251 rad/µs²).
 #: The register's sites are at least 4 µm apart, in a site pattern at most 75 µm
 #: wide (``x``) and 76 µm high (``y``), the datasheet of Wurtz et al. (2023).
+#: Its third register bound, rows (sites of distinct ``y``) at least 4 µm apart,
+#: and the resolution of the positions are not part of it (#794).
 #: The resolution and the magnitude limits of the local detuning pattern were
 #: not verified for the model page and are not part of it.
 AQUILA_LIMITS: DeviceLimits = DeviceLimits(

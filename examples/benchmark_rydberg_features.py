@@ -449,7 +449,12 @@ closer than 4 µm, as the device itself would.  On the default grid every
 geometry passes: ``a = R_b (V/Ω)^(−1/6) >= 4.03`` µm is the closest pair of
 each shape, and the widest register, the chain of 4, is ``3a <= 38.3`` µm
 long.  The bounds give way at ``V/Ω > (R_b/4)⁶ = 105.3`` at the reference
-Ω, and for a row of 6 below ``(R_b/15)⁶ = 0.0379``.
+Ω, and for a row of 6 below ``(R_b/15)⁶ = 0.0379``.  Aquila's third
+register bound, rows (sites of distinct ``y``) at least 4 µm apart, is not
+checked (#794): the chain is one row and the grid's rows are ``a`` apart, but
+the ring of 4, a square on a corner, has rows ``a/√2`` apart, under 4 µm from
+``V/Ω = (R_b/(4√2))⁶ = 13.2`` on, so at ``V/Ω = 30`` and 100 the preset keeps
+a ring the device would refuse.
 
 **The Aquila preset**, ``--device aquila`` (:func:`device_preset`), sets
 every value the model page documents for the device: the detection error
