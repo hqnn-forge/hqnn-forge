@@ -565,6 +565,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values recorded there (#775, #781)
 - `RydbergFeatureMap.segment_steps`: the solver steps of each segment of the drive, in time
   order, a function of `n_steps` and the encoding and so of `get_config()` (#782, #788)
+- `examples/summarise_rydberg_benchmark.py DEVICE --against IDEAL` compares two runs of the
+  same data, seeds and folds, e.g. one under `--device aquila` and the ideal one: per group,
+  `DEVICE − IDEAL` of every row's MCC and of every A − B difference, paired by fold, with exact
+  Wilcoxon and Holm-adjusted p-values in one Holm family of its own. The runs are first checked
+  to have the same `label_bonds`, `data_sha256`, `n_splits` and per-fold `test_idx` (a
+  `ValueError` naming the group and the first differing fold otherwise), and rows or groups of
+  one file only are listed, not compared. Without the option the output is unchanged (#784,
+  #796)
 
 ### Changed
 - `RydbergFeatureMap` with dephasing scales the solver steps of each segment of a
