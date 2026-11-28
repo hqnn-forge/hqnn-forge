@@ -1543,6 +1543,11 @@ def test_a_hand_built_difference_and_its_exact_p_are_reproduced() -> None:
         assert found[kind]["p_holm"] == pytest.approx(3 / 32)
     raw = np.array([c["p"] for c in family])
     assert [c["p_holm"] for c in family] == pytest.approx(_holm(raw).tolist())
+    # Paired by the fold index, not by the order of the lines: the device file read backwards
+    # (fold 5 first) gives the same family.  Paired by position, row A would differ by 0.31,
+    # 0.07, 0.09, 0.18, 0.14 and 0, and its p would be 2/2^5.
+    backwards = summary._rows(summary.groups(device[::-1])[("toy", None)])
+    assert summary.paired_comparisons(backwards, ideal_rows) == family
     swapped = summary.paired_comparisons(ideal_rows, device_rows)
     for c, s in zip(family, swapped, strict=True):
         assert (s["kind"], s["a"]) == (c["kind"], c["a"])
