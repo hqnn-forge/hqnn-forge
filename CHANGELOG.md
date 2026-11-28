@@ -978,6 +978,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spread below the floor (0.57 to 11.7 times the estimate). The sweep is now in the repository,
   an opt-in test that checks each figure (`HQNN_FORGE_REPRODUCE=1`, `TestTheSeededSweep` in
   `tests/test_rydberg_lindblad.py`), and the note names it (#627, #772)
+- `step_count(..., target="state")`, `RydbergFeatureMap.step_count(..., target="state")` and
+  `AnalogRydbergLayer.step_count(..., target="state")` raise a `RuntimeError` naming the count
+  when a run returns a state that is not finite, instead of returning a count or doubling
+  without end: the trace distance of such a state is NaN, where `eigvalsh` had made a diagonal
+  NaN 0, and the maximum over several chunks keeps it, where it had dropped it. Not reachable
+  from validated inputs; the feature target already refused such a state in `readout` (#787)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

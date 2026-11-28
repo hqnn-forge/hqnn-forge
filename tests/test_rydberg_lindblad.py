@@ -40,7 +40,7 @@ import random
 import re
 import time
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import pytest
@@ -2661,6 +2661,249 @@ class TestFeatureMapStepCountForTheState:
         feature_map, x = self.MAPS.build(self.CASES[0])
         with pytest.raises(TypeError, match="positional"):
             feature_map.step_count(x, 1e-6, "state")  # type: ignore[misc, arg-type]
+
+
+class TestStepCountRefusesANonFiniteEstimate:
+    """
+    A non-finite estimate raises a ``RuntimeError`` naming the count (#787)
+    instead of returning a count or doubling without end.
+
+    The hand-built states are those of ``test_any_chunk_can_set_the_count``
+    with ``a = 0.01`` for all three samples: ``ρ_n = σ + 0.01 diag(1, −1)/n²``,
+    ``σ = 1/2``, so ``ρ_n − ρ_2n = 0.0075 diag(1, −1)/n²``, ``D(ρ_n, ρ_2n) =
+    0.0075/n²`` and the estimate is ``D/3 = 0.0025/n²``.  From ``n₀ = 1`` at
+    ``tol = 1e-6`` it first holds at ``n = 64`` (``6.1e-7``; ``n = 32`` gives
+    ``2.4e-6``), so 128 comes back.  The populations (the diagonal) have the
+    same largest difference, ``0.0075/n²``, so as features they give 128 too.
+
+    One entry of one sample is then made non-finite in every run from
+    ``first`` steps on.  The estimate from the runs at ``n`` and ``2n`` is the
+    first to see it at ``2n = max(2, first)`` (``first`` a power of 2), which
+    the error has to name, and no run beyond that count may be made.  A run
+    asked for more than :attr:`MOST_STEPS` fails the test, which would
+    otherwise double without end (an ``OverflowError`` after 33 runs before
+    #787).  ``first = 128`` puts the NaN into the run whose finite estimate
+    returns 128.
+    """
+
+    TOL = 1e-6
+    #: The largest count a run may be asked for: the finite case needs 128.
+    MOST_STEPS = 1024
+    #: ``(first, named)``: the NaN from the run at ``first`` steps, the count
+    #: the error names.
+    FROM = [(1, 2), (16, 16), (128, 128)]
+
+    def hand_built(
+        self,
+        first: int | None = None,
+        *,
+        sample: int = 1,
+        entry: tuple[int, int] = (0, 0),
+        value: complex = math.nan,
+    ) -> tuple[Callable[[slice, int], torch.Tensor], list[int]]:
+        """``states(chunk, n)`` of the three samples, and the list of the counts it was run at."""
+        shape = torch.diag(torch.tensor([1.0, -1.0], dtype=C128))
+        runs: list[int] = []
+
+        def states(chunk: slice, n_steps: int) -> torch.Tensor:
+            if n_steps > self.MOST_STEPS:
+                pytest.fail(f"the doubling went on to {n_steps} steps on a non-finite estimate")
+            runs.append(n_steps)
+            rho = torch.eye(2, dtype=C128) / 2 + 0.01 * shape / n_steps**2
+            rho = rho.expand(3, 2, 2).clone()
+            if first is not None and n_steps >= first:
+                rho[(sample, *entry)] = torch.tensor(value, dtype=C128)
+            return rho[chunk]
+
+        return states, runs
+
+    @staticmethod
+    def chunks(chunk_size: int) -> list[slice]:
+        return [slice(first, first + chunk_size) for first in range(0, 3, chunk_size)]
+
+    @staticmethod
+    def populations(rho: torch.Tensor) -> torch.Tensor:
+        """The diagonal of each state, as one row of features per sample."""
+        return rho.diagonal(dim1=-2, dim2=-1).real
+
+    @pytest.mark.parametrize("chunk_size", [1, 3], ids=["three chunks", "one chunk"])
+    def test_finite_states_give_the_closed_form_count(self, chunk_size: int) -> None:
+        states, _ = self.hand_built()
+        assert (
+            lindblad._chunked_doubling_count(1, states, self.chunks(chunk_size), self.TOL) == 128
+        )
+        assert (
+            lindblad._doubling_count(
+                1, lambda n: self.populations(states(slice(None), n)), self.TOL
+            )
+            == 128
+        )
+
+    @pytest.mark.parametrize(("first", "named"), FROM)
+    @pytest.mark.parametrize("sample", [0, 1, 2])
+    @pytest.mark.parametrize("entry", [(0, 0), (0, 1)], ids=["diagonal", "off-diagonal"])
+    @pytest.mark.parametrize("chunk_size", [1, 3], ids=["three chunks", "one chunk"])
+    def test_a_nan_in_one_state_raises(
+        self, chunk_size: int, entry: tuple[int, int], sample: int, first: int, named: int
+    ) -> None:
+        """
+        The four rows of #787: three chunks (``max`` dropped the NaN) and one
+        (``eigvalsh`` made a diagonal NaN 0, an off-diagonal one doubled
+        without end), each with the NaN on and off the diagonal, in any sample.
+        """
+        states, runs = self.hand_built(first, sample=sample, entry=entry)
+        with pytest.raises(RuntimeError, match=rf"not finite at {named} steps"):
+            lindblad._chunked_doubling_count(1, states, self.chunks(chunk_size), self.TOL)
+        assert max(runs) == named
+
+    @pytest.mark.parametrize(("first", "named"), FROM)
+    def test_a_nan_feature_raises(self, first: int, named: int) -> None:
+        """The feature target, ``_largest_difference``: the NaN doubled without end."""
+        states, runs = self.hand_built(first)
+        with pytest.raises(RuntimeError, match=rf"not finite at {named} steps"):
+            lindblad._doubling_count(
+                1, lambda n: self.populations(states(slice(None), n)), self.TOL
+            )
+        assert max(runs) == named
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, complex(0.0, math.nan)])
+    @pytest.mark.parametrize("entry", [(0, 0), (0, 1), (1, 0), (1, 1)])
+    @pytest.mark.parametrize("finer", [False, True], ids=["coarse", "fine"])
+    def test_the_trace_distance_of_a_non_finite_state_is_nan(
+        self, finer: bool, entry: tuple[int, int], value: complex
+    ) -> None:
+        """``ρ_4 − ρ_8 = 0.01 · (3/64) diag(1, −1)``: ``D = 0.0075/16``, then NaN, never 0."""
+        states, _ = self.hand_built()
+        coarse, fine = states(slice(None), 4), states(slice(None), 8)
+        assert lindblad._largest_trace_distance(coarse, fine) == pytest.approx(
+            0.0075 / 16, abs=1e-15
+        )
+        (fine if finer else coarse)[(1, *entry)] = torch.tensor(value, dtype=C128)
+        assert math.isnan(lindblad._largest_trace_distance(coarse, fine))
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+    @pytest.mark.parametrize("finer", [False, True], ids=["coarse", "fine"])
+    def test_the_largest_difference_of_non_finite_features_is_nan(
+        self, finer: bool, value: float
+    ) -> None:
+        """The same populations: ``0.0075/16``, then NaN (an infinity gave ``inf``)."""
+        states, _ = self.hand_built()
+        coarse = self.populations(states(slice(None), 4))
+        fine = self.populations(states(slice(None), 8))
+        assert lindblad._largest_difference(coarse, fine) == pytest.approx(0.0075 / 16, abs=1e-15)
+        (fine if finer else coarse)[1, 0] = value
+        assert math.isnan(lindblad._largest_difference(coarse, fine))
+
+    @pytest.mark.parametrize("named", [named for _, named in FROM])
+    @pytest.mark.parametrize("value", [math.nan, math.inf])
+    def test_the_loop_raises_on_a_non_finite_estimate(self, value: float, named: int) -> None:
+        """
+        ``_doubling`` with the closed-form estimate ``0.0025/n²`` at ``2n``
+        (128 from ``n₀ = 1``), non-finite from ``2n = named`` on.  An
+        infinity first, with ``inf`` as the estimate before it, doubled without
+        end; after a finite estimate it was taken for one that stopped falling.
+        """
+        calls: list[int] = []
+
+        def estimate(n: int) -> float:
+            if n > self.MOST_STEPS:
+                pytest.fail(f"the doubling went on to {2 * n} steps on a non-finite estimate")
+            calls.append(n)
+            return value if 2 * n >= named else 0.0025 / n**2
+
+        assert lindblad._doubling(1, lambda n: 0.0025 / n**2, self.TOL) == 128
+        with pytest.raises(RuntimeError, match=rf"not finite at {named} steps") as raised:
+            lindblad._doubling(1, estimate, self.TOL)
+        assert "stopped falling" not in str(raised.value)
+        assert 2 * calls[-1] == named
+        assert calls == [2**j for j in range(len(calls))]
+
+    #: What a run returning a NaN state raises, per target: the state's
+    #: estimate is NaN; the features never get one, since ``readout``
+    #: refuses the state first (``rho must be finite``), as it did before #787.
+    REFUSALS: dict[str, tuple[type[Exception], str]] = {
+        "state": (RuntimeError, "not finite at {} steps"),
+        "features": (ValueError, "rho must be finite"),
+    }
+
+    @pytest.mark.parametrize("target", ["features", "state"])
+    def test_step_count_raises_on_a_nan_population(
+        self, monkeypatch: pytest.MonkeyPatch, target: Literal["features", "state"]
+    ) -> None:
+        """
+        One resonant atom, ``γ = Ω``, ``ΩT = π``: ``W = Ω`` (energies
+        ``±Ω/2``), so ``n₀ = ceil(2 · π/Ω · 3Ω/2) = ceil(3π) = 10``.  The
+        solver returns a NaN ``⟨n⟩`` from 40 steps on, so the estimate from
+        the runs at 20 and 40 is the first to see it: 40 is named, and no run
+        beyond it is made.  Before #787 the state target returned 40
+        (``eigvalsh`` made the NaN 0).  The features are refused by
+        ``readout`` at the same run (:attr:`REFUSALS`).
+        """
+        real_evolve = lindblad.evolve
+        runs: list[int] = []
+
+        def poisoned(h: torch.Tensor, t: float, *, gamma: float, n_steps: int) -> torch.Tensor:
+            if n_steps > 40:
+                pytest.fail(f"step_count went on to {n_steps} steps on a non-finite estimate")
+            runs.append(n_steps)
+            rho = real_evolve(h, t, gamma=gamma, n_steps=n_steps).clone()
+            if n_steps >= 40:
+                rho[..., 1, 1] = math.nan
+            return rho
+
+        monkeypatch.setattr(lindblad, "evolve", poisoned)
+        omega = TestStepCount.OMEGA
+        error, message = self.REFUSALS[target]
+        with pytest.raises(error, match=message.format(40)):
+            step_count(
+                single_atom(omega, 0.0),
+                math.pi / omega,
+                gamma=omega,
+                tol=1e-9,
+                target=target,
+            )
+        assert runs == [10, 20, 40]
+
+    @pytest.mark.parametrize("chunk_size", [None, 1], ids=["one chunk", "three chunks"])
+    @pytest.mark.parametrize("target", ["features", "state"])
+    def test_the_maps_step_count_raises_on_a_nan_population(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        target: Literal["features", "state"],
+        chunk_size: int | None,
+    ) -> None:
+        """
+        ``RydbergFeatureMap.step_count`` with ramp and jitter, three samples,
+        ``⟨n_0⟩`` of the last made NaN in every run: the estimate at ``2n₀``
+        (``n₀`` from the Hamiltonians, typed-in segments) is the first, and it
+        is named.  With three chunks the NaN is in the last one.  The features
+        are refused by ``readout`` at the first run (:attr:`REFUSALS`).
+        """
+        maps = TestFeatureMapStepCount()
+        case = maps.CASES[-1]
+        feature_map, _ = maps.build(case)
+        x = torch.tensor([[-1.0, 0.4], [0.3, -0.6], [2.0, 1.5]], dtype=F64)
+        start = maps.starting_count(case, feature_map, x)
+        bad = feature_map.encoding.detunings(x[2:])
+        real = RydbergFeatureMap._evolve_with
+        runs: list[int] = []
+
+        def poisoned(
+            self: RydbergFeatureMap, delta: torch.Tensor, n_steps: int | None
+        ) -> torch.Tensor:
+            assert n_steps is not None
+            if n_steps > 2 * start:
+                pytest.fail(f"step_count went on to {n_steps} steps on a non-finite estimate")
+            runs.append(n_steps)
+            rho = real(self, delta, n_steps).clone()
+            rho[(delta == bad).flatten(1).all(-1), 0, 0] = math.nan
+            return rho
+
+        monkeypatch.setattr(RydbergFeatureMap, "_evolve_with", poisoned)
+        error, message = self.REFUSALS[target]
+        with pytest.raises(error, match=message.format(2 * start)):
+            feature_map.step_count(x, tol=1e-6, target=target, chunk_size=chunk_size)
+        assert sorted(set(runs)) == ([start, 2 * start] if target == "state" else [start])
 
 
 def random_density_matrix(n_atoms: int, seed: int) -> torch.Tensor:

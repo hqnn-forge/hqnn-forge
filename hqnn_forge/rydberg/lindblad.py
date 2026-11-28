@@ -947,7 +947,12 @@ def step_count(
         in the second-order regime it is a quarter (3.91 to 4.12 times
         smaller over the sweep of #598), and a smaller fall means the
         rounding of ``evolve``, which grows with the step count, has taken
-        over, so no count reaches ``tol`` for these Hamiltonians.
+        over, so no count reaches ``tol`` for these Hamiltonians.  Also if
+        an estimate is not finite, naming the count it is for: with
+        ``target="state"``, a run of ``evolve`` returned a state with an
+        entry that is NaN or infinite (#787).  With ``"features"``
+        :func:`readout` refuses such a state first, with a ``ValueError``
+        (``rho must be finite``).
 
     Notes
     -----
@@ -1082,8 +1087,20 @@ def _starting_count(spread: float, t: float, n_atoms: int, gamma: float) -> int:
     return max(1, math.ceil(2 * t * (spread + n_atoms * gamma / 2)))
 
 
+def _finite(coarse: torch.Tensor, fine: torch.Tensor) -> bool:
+    """Whether every entry of both runs is finite (a complex one in both parts)."""
+    return bool(torch.isfinite(coarse).all().item() and torch.isfinite(fine).all().item())
+
+
 def _largest_difference(coarse: torch.Tensor, fine: torch.Tensor) -> float:
-    """``max |F_n − F_2n|`` over every entry and sample: the distance of the features."""
+    """
+    ``max |F_n − F_2n|`` over every entry and sample: the distance of the features.
+
+    NaN when an entry of either run is not finite: the maximum would keep a
+    NaN, but turn an infinity into an estimate of ``inf`` (#787).
+    """
+    if not _finite(coarse, fine):
+        return math.nan
     return float((coarse - fine).abs().max().item())
 
 
@@ -1092,8 +1109,12 @@ def _largest_trace_distance(coarse: torch.Tensor, fine: torch.Tensor) -> float:
     ``D = ½ Σ_k |λ_k(ρ_n − ρ_2n)|``, the largest over a batch of states; ``eigvalsh``.
 
     The difference is made exactly Hermitian first (it is to rounding), since
-    ``eigvalsh`` reads one triangle only.
+    ``eigvalsh`` reads one triangle only.  NaN when an entry of either run is
+    not finite, without calling ``eigvalsh``: for a NaN on the diagonal it
+    returns zeros, which gave ``D = 0`` (#787).
     """
+    if not _finite(coarse, fine):
+        return math.nan
     difference = coarse - fine
     difference = (difference + difference.mH) / 2
     return float(0.5 * torch.linalg.eigvalsh(difference).abs().sum(dim=-1).max().item())
@@ -1116,8 +1137,9 @@ def _doubling_count(
     and returns the first count at which a third of
     ``distance(F_(n/2), F_n)`` (by default the largest ``|F_(n/2) − F_n|``)
     is at most ``tol``; ``RuntimeError`` when an estimate
-    above ``tol`` is more than half of the one before (``step_count``,
-    Raises).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
+    above ``tol`` is more than half of the one before, or is not finite
+    (``step_count``, Raises; ``distance`` returns NaN for a run that is not
+    finite).  :meth:`~hqnn_forge.rydberg.RydbergFeatureMap.step_count` passes
     its whole chain of segments and registers as ``features``, and
     :meth:`~hqnn_forge.encoding.AnalogRydbergLayer.step_count` the layer's
     chain of pulse segments (#769), or its states with ``target="state"``
@@ -1157,6 +1179,10 @@ def _chunked_doubling_count(
     :func:`_doubling_count` with the trace distance.
     The maximum over chunks of each chunk's largest ``D`` is the largest over
     the samples, so the result does not depend on the chunks beyond rounding.
+    A chunk whose ``D`` is NaN (a run that is not finite) makes the estimate
+    NaN, which :func:`_doubling` refuses; the chunks after it are not run.
+    Python's ``max`` would drop it, since every comparison with NaN is false
+    (#787).
     """
     if len(chunks) == 1:
         only = chunks[0]
@@ -1168,7 +1194,10 @@ def _chunked_doubling_count(
         largest = 0.0
         for chunk in chunks:
             coarse = states(chunk, steps)
-            largest = max(largest, _largest_trace_distance(coarse, states(chunk, 2 * steps)))
+            distance = _largest_trace_distance(coarse, states(chunk, 2 * steps))
+            if math.isnan(distance):  # max() would keep `largest`
+                return math.nan
+            largest = max(largest, distance)
         return largest / 3
 
     return _doubling(start, estimate, tol)
@@ -1180,12 +1209,22 @@ def _doubling(start: int, estimate: Callable[[int], float], tol: float) -> int:
 
     Returns ``2n`` for the first ``n`` of ``start, 2·start, …`` whose
     estimate is at most ``tol``; ``RuntimeError`` when an estimate above
-    ``tol`` is more than half of the one before (:func:`step_count`, Raises).
+    ``tol`` is more than half of the one before, or when an estimate is not
+    finite (:func:`step_count`, Raises).  The second is checked first:
+    ``nan <= tol`` and ``nan > previous / 2`` are both false, so a NaN would
+    double without end, as would an infinity against the first ``previous``
+    of ``inf`` (#787).
     """
     steps = start
     previous = math.inf
     while True:
         current = estimate(steps)
+        if not math.isfinite(current):
+            raise RuntimeError(
+                f"the two-run estimate is not finite at {2 * steps} steps ({current}, from "
+                f"the runs at {steps} and {2 * steps} steps): a run returned a state or a "
+                "feature that is not finite, so no count can be read from it."
+            )
         if current <= tol:
             return 2 * steps
         if current > previous / _SMALLEST_FALL:

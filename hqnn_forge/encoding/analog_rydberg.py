@@ -1060,7 +1060,12 @@ class AnalogRydbergLayer(TrainingNoiseMixin, nn.Module):
         RuntimeError
             If an estimate above ``tol`` is more than half of the one before,
             as for :func:`~hqnn_forge.rydberg.step_count`: the solver's
-            rounding has taken over.
+            rounding has taken over.  Also if an estimate is not finite,
+            naming the count it is for: with ``target="state"``, a run
+            returned a state with an entry that is NaN or infinite (#787).
+            With ``"features"`` :func:`~hqnn_forge.rydberg.readout` refuses
+            such a state first, with a ``ValueError`` (``rho must be
+            finite``).
 
         Notes
         -----
