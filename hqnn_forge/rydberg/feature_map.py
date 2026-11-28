@@ -1953,7 +1953,13 @@ class RydbergFeatureMap:
             ``"features"`` nor ``"state"``.
         RuntimeError
             If an estimate above ``tol`` is more than half of the one before,
-            as for ``step_count``: the solver's rounding has taken over.
+            as for ``step_count``: the solver's rounding has taken over.  Also
+            if an estimate is not finite, naming the count it is for: with
+            ``target="state"``, a run returned a state with an entry that is
+            NaN or infinite, in any chunk (#787).  With ``"features"``
+            :func:`~hqnn_forge.rydberg.readout` refuses such a state first,
+            with a ``ValueError`` (``rho must be finite``); its estimate is
+            not finite only for a finite state whose features overflow.
 
         Notes
         -----

@@ -25,13 +25,13 @@ from __future__ import annotations
 
 import math
 from functools import reduce
-from typing import get_args
+from typing import Any, Literal, get_args
 
 import numpy as np
 import pytest
 import torch
 
-from hqnn_forge.encoding import AnalogRydbergLayer
+from hqnn_forge.encoding import AnalogRydbergLayer, analog_rydberg
 from hqnn_forge.models import (
     HybridBinaryClassifier,
     MulticlassHybridClassifier,
@@ -1385,3 +1385,46 @@ class TestTheChainOfSegments:
         layer = self.build(self.CASES[0], 1)
         with pytest.raises(TypeError, match="positional"):
             layer.step_count(self.X_IN[:, :2], 1e-6, "state")  # type: ignore[misc]
+
+    @pytest.mark.parametrize("target", ["features", "state"])
+    def test_a_nan_population_raises(
+        self, monkeypatch: pytest.MonkeyPatch, target: Literal["features", "state"]
+    ) -> None:
+        """
+        A non-finite estimate raises, naming the count (#787): ``ρ_00`` (the
+        population of ``|g…g⟩``) of the last sample made NaN in every run, so
+        the estimate at ``2n₀`` (``n₀`` from the hand-built ``H_k``) is the
+        first, and no run beyond it is made.  Before #787 the state target
+        did not name a count: ``eigvalsh`` does not carry a NaN on the
+        diagonal through (here it failed to converge).  The features never
+        get an estimate:
+        ``readout`` refuses the state at the first run, as it did before.
+        """
+        case = self.CASES[0]
+        x = self.X_IN[:, : case[0]]
+        layer = self.build(case, 1)
+        start = self.starting_count(layer, x)
+        real = analog_rydberg._final_density_matrix
+        runs: list[int | None] = []
+
+        def poisoned(
+            pulse: Any, inputs: torch.Tensor, weights: torch.Tensor, *rest: Any
+        ) -> torch.Tensor:
+            if pulse.n_steps > 2 * start:
+                pytest.fail(
+                    f"step_count went on to {pulse.n_steps} steps on a non-finite estimate"
+                )
+            runs.append(pulse.n_steps)
+            rho = real(pulse, inputs, weights, *rest).clone()
+            rho[-1, 0, 0] = math.nan
+            return rho
+
+        monkeypatch.setattr(analog_rydberg, "_final_density_matrix", poisoned)
+        if target == "features":
+            with pytest.raises(ValueError, match="rho must be finite"):
+                layer.step_count(x, tol=1e-6, target=target)
+            assert runs == [start]
+            return
+        with pytest.raises(RuntimeError, match=rf"not finite at {2 * start} steps"):
+            layer.step_count(x, tol=1e-6, target=target)
+        assert runs == [start, 2 * start]
