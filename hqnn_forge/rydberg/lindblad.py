@@ -952,7 +952,8 @@ def step_count(
         ``target="state"``, a run of ``evolve`` returned a state with an
         entry that is NaN or infinite (#787).  With ``"features"``
         :func:`readout` refuses such a state first, with a ``ValueError``
-        (``rho must be finite``).
+        (``rho must be finite``); its estimate is not finite only for a
+        finite state whose features overflow.
 
     Notes
     -----

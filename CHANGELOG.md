@@ -982,9 +982,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AnalogRydbergLayer.step_count(..., target="state")` raise a `RuntimeError` naming the count
   when a run returns a state that is not finite, instead of returning a count or doubling
   without end: the trace distance of such a state is NaN, where `eigvalsh` had made a diagonal
-  NaN 0, and the maximum over several chunks keeps it, where it had dropped it. Not reachable
-  from validated inputs; the feature target already refused such a state in `readout` (#787,
-  #795)
+  NaN 0, and the maximum over several chunks keeps it, where it had dropped it. With
+  `target="features"` a NaN or infinite state is still refused by `readout` (`ValueError`), and
+  a finite state whose features overflow now raises the same `RuntimeError`, where it had
+  doubled without end. Not reachable from validated inputs (#787, #795)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

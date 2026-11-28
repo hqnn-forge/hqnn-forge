@@ -2864,6 +2864,45 @@ class TestStepCountRefusesANonFiniteEstimate:
             )
         assert runs == [10, 20, 40]
 
+    def test_step_count_raises_on_features_that_overflow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The feature target's own ``RuntimeError``: a finite state whose
+        features are not, so ``readout`` accepts it and ``_largest_difference``
+        sees the infinity.  Two uncoupled resonant atoms, ``H = Ω/2 (X⊗1 +
+        1⊗X)`` with energies ``−Ω, 0, 0, Ω``, so ``W = 2Ω``; with ``γ = Ω`` and
+        ``T = π/Ω``, ``n₀ = ceil(2T (W + 2γ/2)) = ceil(6π) = 19``.  From 38
+        steps on, ``ρ_22 = ρ_33 = 1e308`` (``|rg⟩``, ``|rr⟩``): every entry is
+        finite, but ``⟨n_0⟩ = ρ_22 + ρ_33 = 2e308`` is above the largest
+        ``float64`` (``1.8e308``) and comes out ``inf``.  The estimate from the
+        runs at 19 and 38 is the first to see it, so 38 is named.  Before #787
+        that estimate was ``inf`` against a first ``previous`` of ``inf``, and
+        the loop doubled without end.
+        """
+        omega = TestStepCount.OMEGA
+        real_evolve = lindblad.evolve
+        runs: list[int] = []
+
+        def overflowing(h: torch.Tensor, t: float, *, gamma: float, n_steps: int) -> torch.Tensor:
+            if n_steps > 38:
+                pytest.fail(f"step_count went on to {n_steps} steps on a non-finite estimate")
+            runs.append(n_steps)
+            rho = real_evolve(h, t, gamma=gamma, n_steps=n_steps).clone()
+            if n_steps >= 38:
+                rho[2, 2] = rho[3, 3] = 1e308
+                assert bool(torch.isfinite(rho).all())
+                assert readout(rho)[0].item() == math.inf
+            return rho
+
+        monkeypatch.setattr(lindblad, "evolve", overflowing)
+        atom = single_atom(omega, 0.0)
+        identity = torch.eye(2, dtype=C128)
+        hamiltonian = kron_all([atom, identity]) + kron_all([identity, atom])
+        with pytest.raises(RuntimeError, match="not finite at 38 steps"):
+            step_count(hamiltonian, math.pi / omega, gamma=omega, tol=1e-9, target="features")
+        assert runs == [19, 38]
+
     @pytest.mark.parametrize("chunk_size", [None, 1], ids=["one chunk", "three chunks"])
     @pytest.mark.parametrize("target", ["features", "state"])
     def test_the_maps_step_count_raises_on_a_nan_population(
