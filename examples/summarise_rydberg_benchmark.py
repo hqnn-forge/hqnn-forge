@@ -30,6 +30,9 @@ it each label (*Groups* below), it prints, as Markdown:
   floor and the rank-biserial effect.  **All comparisons of one group (one
   dataset, one label) form one Holm family**; an undefined test (every pair
   tied) counts as ``p = 1`` in it, as ``docs/methodology.md`` prescribes.
+  The device − ideal comparisons of ``--against`` (*Two runs on the same
+  folds* below) are a family of their own, never pooled with this one.  They
+  are not printed with this summary: ``--against`` prints them in its place.
 * **Mechanism**: the separation measures of arms A and B on the real rows
   of the training part (as the runner records them under ``"train"``),
   averaged over folds per grid point, and for each measure
@@ -121,10 +124,55 @@ does not have is the model without the option, not ``not recorded``: a line
 written before the option existed was computed without it, so the committed
 results, all of them ideal, summarise as before.
 
+**Two runs on the same folds** (``--against``, #784).  The last two guards
+keep an ideal run and a device run (the runner's ``--device aquila``) out of
+one row, so the two cannot be read as one input.  ``results --against IDEAL``
+compares them instead: ``results`` is the device run and ``IDEAL`` a second
+run of the same data, seeds and folds, and **every difference is ``results``
+− ``IDEAL``, device − ideal**, as the output's first line of each section
+names the two files.  An option rather than a second positional file
+because the positional file stays the one run that the script, without the
+option, summarises in every documented command, and the run that ``--against``
+names is the one subtracted from it.  With the option the script prints only
+this comparison; each file's own summary is the script on that file alone,
+unchanged, and ``--permutations`` and ``--seed`` (the mechanism table's) are
+not used.
+
+1. *Each file on its own* passes every guard above, with the messages above.
+   The measurement and the device model are checked per file, not across:
+   across the files they differ by design, and no line of one is pooled into
+   a row of the other.
+2. *Across the files*, before printing anything, the guards of #742 and #753
+   (:func:`_check_same_labels`, :func:`_check_same_folds`): a dataset of both
+   must have a ``label_bonds`` in common, and each group of both the same
+   ``data_sha256`` and ``n_splits`` and, per fold, the same ``test_idx``.  A
+   mismatch is a ``ValueError`` naming the group and the values found, for
+   the test sets the first fold that differs and every other.  Fold ``k`` is
+   the 0-based ``fold`` of a line; with the test sets equal, fold ``k`` of
+   one file is the same rows as fold ``k`` of the other, so pairing by ``k``
+   pairs scores of the same test rows.
+3. *Per group of both* (:func:`paired_comparisons`), with ``M^D_k`` and
+   ``M^I_k`` the test MCC of fold ``k`` in the device and the ideal file: for
+   every row in both (arm, head, arm A's geometry, grid point) the mean over
+   the folds of ``M^D_k − M^I_k``, and for every A − B cell (A's row and its
+   B row in both) the mean of ``[M^D_k(A) − M^D_k(B)] − [M^I_k(A) −
+   M^I_k(B)]``, each over the folds its rows have in both files, with the
+   exact two-sided Wilcoxon p-value of those differences and its floor, as
+   the summary's.  **All device − ideal comparisons of one group (its rows
+   and its A − B cells) form one Holm family**, an undefined test holding a
+   ``p = 1`` slot as above; it is not pooled with the family of either
+   file's own summary.  A row of one file only is listed under ``Rows of one
+   file only``, and a group (or dataset) of one file only gets a section
+   that says so; neither is compared, nor counts in a family.
+
 Usage::
 
     python examples/summarise_rydberg_benchmark.py \\
         docs/results/rydberg_features_benchmark.jsonl.xz
+
+    # device − ideal, paired by fold: the device run first, the ideal run after --against
+    python examples/summarise_rydberg_benchmark.py DEVICE.jsonl.xz \\
+        --against docs/results/rydberg_features_geometries_control_chain.jsonl.xz
 
 The committed file is the runner's JSONL, xz-compressed; the runner's
 ``read_records``, which this script reads through, opens a ``.xz`` path with
@@ -831,25 +879,43 @@ def comparisons(
                 if base_key in rows:
                     out.append({"kind": "arm − baseline", "a": key, "b": base_key})
     for c in out:
-        a, b = _paired(rows[c["a"]], rows[c["b"]])
-        c["n_folds"] = int(a.size)
-        c["mean_diff"] = float(np.mean(a - b))
-        try:
-            res = wilcoxon_signed_rank(a, b)
-        except ValueError:  # every pair tied: undefined
-            c.update(p=math.nan, n_pairs=0, min_p=math.nan, effect=0.0)
-        else:
-            c.update(
-                p=res.p_value,
-                n_pairs=res.n,
-                min_p=res.min_p_value,
-                effect=rank_biserial_correlation(a, b),
-            )
-    if out:
-        raw = np.array([1.0 if math.isnan(c["p"]) else c["p"] for c in out])
-        for c, adjusted in zip(out, holm_correction(raw), strict=True):
-            c["p_holm"] = float(adjusted)
+        _signed_rank_test(c, *_paired(rows[c["a"]], rows[c["b"]]))
+    _adjust_holm(out)
     return out
+
+
+def _signed_rank_test(c: dict[str, Any], a: FloatArray, b: FloatArray) -> None:
+    """
+    Fill the comparison ``c`` with the paired test of ``a`` against ``b``, one value per fold.
+
+    ``n_folds`` is the number of pairs and ``mean_diff`` the mean of ``a − b``; ``p``,
+    ``n_pairs``, ``min_p`` and ``effect`` are the exact two-sided p-value, the pairs left
+    after ties (``|a − b| <= 1e-12`` dropped), the p-value's floor and the rank-biserial
+    correlation of :func:`wilcoxon_signed_rank` and :func:`rank_biserial_correlation`.  With
+    every pair tied the test is undefined: ``p`` and ``min_p`` are NaN, ``n_pairs`` 0 and the
+    effect 0.
+    """
+    c["n_folds"] = int(a.size)
+    c["mean_diff"] = float(np.mean(a - b))
+    try:
+        res = wilcoxon_signed_rank(a, b)
+    except ValueError:  # every pair tied: undefined
+        c.update(p=math.nan, n_pairs=0, min_p=math.nan, effect=0.0)
+    else:
+        c.update(
+            p=res.p_value,
+            n_pairs=res.n,
+            min_p=res.min_p_value,
+            effect=rank_biserial_correlation(a, b),
+        )
+
+
+def _adjust_holm(family: Sequence[dict[str, Any]]) -> None:
+    """``p_holm`` of every comparison of ``family``, one Holm family; an undefined p counts as 1."""
+    if family:
+        raw = np.array([1.0 if math.isnan(c["p"]) else c["p"] for c in family])
+        for c, adjusted in zip(family, holm_correction(raw), strict=True):
+            c["p_holm"] = float(adjusted)
 
 
 def comparison_table(
@@ -987,6 +1053,19 @@ def mechanism_tables(
     return "\n".join(out)
 
 
+def _check_groups(by_group: Mapping[GroupKey, Sequence[Mapping[str, Any]]]) -> None:
+    """
+    Every guard of one input on each group of :func:`groups`: one data, one split, and per
+    row one measurement and one device model (:func:`_check_one_fingerprint`,
+    :func:`_check_one_split`, :func:`_check_one_measurement`, :func:`_check_one_realism`).
+    """
+    for (dataset, bonds), recs in by_group.items():
+        _check_one_fingerprint(dataset, recs, bonds)
+        _check_one_split(dataset, recs, bonds)
+        _check_one_measurement(dataset, recs, bonds)
+        _check_one_realism(dataset, recs, bonds)
+
+
 def summarise(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -1023,11 +1102,7 @@ def summarise(
         printed then.
     """
     by_group = groups(records)
-    for (dataset, bonds), recs in by_group.items():
-        _check_one_fingerprint(dataset, recs, bonds)
-        _check_one_split(dataset, recs, bonds)
-        _check_one_measurement(dataset, recs, bonds)
-        _check_one_realism(dataset, recs, bonds)
+    _check_groups(by_group)
     labels_per_dataset: dict[str, int] = {}
     for dataset, _ in by_group:
         labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1
@@ -1132,6 +1207,318 @@ def summarise(
     return "\n".join(sections)
 
 
+# ---------------------------------------------------------------------------
+# Two runs on the same folds (#784)
+# ---------------------------------------------------------------------------
+
+#: The tail of every refusal of :func:`_check_same_labels` and :func:`_check_same_folds`.
+_FOLDS_ADVICE = (
+    "Device − ideal is paired by fold index, so both runs must rest on the same data and the "
+    "same folds; run the second with the data, seeds and --folds of the first."
+)
+
+
+def _check_same_labels(
+    device: Mapping[GroupKey, Sequence[Mapping[str, Any]]],
+    ideal: Mapping[GroupKey, Sequence[Mapping[str, Any]]],
+    names: tuple[str, str],
+) -> None:
+    """
+    Refuse a dataset of both runs unless they have a label, ``label_bonds``, in common.
+
+    ``device`` and ``ideal`` are the :func:`groups` of the two files, ``names`` their names
+    in that order.  A group is matched with the group of the same ``(dataset,
+    label_bonds)`` in the other file; a dataset none of whose label bonds is in both files,
+    e.g. a control written before #738 (``not recorded``) against one since (the chain's
+    bonds), would have no group to pair with, though it is the same data, so it is refused,
+    naming the dataset and each file's label bonds in the order first seen.  A dataset with
+    a label in common is not refused: its groups of both are checked and compared, and a
+    group of one file only (e.g. the ring control beside the chain control in one file, its
+    own data and folds, #741) is listed by :func:`summarise_paired` as not compared, as is a
+    dataset of one file only.
+    """
+    labels: tuple[dict[str, list[Bonds | None]], dict[str, list[Bonds | None]]] = ({}, {})
+    for found, by_group in zip(labels, (device, ideal), strict=True):
+        for dataset, bonds in by_group:
+            found.setdefault(dataset, []).append(bonds)
+    for dataset, in_device in labels[0].items():
+        in_ideal = labels[1].get(dataset)
+        if in_ideal is not None and not set(in_device) & set(in_ideal):
+            raise ValueError(
+                f"dataset {dataset!r} has label_bonds {'; '.join(map(_bonds_text, in_device))} "
+                f"in `{names[0]}` but {'; '.join(map(_bonds_text, in_ideal))} in `{names[1]}`."
+                f"  {_FOLDS_ADVICE}"
+            )
+
+
+def _fold_test_sets(records: Iterable[Mapping[str, Any]]) -> dict[int, tuple[int, ...] | None]:
+    """
+    ``{fold: test_idx}`` of one group, each ``test_idx`` sorted, ``None`` if not recorded.
+
+    For a group that passed :func:`_check_one_split`, whose lines of one fold all have the
+    same test set.
+    """
+    out: dict[int, tuple[int, ...] | None] = {}
+    for r in records:
+        idx = r.get("test_idx")
+        out[int(r["fold"])] = None if idx is None else tuple(sorted(int(i) for i in idx))
+    return out
+
+
+def _check_same_folds(
+    dataset: str,
+    bonds: Bonds | None,
+    device: Sequence[Mapping[str, Any]],
+    ideal: Sequence[Mapping[str, Any]],
+    names: tuple[str, str],
+) -> None:
+    """
+    Refuse the two runs' lines of one group unless they rest on the same rows and folds.
+
+    ``device`` and ``ideal`` are the lines of group ``(dataset, bonds)`` in each file, each
+    through :func:`_check_groups` already, so each has one ``data_sha256``, one ``n_splits``
+    and one ``test_idx`` per fold.  The guards of #742 and #753, applied across the files:
+
+    1. both must have the same ``data_sha256``, and then
+    2. the same ``n_splits``; otherwise the ``ValueError`` names the group and each file's
+       value;
+    3. for every fold ``k`` that both record, the same ``test_idx``; otherwise it names the
+       group, the first such fold (the smallest ``k``) with each file's test set
+       (:func:`_test_set_text`), and every such fold.
+
+    As within one file, a field a file does not record is one more value, ``not recorded``:
+    it differs from every recorded one, and two files that both lack it pass, as one file
+    without it does.  A fold that only one file has is not compared here; its lines have no
+    pair (:func:`paired_comparisons` pairs the folds both have).
+    """
+    label = "" if bonds is None else f" (label_bonds {_bonds_text(bonds)})"
+
+    def text(value: Any) -> str:
+        return "not recorded" if value is None else str(value)
+
+    for field, in_device, in_ideal in (
+        (
+            "data_sha256",
+            next(iter(data_fingerprints(device))),
+            next(iter(data_fingerprints(ideal))),
+        ),
+        ("n_splits", device[0].get("n_splits"), ideal[0].get("n_splits")),
+    ):
+        if in_device != in_ideal:
+            raise ValueError(
+                f"dataset {dataset!r}{label} has {field} {text(in_device)} in `{names[0]}` but "
+                f"{text(in_ideal)} in `{names[1]}`.  {_FOLDS_ADVICE}"
+            )
+    sets = (_fold_test_sets(device), _fold_test_sets(ideal))
+    differing = sorted(k for k in set(sets[0]) & set(sets[1]) if sets[0][k] != sets[1][k])
+    if differing:
+        k = differing[0]
+        raise ValueError(
+            f"dataset {dataset!r}{label} has other test sets (test_idx) in the two runs for "
+            f"fold {k}: {_test_set_text(sets[0][k])} in `{names[0]}`, "
+            f"{_test_set_text(sets[1][k])} in `{names[1]}` (folds that differ: {differing}).  "
+            f"{_FOLDS_ADVICE}"
+        )
+
+
+def _gaps(
+    rows: Mapping[Key, Mapping[int, Mapping[str, Any]]], a: Key, b: Key, folds: Sequence[int]
+) -> FloatArray:
+    """``MCC_k(a) − MCC_k(b)`` of one run's rows ``a`` and ``b``, per fold ``k`` of ``folds``."""
+    return np.array([rows[a][k]["mcc"] - rows[b][k]["mcc"] for k in folds], dtype=np.float64)
+
+
+def paired_comparisons(
+    device: Mapping[Key, Mapping[int, Mapping[str, Any]]],
+    ideal: Mapping[Key, Mapping[int, Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """
+    Device − ideal of every row and of every A − B difference of one group, paired by fold.
+
+    ``device`` and ``ideal`` are the :func:`_rows` of the same group in the two files, which
+    rest on the same folds (:func:`_check_same_folds`): fold ``k``, the 0-based ``fold`` of
+    a line, holds the same test rows in both.  With ``M^D_k(r)`` and ``M^I_k(r)`` the test
+    MCC (dimensionless, in [−1, 1]) of row ``r`` in fold ``k`` of each run:
+
+    * ``"row"``, for every row ``r`` (arm, head, arm A's geometry, grid point) in both:
+      ``d_k = M^D_k(r) − M^I_k(r)`` over the folds ``K`` of ``r`` in both runs; positive
+      where the device run scores higher.
+    * ``"A − B"``, for every arm A row ``a`` in both whose B row ``b`` (same head and γ/Ω,
+      as in :func:`comparisons`) is in both too:
+      ``d_k = [M^D_k(a) − M^D_k(b)] − [M^I_k(a) − M^I_k(b)]``, the device run's A − B
+      difference minus the ideal run's, over the folds ``K`` of all four rows; positive
+      where A − B is larger in the device run.
+
+    Each comparison gets the same statistics as one of :func:`comparisons`
+    (:func:`_signed_rank_test` of the device values ``x_k`` against the ideal values
+    ``y_k``, ``d_k = x_k − y_k``): ``n_folds = |K|``, ``mean_diff = (1/|K|) Σ_k d_k``, the
+    exact two-sided Wilcoxon signed-rank p-value of the ``d_k`` with ``|d_k| <= 1e-12``
+    dropped, its floor and the rank-biserial effect; with every ``d_k`` zero the test is
+    undefined.  Rows first, then the A − B cells, each in the order of the scores table.
+    **All of them form one Holm family** (:func:`_adjust_holm`, an undefined test holding a
+    ``p = 1`` slot), of this group and these two runs alone: it is not pooled with the
+    family of either file's own summary (:func:`comparisons`).  A row of one run only is in
+    neither kind; :func:`summarise_paired` lists it.
+    """
+    out: list[dict[str, Any]] = []
+    both = sorted(set(device) & set(ideal), key=_sort)
+    for key in both:
+        c: dict[str, Any] = {"kind": "row", "a": key}
+        _signed_rank_test(c, *_paired(device[key], ideal[key]))
+        out.append(c)
+    for key in both:
+        arm, head, _, _, gamma = key
+        b_key: Key = ("B", head, None, None, gamma)
+        if arm != "A" or b_key not in device or b_key not in ideal:
+            continue
+        folds = sorted(set(device[key]) & set(device[b_key]) & set(ideal[key]) & set(ideal[b_key]))
+        c = {"kind": "A − B", "a": key, "b": b_key}
+        _signed_rank_test(c, _gaps(device, key, b_key, folds), _gaps(ideal, key, b_key, folds))
+        out.append(c)
+    _adjust_holm(out)
+    return out
+
+
+def paired_row_table(family: Sequence[Mapping[str, Any]]) -> str:
+    """The ``"row"`` comparisons of :func:`paired_comparisons`, one per row, with arm A's geometry."""
+    lines = [
+        "| row | n | mean ΔMCC | W pairs | p (exact) | p floor | p Holm | r_rb |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for c in family:
+        if c["kind"] != "row":
+            continue
+        mark = " **✓**" if c["p_holm"] <= ALPHA else ""
+        lines.append(
+            f"| {_label(c['a'], geometry=True)} | {c['n_folds']} | {c['mean_diff']:+.3f} | "
+            f"{c['n_pairs']} | {_p(c['p'])} | {_p(c['min_p'])} | {_p(c['p_holm'])}{mark} | "
+            f"{c['effect']:+.2f} |"
+        )
+    return "\n".join(lines)
+
+
+def summarise_paired(
+    device: Sequence[Mapping[str, Any]],
+    ideal: Sequence[Mapping[str, Any]],
+    *,
+    names: tuple[str, str] = ("device", "ideal"),
+    long: bool = False,
+) -> str:
+    """
+    Device − ideal of two runs on the same folds, as Markdown; ``long`` adds one row per A − B test.
+
+    ``device`` and ``ideal`` are the lines of the two files (the positional file and
+    ``--against``), ``names`` their names in the same order; every difference is
+    ``device − ideal``.  One section per group of either file, the device file's in the
+    order first seen, then those of the ideal file only, each headed as in
+    :func:`summarise`.  A group of both gets one Holm family (:func:`paired_comparisons`):
+    the table of every row, the rows of one file only (listed, not compared), and the A − B
+    differences of differences as ``V/Ω`` × ``γ/Ω`` grids per head (and per geometry, with
+    several).  A group of one file only says so and is not compared.
+
+    Raises
+    ------
+    ValueError
+        If either file fails a guard of :func:`summarise` on its own (:func:`_check_groups`),
+        with that guard's message; if a dataset of both has no ``label_bonds`` in common
+        (:func:`_check_same_labels`); or if a group of both has another ``data_sha256``,
+        ``n_splits`` or, for a fold, ``test_idx`` in the two files
+        (:func:`_check_same_folds`), naming the group, the first such fold and the values
+        found.  Nothing is printed then.
+    """
+    by_group = (groups(device), groups(ideal))
+    for found in by_group:
+        _check_groups(found)
+    _check_same_labels(*by_group, names)
+    for key, recs in by_group[0].items():
+        if key in by_group[1]:
+            _check_same_folds(*key, recs, by_group[1][key], names)
+    keys = list(by_group[0]) + [k for k in by_group[1] if k not in by_group[0]]
+    labels_per_dataset: dict[str, int] = {}
+    for dataset, _ in keys:
+        labels_per_dataset[dataset] = labels_per_dataset.get(dataset, 0) + 1
+    sections: list[str] = []
+    for key in keys:
+        dataset, bonds = key
+        heading = (
+            dataset
+            if labels_per_dataset[dataset] == 1
+            else f"{dataset}, label_bonds {_bonds_text(bonds)}"
+        )
+        sections += [f"## {heading}", ""]
+        if not all(key in found for found in by_group):
+            only = names[0] if key in by_group[0] else names[1]
+            sections += [f"In `{only}` only, not compared.", ""]
+            continue
+        rows = (_rows(by_group[0][key]), _rows(by_group[1][key]))
+        family = paired_comparisons(*rows)
+        m = len(family)
+        compared = [c["a"] for c in family if c["kind"] == "row"]
+        heads = sorted({k[1] for k in compared if k[0] == "A"})
+        found_geometries = _geometries(compared)
+        per_geometry: list[tuple[str | None, str]] = (
+            [(g, f", geometry `{g}`") for g in found_geometries]
+            if len(found_geometries) > 1
+            else [(None, "")]
+        )
+        only_one: list[str] = []
+        for name, mine, other in ((names[0], *rows), (names[1], *rows[::-1])):
+            alone = sorted(set(mine) - set(other), key=_sort)
+            listed = ", ".join(_label(k, geometry=True) for k in alone)
+            only_one.append(
+                f"in `{name}` {len(alone)} ({listed})" if alone else f"in `{name}` none"
+            )
+        sections += [
+            (
+                f"Device − ideal, paired by fold: `{names[0]}` − `{names[1]}` (`--against`).  "
+                f"Folds per comparison: {sorted({c['n_folds'] for c in family})}.  Holm "
+                f"family: {m} comparisons at α = {ALPHA}, first threshold α/m = "
+                f"{_p(ALPHA / m) if m else '–'}; its own, apart from the family of each "
+                "file's summary."
+            ),
+            "",
+            (
+                "Rows of one file only, not compared: "
+                f"{', '.join(only_one) if set(rows[0]) ^ set(rows[1]) else 'none'}."
+            ),
+            "",
+            "### Every row: device − ideal (MCC, paired by fold)",
+            "",
+            (
+                f"Mean ΔMCC = `{names[0]}` − `{names[1]}` over the folds (exact two-sided "
+                "Wilcoxon p and Holm-adjusted p; ✓: at most α)."
+            ),
+            "",
+            paired_row_table(family),
+            "",
+            "### A − B: device − ideal (MCC, paired by fold)",
+            "",
+            (
+                f"Mean Δ(A − B) = (A − B in `{names[0]}`) − (A − B in `{names[1]}`) over the "
+                "folds (Holm-adjusted p; ✓: at most α)."
+            ),
+            "",
+        ]
+        if not heads:
+            sections += ["(no arm A rows in both runs)", ""]
+        for head in heads:
+            for shape, named in per_geometry:
+                sections += [
+                    f"Head `{head}`{named}:",
+                    "",
+                    grid_table(family, "A − B", head, ("B", head, None, None, None), shape),
+                    "",
+                ]
+        if long:
+            sections += [
+                "### Every A − B comparison",
+                "",
+                comparison_table(family, "A − B", geometry=True),
+                "",
+            ]
+    return "\n".join(sections)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1150,10 +1537,28 @@ def main(
         action="store_true",
         help="also print every comparison as a row: n, W pairs, exact p, its floor, effect",
     )
-    args = parser.parse_args(argv)
-    text = summarise(
-        read(args.results), permutations=args.permutations, seed=args.seed, long=args.long
+    parser.add_argument(
+        "--against",
+        type=Path,
+        metavar="IDEAL",
+        help=(
+            "a second run of the same data, seeds and folds (the ideal model): print, in place "
+            "of the summary, results − IDEAL of every row and every A − B difference, paired "
+            "by fold, as a Holm family of its own"
+        ),
     )
+    args = parser.parse_args(argv)
+    if args.against is None:
+        text = summarise(
+            read(args.results), permutations=args.permutations, seed=args.seed, long=args.long
+        )
+    else:
+        text = summarise_paired(
+            read(args.results),
+            read(args.against),
+            names=(str(args.results), str(args.against)),
+            long=args.long,
+        )
     print(text)
     return text
 

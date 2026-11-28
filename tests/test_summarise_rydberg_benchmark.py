@@ -1372,3 +1372,345 @@ def test_the_runner_and_the_summariser_read_one_model_alike() -> None:
         2,
         ("global-drive", None, 0.0503, bench.AQUILA_RAMP_SEGMENTS),
     )
+
+
+# ---------------------------------------------------------------------------
+# Two runs on the same folds (#784)
+# ---------------------------------------------------------------------------
+
+#: The tail of every refusal of :func:`summary._check_same_folds`.
+FOLDS_ADVICE = (
+    "Device − ideal is paired by fold index, so both runs must rest on the same data and the "
+    "same folds; run the second with the data, seeds and --folds of the first."
+)
+
+
+def _ideal_and_device(shift: float = 0.02) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    An ideal run of :func:`_records` on the 13 folds of :func:`_partition`, and the same run
+    under the Aquila detection error whose arm A at ``V/Ω = 1`` scores ``shift`` more in
+    every fold.  Both carry one fingerprint, as two runs of the same data and seeds do.
+    """
+    lines = _with_split([{**r, "data_sha256": "f" * 64} for r in _records()], 13, _partition)
+    ideal = _modelled(lines)
+    device = _modelled(lines, readout_error=[0.01, 0.08])
+    for r in device:
+        if r["arm"] == "A" and r["v_over_omega"] == 1.0:
+            r["mcc"] += shift
+    return ideal, device
+
+
+def _paired_main(device: list[dict[str, Any]], ideal: list[dict[str, Any]], *extra: str) -> str:
+    """``main`` on ``device.jsonl --against ideal.jsonl``, each path read as the given lines."""
+    files = {"device.jsonl": device, "ideal.jsonl": ideal}
+    text: str = summary.main(
+        ["device.jsonl", "--against", "ideal.jsonl", *extra], read=lambda p: files[str(p)]
+    )
+    return text
+
+
+def _paired_refusal(
+    device: list[dict[str, Any]],
+    ideal: list[dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> str:
+    """The message ``main`` refuses ``device --against ideal`` with, after printing nothing."""
+    with pytest.raises(ValueError) as caught:
+        _paired_main(device, ideal)
+    assert capsys.readouterr() == ("", "")
+    return str(caught.value)
+
+
+def test_a_shift_of_one_row_pairs_to_the_shift_at_the_exact_floor(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    The closed-form limit.  Arm A at ``V/Ω = 1`` scores 0.02 more in each of the 13 folds of
+    the device run; every other line is the ideal run's.  That row's device − ideal is +0.02
+    in every fold, and so is the A − B difference of differences there (B is unchanged): won
+    in all 13 folds, the exact two-sided p is the floor ``2/2^13``.  The other 4 rows (A at
+    ``V/Ω = 10``, B, C with both heads) and the other A − B cell differ by 0 in every fold,
+    an undefined test that holds a ``p = 1`` slot: one Holm family of ``m = 5 + 2 = 7``,
+    whose two smallest p become ``max(7 · 2/2^13, 6 · 2/2^13) = 7 · 2/2^13``.  The same two
+    runs read as one input stay refused by #775's guard.
+    """
+    ideal, device = _ideal_and_device()
+    assert "2 device models" in _refusal(ideal + device, capsys)
+    floor = 2 / 2**N_FOLDS
+    family = summary.paired_comparisons(summary._rows(device), summary._rows(ideal))
+    assert [c["kind"] for c in family].count("row") == 5
+    assert [c["kind"] for c in family].count("A − B") == 2
+    won = [c for c in family if c["a"][3] == 1.0]
+    assert [c["kind"] for c in won] == ["row", "A − B"]
+    for c in won:
+        assert (c["n_folds"], c["n_pairs"]) == (N_FOLDS, N_FOLDS)
+        assert c["mean_diff"] == pytest.approx(0.02, abs=1e-12)
+        assert (c["p"], c["min_p"], c["effect"]) == pytest.approx((floor, floor, 1.0))
+        assert c["p_holm"] == pytest.approx(7 * floor)
+    for c in family:
+        if c["a"][3] != 1.0:
+            assert math.isnan(c["p"]) and c["mean_diff"] == 0.0 and c["p_holm"] == 1.0
+    text = _paired_main(device, ideal, "--long")
+    assert capsys.readouterr().out == text + "\n"
+    assert text.startswith("## toy\n")
+    assert (
+        "Device − ideal, paired by fold: `device.jsonl` − `ideal.jsonl` (`--against`).  "
+        "Folds per comparison: [13].  Holm family: 7 comparisons at α = 0.05, first threshold "
+        "α/m = 0.0071; its own, apart from the family of each file's summary."
+    ) in text
+    assert "Rows of one file only, not compared: none." in text
+    assert (
+        "| A/linear chain V/Ω=1 γ/Ω=0 | 13 | +0.020 | 13 | 2.44e-04 | 2.44e-04 | "
+        "0.0017 **✓** | +1.00 |"
+    ) in text
+    assert "| C/mlp | 13 | +0.000 | 0 | – | – | 1.0000 | +0.00 |" in text
+    # The A − B grid of the difference of differences, and its row with --long.
+    assert "| 1 | +0.020 (0.0017 ✓) |" in text
+    assert "| 10 | +0.000 (1.0000) |" in text
+    assert (
+        "| A/linear chain V/Ω=1 γ/Ω=0 | B/linear γ/Ω=0 | 13 | +0.020 | 13 | 2.44e-04 | "
+        "2.44e-04 | 0.0017 **✓** | +1.00 |"
+    ) in text
+
+
+def _six_folds(arm: str, mccs: list[float], **where: Any) -> list[dict[str, Any]]:
+    """The lines of one row over 6 folds of 36 rows (fold ``k``: rows ``k, k + 6, …``)."""
+    return [
+        {
+            **_line(arm, "linear", k, mcc, **where),
+            "data_sha256": "e" * 64,
+            "n_splits": 6,
+            "test_idx": list(range(k, 36, 6)),
+        }
+        for k, mcc in enumerate(mccs)
+    ]
+
+
+def test_a_hand_built_difference_and_its_exact_p_are_reproduced() -> None:
+    """
+    Six folds, typed in by hand.  Per fold ``k``, ideal ``A_k`` and ``B_k``; the device run
+    adds ``e = 0.1`` to B and ``d_k + e`` to A, with ``d = (0.05, −0.01, 0.03, 0.04, 0.02,
+    0.06)``.  Then
+
+    * row A: device − ideal is ``d_k + 0.1 > 0`` in every fold, mean ``0.1 + 0.19/6``, and
+      ``p = 2/2^6`` (every sign positive);
+    * row B: ``0.1`` in every fold, every ``|d|`` tied: ``W+`` is the maximum, ``p = 2/2^6``;
+    * A − B: ``(A − B)_device − (A − B)_ideal = d_k``, mean ``0.19/6``; the ranks of ``|d|``
+      are 5, 1, 3, 4, 2, 6 and the one negative has rank 1, so ``W− = 1``, and of the 2^6
+      sign patterns two have ``W− ≤ 1`` (none negative, rank 1 negative):
+      ``p = 2 · 2/2^6 = 1/16``, which ``scipy.stats.wilcoxon`` (exact) gives too.
+
+    Holm over the three, ``(1/32, 1/32, 1/16)``: ``3/32``, ``max(3/32, 2/32)``,
+    ``max(3/32, 1/16)``, so ``3/32`` each.  The device run's extra row (A at ``V/Ω = 10``)
+    and the ideal run's C row are listed, not compared, and not in the family; the ideal
+    run's second dataset, ``other``, is listed as a group of one file only.  Swapping the
+    files negates every mean and keeps every p.
+    """
+    from scipy import stats  # a core dependency (pyproject.toml): never skipped
+
+    ideal_a = [0.30, 0.25, 0.40, 0.35, 0.20, 0.45]
+    ideal_b = [0.10, 0.12, 0.08, 0.11, 0.09, 0.10]
+    d = [0.05, -0.01, 0.03, 0.04, 0.02, 0.06]
+    device_a = [a + dk + 0.1 for a, dk in zip(ideal_a, d, strict=True)]
+    device_b = [b + 0.1 for b in ideal_b]
+    ideal = (
+        _six_folds("A", ideal_a, v=1.0, gamma=0.0)
+        + _six_folds("B", ideal_b, v=1.0, gamma=0.0)
+        + _six_folds("C", [0.2] * 6)
+        + [{**r, "dataset": "other"} for r in _six_folds("C", [0.2] * 6)]
+    )
+    device = (
+        _six_folds("A", device_a, v=1.0, gamma=0.0)
+        + _six_folds("A", ideal_a, v=10.0, gamma=0.0)
+        + _six_folds("B", device_b, v=1.0, gamma=0.0)
+    )
+    assert stats.wilcoxon(d, method="exact").pvalue == pytest.approx(1 / 16)
+    assert stats.wilcoxon([x + 0.1 for x in d], method="exact").pvalue == pytest.approx(1 / 32)
+    device_rows = summary._rows(summary.groups(device)[("toy", None)])
+    ideal_rows = summary._rows(summary.groups(ideal)[("toy", None)])
+    family = summary.paired_comparisons(device_rows, ideal_rows)
+    found = {(c["kind"], c["a"][0]): c for c in family}
+    assert sorted(found) == [("A − B", "A"), ("row", "A"), ("row", "B")]
+    expected = {
+        ("row", "A"): (0.1 + 0.19 / 6, 1 / 32),
+        ("row", "B"): (0.1, 1 / 32),
+        ("A − B", "A"): (0.19 / 6, 1 / 16),
+    }
+    for kind, (mean, p) in expected.items():
+        assert found[kind]["n_folds"] == 6
+        assert found[kind]["mean_diff"] == pytest.approx(mean, abs=1e-12)
+        assert found[kind]["p"] == pytest.approx(p)
+        assert found[kind]["p_holm"] == pytest.approx(3 / 32)
+    raw = np.array([c["p"] for c in family])
+    assert [c["p_holm"] for c in family] == pytest.approx(_holm(raw).tolist())
+    # Paired by the fold index, not by the order of the lines: the device file read backwards
+    # (fold 5 first) gives the same family.  Paired by position, row A would differ by 0.31,
+    # 0.07, 0.09, 0.18, 0.14 and 0, and its p would be 2/2^5.
+    backwards = summary._rows(summary.groups(device[::-1])[("toy", None)])
+    assert summary.paired_comparisons(backwards, ideal_rows) == family
+    swapped = summary.paired_comparisons(ideal_rows, device_rows)
+    for c, s in zip(family, swapped, strict=True):
+        assert (s["kind"], s["a"]) == (c["kind"], c["a"])
+        assert s["mean_diff"] == pytest.approx(-c["mean_diff"], abs=1e-12)
+        assert s["p"] == pytest.approx(c["p"])
+    text = summary.summarise_paired(device, ideal, names=("aquila.jsonl", "ideal.jsonl"))
+    assert text.startswith("## toy\n") and "Holm family: 3 comparisons" in text
+    assert (
+        "Rows of one file only, not compared: in `aquila.jsonl` 1 (A/linear chain V/Ω=10 "
+        "γ/Ω=0), in `ideal.jsonl` 1 (C/linear)."
+    ) in text
+    assert (
+        "| A/linear chain V/Ω=1 γ/Ω=0 | 6 | +0.132 | 6 | 0.0312 | 0.0312 | 0.0938 | +1.00 |"
+    ) in text
+    assert "| 1 | +0.032 (0.0938) |" in text
+    assert text.endswith("## other\n\nIn `ideal.jsonl` only, not compared.\n")
+
+
+CHAIN = [[0, 1], [1, 2], [2, 3]]
+RING = [[0, 1], [1, 2], [2, 3], [3, 0]]
+
+
+def _labelled(lines: list[dict[str, Any]], bonds: list[list[int]]) -> list[dict[str, Any]]:
+    """``lines`` as one label's group: its ``label_bonds`` and a fingerprint of its own."""
+    return [{**r, "label_bonds": bonds, "data_sha256": str(len(bonds)) * 64} for r in lines]
+
+
+def test_a_label_of_one_file_only_is_listed_and_the_shared_label_is_compared(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    #741 across the files: an ideal file holds the chain and the ring control of one
+    dataset, the device file the chain control only.  The chain groups pair; the ring group
+    is a group of one file only, listed and not compared, not a reason to refuse the chain.
+    Chain, 6 folds: the device run adds ``0.01 k`` (``k = 1, …, 6``) to A in fold ``k − 1``
+    and leaves B as it is.  Row A and its A − B cell: every ``d_k > 0``, mean ``0.035``,
+    ``p = 2/2^6 = 1/32``; row B differs by 0 in every fold, undefined, a ``p = 1`` slot.
+    Holm over ``(1/32, 1/32, 1)``: ``3/32``, ``max(3/32, 2/32)``, ``1``.  A dataset with no
+    label in both files, and a group of both on other data, are still refused.
+    """
+    ideal_a = [0.30, 0.25, 0.40, 0.35, 0.20, 0.45]
+    ideal_b = [0.10, 0.12, 0.08, 0.11, 0.09, 0.10]
+    shift = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
+    device_a = [a + s for a, s in zip(ideal_a, shift, strict=True)]
+    chain_ideal = _labelled(
+        _six_folds("A", ideal_a, v=1.0, gamma=0.0) + _six_folds("B", ideal_b, v=1.0, gamma=0.0),
+        CHAIN,
+    )
+    chain_device = _labelled(
+        _six_folds("A", device_a, v=1.0, gamma=0.0) + _six_folds("B", ideal_b, v=1.0, gamma=0.0),
+        CHAIN,
+    )
+    ring = _labelled(
+        _six_folds("A", [0.5] * 6, v=1.0, gamma=0.0)
+        + _six_folds("B", [0.4] * 6, v=1.0, gamma=0.0),
+        RING,
+    )
+    ideal = chain_ideal + ring
+    text = _paired_main(chain_device, ideal)
+    assert capsys.readouterr().out == text + "\n"
+    chain_heading = f"## toy, label_bonds {CHAIN}\n\n"
+    ring_section = f"## toy, label_bonds {RING}\n\nIn `ideal.jsonl` only, not compared.\n"
+    assert text.startswith(chain_heading) and text.endswith(ring_section)
+    chain_text = text[: -len(ring_section)]
+    assert "Holm family: 3 comparisons" in chain_text
+    assert "Rows of one file only, not compared: none." in chain_text
+    assert (
+        "| A/linear chain V/Ω=1 γ/Ω=0 | 6 | +0.035 | 6 | 0.0312 | 0.0312 | 0.0938 | +1.00 |"
+    ) in chain_text
+    assert "| B/linear γ/Ω=0 | 6 | +0.000 | 0 | – | – | 1.0000 | +0.00 |" in chain_text
+    assert "| 1 | +0.035 (0.0938) |" in chain_text
+    family = summary.paired_comparisons(summary._rows(chain_device), summary._rows(chain_ideal))
+    found = {(c["kind"], c["a"][0]): c for c in family}
+    for kind in (("row", "A"), ("A − B", "A")):
+        assert found[kind]["mean_diff"] == pytest.approx(0.035, abs=1e-12)
+        assert (found[kind]["p"], found[kind]["p_holm"]) == pytest.approx((1 / 32, 3 / 32))
+    assert math.isnan(found[("row", "B")]["p"]) and found[("row", "B")]["p_holm"] == 1.0
+    # Read the other way round, the ring group is the device file's only.
+    assert _paired_main(ideal, chain_device).endswith(
+        f"## toy, label_bonds {RING}\n\nIn `device.jsonl` only, not compared.\n"
+    )
+    capsys.readouterr()
+    # No label in both files: refused, naming the dataset and each file's labels.
+    assert _paired_refusal(ring, chain_device, capsys) == (
+        f"dataset 'toy' has label_bonds {RING} in `device.jsonl` but {CHAIN} in "
+        "`ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+    # The chain group of both on other data: refused, naming the group, ring or no ring.
+    other = [{**r, "data_sha256": "0" * 64} for r in chain_device]
+    assert _paired_refusal(other, ideal, capsys) == (
+        f"dataset 'toy' (label_bonds {CHAIN}) has data_sha256 {'0' * 64} in `device.jsonl` "
+        f"but {'3' * 64} in `ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+
+
+def test_runs_on_other_folds_are_refused_naming_the_group_and_the_first_fold(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    #742 and #753 across the two files: the device run swaps rows 68 and 72 between folds 3
+    and 7 (as another ``--seed`` of a UCI dataset draws), each file one split on its own.
+    Refused before anything is printed, naming the group, the first fold whose test sets
+    differ with each file's set, and every such fold.  Another ``n_splits``, another
+    ``data_sha256`` (or none) and other ``label_bonds`` are refused too, and so is a file
+    that fails a guard of its own (#775), with that guard's message.
+    """
+    ideal, device = _ideal_and_device()
+    swap = {3: [3, 16, 29, 42, 55, 72], 7: [7, 20, 33, 46, 59, 68]}
+    reshuffled = _with_split(device, 13, lambda k: swap.get(k, _partition(k)))
+    assert summary.summarise(reshuffled, permutations=99)
+    assert _paired_refusal(reshuffled, ideal, capsys) == (
+        "dataset 'toy' has other test sets (test_idx) in the two runs for fold 3: "
+        f"6 rows, sha256 {_digest(swap[3])} in `device.jsonl`, "
+        f"6 rows, sha256 {_digest(_partition(3))} in `ideal.jsonl` "
+        "(folds that differ: [3, 7]).  " + FOLDS_ADVICE
+    )
+    fifteen = _with_split(device, 15, lambda k: list(range(k, 78, 15)))
+    assert _paired_refusal(fifteen, ideal, capsys) == (
+        "dataset 'toy' has n_splits 15 in `device.jsonl` but 13 in `ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+    other_data = [{**r, "data_sha256": "0" * 64} for r in device]
+    assert _paired_refusal(other_data, ideal, capsys) == (
+        f"dataset 'toy' has data_sha256 {'0' * 64} in `device.jsonl` but {'f' * 64} in "
+        "`ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+    unrecorded = [{k: v for k, v in r.items() if k != "data_sha256"} for r in device]
+    assert "data_sha256 not recorded in `device.jsonl` but " in _paired_refusal(
+        unrecorded, ideal, capsys
+    )
+    chain = [{**r, "label_bonds": [[0, 1], [1, 2], [2, 3]]} for r in device]
+    assert _paired_refusal(chain, ideal, capsys) == (
+        "dataset 'toy' has label_bonds [[0, 1], [1, 2], [2, 3]] in `device.jsonl` but not "
+        "recorded in `ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+    mixed = device + _modelled(device, readout_error=[0.02, 0.05])
+    assert "2 device models" in _paired_refusal(mixed, ideal, capsys)
+    assert "2 device models" in _paired_refusal(ideal, mixed, capsys)
+
+
+def test_the_committed_control_against_a_shifted_copy_pairs_every_row() -> None:
+    """
+    The chain control of #737 against a copy of itself whose arm A lines score 0.01 more:
+    every row of the file is in both and compared, and every A row has its A − B cell.  A's
+    rows and cells differ by +0.01 in all 13 folds (p at the floor ``2/2^13``), every other
+    row by 0 (undefined, ``p = 1``), so each Holm p of A is ``min(1, m · 2/2^13)``, ``m`` the
+    rows plus the cells.  Without ``--against`` the file still summarises to its pinned
+    digest (:func:`test_the_committed_geometry_results_summarise`).
+    """
+    name, *_ = GEOMETRY_RESULTS[0]
+    ideal = summary.read_records(ROOT / "docs/results" / name)
+    device = [{**r, "mcc": r["mcc"] + 0.01} if r["arm"] == "A" else r for r in ideal]
+    rows = summary._rows(ideal)
+    family = summary.paired_comparisons(summary._rows(device), rows)
+    assert [c["kind"] for c in family].count("row") == len(rows)
+    assert [c["kind"] for c in family].count("A − B") == sum(1 for k in rows if k[0] == "A")
+    m = len(family)
+    for c in family:
+        if c["a"][0] == "A":
+            assert c["mean_diff"] == pytest.approx(0.01, abs=1e-12)
+            assert (c["n_folds"], c["p"]) == (N_FOLDS, pytest.approx(2 / 2**N_FOLDS))
+            assert c["p_holm"] == pytest.approx(min(1.0, m * 2 / 2**N_FOLDS))
+        else:
+            assert c["mean_diff"] == 0.0 and math.isnan(c["p"]) and c["p_holm"] == 1.0
+    text = summary.summarise_paired(device, ideal)
+    assert f"Holm family: {m} comparisons" in text
+    assert "Rows of one file only, not compared: none." in text
