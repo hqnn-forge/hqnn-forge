@@ -144,7 +144,7 @@ not used.
    a row of the other.
 2. *Across the files*, before printing anything, the guards of #742 and #753
    (:func:`_check_same_labels`, :func:`_check_same_folds`): a dataset of both
-   must have the same ``label_bonds`` in each, and each group the same
+   must have a ``label_bonds`` in common, and each group of both the same
    ``data_sha256`` and ``n_splits`` and, per fold, the same ``test_idx``.  A
    mismatch is a ``ValueError`` naming the group and the values found, for
    the test sets the first fold that differs and every other.  Fold ``k`` is
@@ -1224,15 +1224,18 @@ def _check_same_labels(
     names: tuple[str, str],
 ) -> None:
     """
-    Refuse a dataset of both runs unless it has the same labels, ``label_bonds``, in each.
+    Refuse a dataset of both runs unless they have a label, ``label_bonds``, in common.
 
     ``device`` and ``ideal`` are the :func:`groups` of the two files, ``names`` their names
     in that order.  A group is matched with the group of the same ``(dataset,
-    label_bonds)`` in the other file; a dataset whose label bonds differ between the files,
+    label_bonds)`` in the other file; a dataset none of whose label bonds is in both files,
     e.g. a control written before #738 (``not recorded``) against one since (the chain's
     bonds), would have no group to pair with, though it is the same data, so it is refused,
-    naming the dataset and each file's label bonds in the order first seen.  A dataset of
-    one file only is not refused: :func:`summarise_paired` lists it as not compared.
+    naming the dataset and each file's label bonds in the order first seen.  A dataset with
+    a label in common is not refused: its groups of both are checked and compared, and a
+    group of one file only (e.g. the ring control beside the chain control in one file, its
+    own data and folds, #741) is listed by :func:`summarise_paired` as not compared, as is a
+    dataset of one file only.
     """
     labels: tuple[dict[str, list[Bonds | None]], dict[str, list[Bonds | None]]] = ({}, {})
     for found, by_group in zip(labels, (device, ideal), strict=True):
@@ -1240,7 +1243,7 @@ def _check_same_labels(
             found.setdefault(dataset, []).append(bonds)
     for dataset, in_device in labels[0].items():
         in_ideal = labels[1].get(dataset)
-        if in_ideal is not None and set(in_device) != set(in_ideal):
+        if in_ideal is not None and not set(in_device) & set(in_ideal):
             raise ValueError(
                 f"dataset {dataset!r} has label_bonds {'; '.join(map(_bonds_text, in_device))} "
                 f"in `{names[0]}` but {'; '.join(map(_bonds_text, in_ideal))} in `{names[1]}`."
@@ -1417,7 +1420,7 @@ def summarise_paired(
     ------
     ValueError
         If either file fails a guard of :func:`summarise` on its own (:func:`_check_groups`),
-        with that guard's message; if a dataset has other ``label_bonds`` in the two files
+        with that guard's message; if a dataset of both has no ``label_bonds`` in common
         (:func:`_check_same_labels`); or if a group of both has another ``data_sha256``,
         ``n_splits`` or, for a fold, ``test_idx`` in the two files
         (:func:`_check_same_folds`), naming the group, the first such fold and the values

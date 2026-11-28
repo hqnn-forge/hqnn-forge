@@ -1566,6 +1566,83 @@ def test_a_hand_built_difference_and_its_exact_p_are_reproduced() -> None:
     assert text.endswith("## other\n\nIn `ideal.jsonl` only, not compared.\n")
 
 
+CHAIN = [[0, 1], [1, 2], [2, 3]]
+RING = [[0, 1], [1, 2], [2, 3], [3, 0]]
+
+
+def _labelled(lines: list[dict[str, Any]], bonds: list[list[int]]) -> list[dict[str, Any]]:
+    """``lines`` as one label's group: its ``label_bonds`` and a fingerprint of its own."""
+    return [{**r, "label_bonds": bonds, "data_sha256": str(len(bonds)) * 64} for r in lines]
+
+
+def test_a_label_of_one_file_only_is_listed_and_the_shared_label_is_compared(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    #741 across the files: an ideal file holds the chain and the ring control of one
+    dataset, the device file the chain control only.  The chain groups pair; the ring group
+    is a group of one file only, listed and not compared, not a reason to refuse the chain.
+    Chain, 6 folds: the device run adds ``0.01 k`` (``k = 1, …, 6``) to A in fold ``k − 1``
+    and leaves B as it is.  Row A and its A − B cell: every ``d_k > 0``, mean ``0.035``,
+    ``p = 2/2^6 = 1/32``; row B differs by 0 in every fold, undefined, a ``p = 1`` slot.
+    Holm over ``(1/32, 1/32, 1)``: ``3/32``, ``max(3/32, 2/32)``, ``1``.  A dataset with no
+    label in both files, and a group of both on other data, are still refused.
+    """
+    ideal_a = [0.30, 0.25, 0.40, 0.35, 0.20, 0.45]
+    ideal_b = [0.10, 0.12, 0.08, 0.11, 0.09, 0.10]
+    shift = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
+    device_a = [a + s for a, s in zip(ideal_a, shift, strict=True)]
+    chain_ideal = _labelled(
+        _six_folds("A", ideal_a, v=1.0, gamma=0.0) + _six_folds("B", ideal_b, v=1.0, gamma=0.0),
+        CHAIN,
+    )
+    chain_device = _labelled(
+        _six_folds("A", device_a, v=1.0, gamma=0.0) + _six_folds("B", ideal_b, v=1.0, gamma=0.0),
+        CHAIN,
+    )
+    ring = _labelled(
+        _six_folds("A", [0.5] * 6, v=1.0, gamma=0.0)
+        + _six_folds("B", [0.4] * 6, v=1.0, gamma=0.0),
+        RING,
+    )
+    ideal = chain_ideal + ring
+    text = _paired_main(chain_device, ideal)
+    assert capsys.readouterr().out == text + "\n"
+    chain_heading = f"## toy, label_bonds {CHAIN}\n\n"
+    ring_section = f"## toy, label_bonds {RING}\n\nIn `ideal.jsonl` only, not compared.\n"
+    assert text.startswith(chain_heading) and text.endswith(ring_section)
+    chain_text = text[: -len(ring_section)]
+    assert "Holm family: 3 comparisons" in chain_text
+    assert "Rows of one file only, not compared: none." in chain_text
+    assert (
+        "| A/linear chain V/Ω=1 γ/Ω=0 | 6 | +0.035 | 6 | 0.0312 | 0.0312 | 0.0938 | +1.00 |"
+    ) in chain_text
+    assert "| B/linear γ/Ω=0 | 6 | +0.000 | 0 | – | – | 1.0000 | +0.00 |" in chain_text
+    assert "| 1 | +0.035 (0.0938) |" in chain_text
+    family = summary.paired_comparisons(summary._rows(chain_device), summary._rows(chain_ideal))
+    found = {(c["kind"], c["a"][0]): c for c in family}
+    for kind in (("row", "A"), ("A − B", "A")):
+        assert found[kind]["mean_diff"] == pytest.approx(0.035, abs=1e-12)
+        assert (found[kind]["p"], found[kind]["p_holm"]) == pytest.approx((1 / 32, 3 / 32))
+    assert math.isnan(found[("row", "B")]["p"]) and found[("row", "B")]["p_holm"] == 1.0
+    # Read the other way round, the ring group is the device file's only.
+    assert _paired_main(ideal, chain_device).endswith(
+        f"## toy, label_bonds {RING}\n\nIn `device.jsonl` only, not compared.\n"
+    )
+    capsys.readouterr()
+    # No label in both files: refused, naming the dataset and each file's labels.
+    assert _paired_refusal(ring, chain_device, capsys) == (
+        f"dataset 'toy' has label_bonds {RING} in `device.jsonl` but {CHAIN} in "
+        "`ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+    # The chain group of both on other data: refused, naming the group, ring or no ring.
+    other = [{**r, "data_sha256": "0" * 64} for r in chain_device]
+    assert _paired_refusal(other, ideal, capsys) == (
+        f"dataset 'toy' (label_bonds {CHAIN}) has data_sha256 {'0' * 64} in `device.jsonl` "
+        f"but {'3' * 64} in `ideal.jsonl`.  " + FOLDS_ADVICE
+    )
+
+
 def test_runs_on_other_folds_are_refused_naming_the_group_and_the_first_fold(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
