@@ -983,7 +983,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when a run returns a state that is not finite, instead of returning a count or doubling
   without end: the trace distance of such a state is NaN, where `eigvalsh` had made a diagonal
   NaN 0, and the maximum over several chunks keeps it, where it had dropped it. Not reachable
-  from validated inputs; the feature target already refused such a state in `readout` (#787)
+  from validated inputs; the feature target already refused such a state in `readout` (#787,
+  #795)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
