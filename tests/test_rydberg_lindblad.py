@@ -2835,8 +2835,9 @@ class TestStepCountRefusesANonFiniteEstimate:
         ``±Ω/2``), so ``n₀ = ceil(2 · π/Ω · 3Ω/2) = ceil(3π) = 10``.  The
         solver returns a NaN ``⟨n⟩`` from 40 steps on, so the estimate from
         the runs at 20 and 40 is the first to see it: 40 is named, and no run
-        beyond it is made.  Before #787 the state target returned 40
-        (``eigvalsh`` made the NaN 0).  The features are refused by
+        beyond it is made.  Before #787 the state target went on past 40:
+        ``eigvalsh`` does not carry a NaN on the diagonal through (here it
+        gave finite eigenvalues).  The features are refused by
         ``readout`` at the same run (:attr:`REFUSALS`).
         """
         real_evolve = lindblad.evolve
@@ -2913,7 +2914,8 @@ class TestStepCountRefusesANonFiniteEstimate:
     ) -> None:
         """
         ``RydbergFeatureMap.step_count`` with ramp and jitter, three samples,
-        ``⟨n_0⟩`` of the last made NaN in every run: the estimate at ``2n₀``
+        ``ρ_00`` (the population of ``|g…g⟩``) of the last made NaN in every
+        run: the estimate at ``2n₀``
         (``n₀`` from the Hamiltonians, typed-in segments) is the first, and it
         is named.  With three chunks the NaN is in the last one.  The features
         are refused by ``readout`` at the first run (:attr:`REFUSALS`).

@@ -1391,11 +1391,13 @@ class TestTheChainOfSegments:
         self, monkeypatch: pytest.MonkeyPatch, target: Literal["features", "state"]
     ) -> None:
         """
-        A non-finite estimate raises, naming the count (#787): ``⟨n_0⟩`` of
-        the last sample made NaN in every run, so the estimate at ``2n₀``
-        (``n₀`` from the hand-built ``H_k``) is the first, and no run beyond
-        it is made.  Before #787 the state target returned ``2n₀``
-        (``eigvalsh`` made the NaN 0).  The features never get an estimate:
+        A non-finite estimate raises, naming the count (#787): ``ρ_00`` (the
+        population of ``|g…g⟩``) of the last sample made NaN in every run, so
+        the estimate at ``2n₀`` (``n₀`` from the hand-built ``H_k``) is the
+        first, and no run beyond it is made.  Before #787 the state target
+        did not name a count: ``eigvalsh`` does not carry a NaN on the
+        diagonal through (here it failed to converge).  The features never
+        get an estimate:
         ``readout`` refuses the state at the first run, as it did before.
         """
         case = self.CASES[0]
