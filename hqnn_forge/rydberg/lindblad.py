@@ -1112,7 +1112,7 @@ def _largest_trace_distance(coarse: torch.Tensor, fine: torch.Tensor) -> float:
     The difference is made exactly Hermitian first (it is to rounding), since
     ``eigvalsh`` reads one triangle only.  NaN when an entry of either run is
     not finite, without calling ``eigvalsh``: it does not carry a NaN on the
-    diagonal through, but returns finite eigenvalues (zeros for a diagonal
+    diagonal through, but returns finite eigenvalues (zeros for a 2×2 diagonal
     difference, which gave ``D = 0``) or fails to converge (#787).
     """
     if not _finite(coarse, fine):
